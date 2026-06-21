@@ -2525,8 +2525,7 @@ f32 rotate_racer_in_water(Object *obj, Object_Racer *racer, Vec3f *pos, s8 arg3,
 }
 
 // https://decomp.me/scratch/SlvtN
-#ifdef NON_EQUIVALENT
-// Plane physics, largest function in DKR.
+// Note: This is the non-equivalent C implementation of plane physics (func_80049794). It may contain logic discrepancies.
 void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *racer) {
     s32 pad5;
     s32 pad7;
@@ -2724,9 +2723,9 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     gCurrentRacerTransform.z_position = 0.0f;
     gCurrentRacerTransform.scale = 1.0f;
     mtxf_from_transform((MtxF *) &sp60, &gCurrentRacerTransform);
-    mtxf_transform_point(&sp60, 0.0f, 0.0f, 1.0f, &racer->ox1, &racer->oy1, &racer->oz1);
-    mtxf_transform_point(&sp60, 1.0f, 0.0f, 0.0f, &racer->ox3, &racer->oy3, &racer->oz3);
-    mtxf_transform_point(&sp60, 0.0f, 1.0f, 0.0f, &racer->ox2, &racer->oy2, &racer->oz2);
+    mtxf_transform_point((float (*)[4]) &sp60, 0.0f, 0.0f, 1.0f, &racer->ox1, &racer->oy1, &racer->oz1);
+    mtxf_transform_point((float (*)[4]) &sp60, 1.0f, 0.0f, 0.0f, &racer->ox3, &racer->oy3, &racer->oz3);
+    mtxf_transform_point((float (*)[4]) &sp60, 0.0f, 1.0f, 0.0f, &racer->ox2, &racer->oy2, &racer->oz2);
     if (racer->approachTarget == NULL) {
         apply_plane_tilt_anim(updateRate, obj, racer);
     }
@@ -2734,7 +2733,8 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     if ((var_v0 == PLAYER_COMPUTER) && (gCurrentPlayerIndex != PLAYER_COMPUTER)) {
         gCurrentRacerHandlingStat = 1.4f;
     }
-    var_f20 = sqrtf((obj->x_velocity * obj->x_velocity) + (obj->z_velocity * obj->z_velocity) +
+    var_f20 = sqrtf((obj->x_velocity * obj->x_velocity) +
+                    (obj->z_velocity * obj->z_velocity) +
                     (obj->y_velocity * obj->y_velocity)) -
               2.0;
     if (racer->vehicleID >= VEHICLE_BOSSES) {
@@ -3303,8 +3303,8 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     gCurrentRacerTransform.z_position = 0.0f;
     gCurrentRacerTransform.scale = 1.0f;
     mtxf_from_inverse_transform((MtxF *) &sp60, &gCurrentRacerTransform);
-    mtxf_transform_point(&sp60, obj->x_velocity, obj->y_velocity, obj->z_velocity, &racer->lateral_velocity,
-                         &racer->unk34, &racer->velocity);
+    mtxf_transform_point((float (*)[4]) &sp60, obj->x_velocity, obj->y_velocity, obj->z_velocity,
+                         &racer->lateral_velocity, &racer->unk34, &racer->velocity);
     if (obj->attachPoints != NULL && obj->attachPoints->count >= 3) {
         temp_v0_obj = obj->attachPoints->obj[2];
         temp_v0_obj->trans.rotation.y_rotation = 0x4000;
@@ -3377,9 +3377,6 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
         func_800230D0(obj, racer);
     }
 }
-#else
-#pragma GLOBAL_ASM("asm/nonmatchings/racer/func_80049794.s")
-#endif
 
 /**
  * When turning left and right in a plane, apply the tilting animation to the character.
@@ -8136,7 +8133,6 @@ void set_position_goal_from_path(UNUSED Object *obj, Object_Racer *racer, f32 *x
 }
 
 // https://decomp.me/scratch/uUmRq
-#ifdef NON_MATCHING
 void func_80059208(Object *obj, Object_Racer *racer, s32 updateRate) {
     UNUSED f32 pad;
     UNUSED f32 pad2;
@@ -8272,9 +8268,6 @@ void func_80059208(Object *obj, Object_Racer *racer, s32 updateRate) {
     }
     racer->unk1BC += (s32) diffY;
 }
-#else
-#pragma GLOBAL_ASM("asm/nonmatchings/racer/func_80059208.s")
-#endif
 
 /**
  * Writes a human readable time to the passed arguments.

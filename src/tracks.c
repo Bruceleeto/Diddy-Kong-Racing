@@ -1352,7 +1352,6 @@ void set_skydome_visbility(s32 renderSky) {
 }
 
 // https://decomp.me/scratch/E1DFy
-#ifdef NON_MATCHING
 // This function creates the flashy sky effect in the wizpig 2 race.
 void trackbg_render_flashy(void) {
     Triangle *tris;
@@ -1526,9 +1525,6 @@ void trackbg_render_flashy(void) {
     gTrackVtxPtr = verts;
     gTrackTriPtr = tris;
 }
-#else
-#pragma GLOBAL_ASM("asm/nonmatchings/tracks/trackbg_render_flashy.s")
-#endif
 
 /**
  * Instead of drawing the skydome with textures, draw a solid coloured background.
