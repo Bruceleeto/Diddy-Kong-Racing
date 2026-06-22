@@ -14,16 +14,8 @@ extern s32 gPrevRNGSeed;
 extern s16 gSineTable[];
 extern s16 gArcTanTable[];
 
-/**
- * All of the functions below are handwritten assembly. Because of this, matching C code is impossible.
- * Nonmatching is not, so functionally equivalent C code can be here to replace these handwritten functions in
- * nonmatching builds. Variables cannot be declared here because of the way they're aligned, so they have to stay in an
- * assembly file.
- */
-
 /******************************/
 
-#ifdef NON_MATCHING
 /**
  * Zero out the interrupt mask. This stops this thread
  * from being interrupted by others, letting you safely
@@ -36,11 +28,7 @@ u32 interrupts_disable(void) {
         return __osDisableInt();
     }
 }
-#else
-GLOBAL_ASM("asm/math_util/disable_interrupts.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Set the interrupt mask to whichever flags were given.
  * Required after zeroing them out, otherwise system
@@ -52,11 +40,7 @@ void interrupts_enable(u32 flags) {
         __osRestoreInt(flags);
     }
 }
-#else
-GLOBAL_ASM("asm/math_util/enable_interrupts.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Sets the global interrupt disable flag to allow enabling or disabling hardware interrupts for debugging.
  * Official Name: setIntDisFlag
@@ -64,11 +48,7 @@ GLOBAL_ASM("asm/math_util/enable_interrupts.s")
 void set_gIntDisFlag(u8 setting) {
     gIntDisFlag = setting;
 }
-#else
-GLOBAL_ASM("asm/math_util/set_gIntDisFlag.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Gets the global interrupt disable flag, which indicates whether hardware interrupts are enabled or disabled.
  * Official Name: getIntDisFlag
@@ -76,11 +56,7 @@ GLOBAL_ASM("asm/math_util/set_gIntDisFlag.s")
 u8 get_gIntDisFlag(void) {
     return gIntDisFlag;
 }
-#else
-GLOBAL_ASM("asm/math_util/get_gIntDisFlag.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Converts a Mtx (fixed-point matrix with split integer and fractional parts)
  * into a 4×4 matrix of 32-bit signed integers, where each element is in 16.16 fixed-point format.
@@ -102,11 +78,7 @@ UNUSED void mtx_to_mtxs(Mtx *m, MtxS *mi) {
         }
     }
 }
-#else
-GLOBAL_ASM("asm/math_util/mtx_to_mtxs.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Converts a 4×4 matrix of 32-bit floating-point values into a 4×4 matrix
  * of 32-bit signed fixed-point values in 16.16 format.
@@ -120,11 +92,7 @@ void mtxf_to_mtxs(MtxF *mf, MtxS *mi) {
         }
     }
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_to_mtxs.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Transforms a 3D vector using a 4×4 transformation matrix.
  * Perfect match to libultra compiled guMtxXFMF using -O3 -mips2
@@ -135,11 +103,7 @@ void mtxf_transform_point(float mf[4][4], float x, float y, float z, float *ox, 
     *oy = mf[0][1] * x + mf[1][1] * y + mf[2][1] * z + mf[3][1];
     *oz = mf[0][2] * x + mf[1][2] * y + mf[2][2] * z + mf[3][2];
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_transform_point.s")
-#endif
 
-#ifdef NON_EQUIVALENT
 /**
  * Transforms a direction vector in 3D space using the rotation part of a 4×4 matrix.
  * This function multiplies the input vector by the upper-left 3×3 portion of the matrix mf,
@@ -152,11 +116,7 @@ void mtxf_transform_dir(MtxF *mf, Vec3f *in, Vec3f *out) {
     out->f[1] = (in->f[0] * (*mf)[0][1]) + (in->f[1] * *mf[1][1]) + (in->f[2] * (*mf)[2][1]);
     out->f[2] = (in->f[0] * (*mf)[0][2]) + (in->f[1] * *mf[1][2]) + (in->f[2] * (*mf)[2][2]);
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_transform_dir.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Multiplies two 4×4 matrices.
  * Official name: mathMtxCatF
@@ -178,11 +138,7 @@ void mtxf_mul(MtxF *mat1, MtxF *mat2, MtxF *output) {
         }
     }
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_mul.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Converts a floating-point 4×4 matrix to a Mtx fixed-point matrix.
  * Official name: mathMtxF2L
@@ -204,9 +160,6 @@ void mtxf_to_mtx(MtxF *mf, Mtx *m) {
         }
     }
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_to_mtx.s")
-#endif
 
 /* Official Name: mathSeed */
 void set_rng_seed(s32 num) {
@@ -224,7 +177,6 @@ s32 get_rng_seed(void) {
     return gCurrentRNGSeed;
 }
 
-#ifdef NON_MATCHING
 /**
  * Generates a random integer within the inclusive range [min, max].
  * Official Name: mathRnd
@@ -238,11 +190,7 @@ s32 rand_range(s32 min, s32 max) {
 
     return (u32) (gCurrentRNGSeed - min) % (max - min + 1) + min;
 }
-#else
-GLOBAL_ASM("asm/math_util/rng.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Reflects a vector across a given normal, such that the sum of the input and output vectors
  * lies in the direction of the normal (i.e. symmetric reflection).
@@ -258,11 +206,7 @@ void vec3s_reflect(Vec3s *vec, Vec3s *n) {
     vec[1].y = ((proj_x2 * n->y) >> 13) - vec->y;
     vec[1].z = ((proj_x2 * n->z) >> 13) - vec->x; //!@bug: should be vec->z
 }
-#else
-GLOBAL_ASM("asm/math_util/vec3s_reflect.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Converts an Mtx matrix (used by the RSP) into a 4x4 fixed-point matrix,
  * where each element is in 16.16 fixed-point format.
@@ -281,11 +225,7 @@ UNUSED void mtx_to_mtxs_2(Mtx *m, MtxS *mi) {
         *ptr++ = (*ai++ << 16) | (*af++);
     }
 }
-#else
-GLOBAL_ASM("asm/math_util/mtx_to_mtxs_2.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Transforms a 3D short vector using a 4×4 fixed-point (16.16) matrix.
  * The result is written back into the input vector.
@@ -299,11 +239,7 @@ UNUSED void mtxs_transform_point(MtxS *mi, Vec3s *vec) {
     vec->y = ((*mi)[0][1] * x + (*mi)[1][1] * y + (*mi)[2][1] * z + (*mi)[3][1]) >> 16;
     vec->z = ((*mi)[0][2] * x + (*mi)[1][2] * y + (*mi)[2][2] * z + (*mi)[3][2]) >> 16;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxs_transform_point.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Transforms a direction vector in 3D space using a 4×4 fixed-point (16.16) matrix.
  * The result is written back into the input vector.
@@ -317,11 +253,7 @@ void mtxs_transform_dir(MtxS *mi, Vec3s *vec) {
     vec->y = ((*mi)[0][1] * x + (*mi)[1][1] * y + (*mi)[2][1] * z) >> 16;
     vec->z = ((*mi)[0][2] * x + (*mi)[1][2] * y + (*mi)[2][2] * z) >> 16;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxs_transform_dir.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Converts an ObjectTransform into a transformation matrix and writes it to `mtx`.
  * The matrix is built by applying the following operations in order:
@@ -365,11 +297,7 @@ void mtxf_from_transform(MtxF *mtx, ObjectTransform *trans) {
     (*mtx)[3][2] = trans->z_position;
     (*mtx)[3][3] = 1.0f;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_from_transform.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Scales the Y axis of the given 4×4 transformation matrix by the specified factor.
  * If this is a model matrix, the operation is equivalent to stretching or squashing
@@ -381,11 +309,7 @@ void mtxf_scale_y(MtxF *input, f32 scale) {
     (*input)[1][1] *= scale;
     (*input)[1][2] *= scale;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_scale_y.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Modifies the matrix by translating its position along the local Y axis.
  * If this is a model matrix, the operation is equivalent to moving the model
@@ -397,11 +321,7 @@ void mtxf_translate_y(MtxF *input, f32 offset) {
     (*input)[3][1] += (*input)[1][1] * offset;
     (*input)[3][2] += (*input)[1][2] * offset;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_translate_y.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Writes an inverse transformation matrix to `mtx` based on a pre-inverted `ObjectTransform`.
  * This is used to convert world-space coordinates to local object-space coordinates.
@@ -453,13 +373,7 @@ void mtxf_from_inverse_transform(MtxF *mtx, ObjectTransform *trans) {
         ((*mtx)[0][2] * trans->x_position) + ((*mtx)[1][2] * trans->y_position) + ((*mtx)[2][2] * trans->z_position);
     (*mtx)[3][3] = 1.0f;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_from_inverse_transform.s")
-#endif
 
-GLOBAL_ASM("asm/math_util/func_80070058.s")
-
-#ifdef NON_MATCHING
 /**
  * Builds a billboard matrix for a sprite that always faces the camera.
  *
@@ -491,11 +405,7 @@ void mtxf_billboard(MtxF *mtx, s32 angle, f32 scale, f32 scaleY) {
     (*mtx)[3][2] = 0;
     (*mtx)[3][3] = 1.0f;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_billboard.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Rotates the given vector in place.
  * Note: The rotation angles are specified in reverse order, but the applied rotation is standard
@@ -532,11 +442,7 @@ void vec3s_rotate_rpy(RPYAngles *rotation, Vec3s *vec) {
     vec->y = y2;
     vec->z = z2;
 }
-#else
-GLOBAL_ASM("asm/math_util/vec3s_rotate_rpy.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Rotates the given vector according to the specified rotation angles.
  * The result is written back into the same vector.
@@ -574,11 +480,7 @@ void vec3f_rotate(Vec3s *rotation, Vec3f *vec) {
     vec->y = y2;
     vec->z = z2;
 }
-#else
-GLOBAL_ASM("asm/math_util/vec3f_rotate.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Applies the inverse of the object rotation using the specified angles.
  * Unlike the standard roll-pitch-yaw (Z-X-Y) order, this applies the angles in yaw-pitch-roll (Y-X-Z) order.
@@ -618,11 +520,7 @@ void vec3f_rotate_ypr(Vec3s *rotation, Vec3f *vec) {
     vec->y = y2;
     vec->z = z2;
 }
-#else
-GLOBAL_ASM("asm/math_util/vec3f_rotate_ypr.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Rotates a forward-facing vector by the given pitch and yaw angles.
  * Only the Z component of the input vector is considered; X and Y components are ignored.
@@ -649,11 +547,7 @@ void vec3f_rotate_py(Vec3s *rotation, Vec3f *vec) {
     vec->y = -z * sinY;
     vec->z = z * cosX * cosY;
 }
-#else
-GLOBAL_ASM("asm/math_util/vec3f_rotate_py.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Determines whether a point lies inside a triangle, projected onto the XZ plane.
  * Points lying exactly on the triangle's edges are not considered inside.
@@ -677,11 +571,7 @@ s32 tri2d_xz_contains_point(s32 x, s32 z, Vec3s *pointA, Vec3s *pointB, Vec3s *p
     var_a1 = (x - cX) * (aZ - cZ) - (aX - cX) * (z - cZ) >= 0;
     return var_a3 == var_a2 && var_a2 == var_a1;
 }
-#else
-GLOBAL_ASM("asm/math_util/tri2d_xz_contains_point.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Creates a translation matrix that moves points by the specified (x, y, z) offset.
  * Official Name: mathTranslateMtx
@@ -703,11 +593,7 @@ void mtxf_from_translation(MtxF *mtx, f32 x, f32 y, f32 z) {
     (*mtx)[3][1] = y;
     (*mtx)[3][2] = z;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_from_translation.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Creates a scaling matrix with the specified scale factors along the X, Y, and Z axes.
  * Official Name: mathScaleMtx
@@ -727,11 +613,7 @@ void mtxf_from_scale(MtxF *mtx, f32 scaleX, f32 scaleY, f32 scaleZ) {
     (*mtx)[2][2] = scaleZ;
     (*mtx)[3][3] = 1.0f;
 }
-#else
-GLOBAL_ASM("asm/math_util/mtxf_from_scale.s")
-#endif
 
-#ifdef NON_MATCHING
 // Blatantly stolen from SM64 :)
 static u16 atan2_lookup(f32 y, f32 x) {
     u16 ret;
@@ -747,7 +629,7 @@ static u16 atan2_lookup(f32 y, f32 x) {
 s32 atan2s(s32 xDelta, s32 zDelta) {
     u16 ret;
 
-    if (xDelta == 0 && yDelta == 0) {
+    if (xDelta == 0 && zDelta == 0) {
         return 0;
     }
 
@@ -785,19 +667,11 @@ s32 atan2s(s32 xDelta, s32 zDelta) {
     }
     return ret;
 }
-#else
-GLOBAL_ASM("asm/math_util/atan2s.s")
-#endif
 
-#ifdef NON_MATCHING
 u16 arctan2_f(f32 y, f32 x) {
     return atan2s((s32) (y * 255.0f), (s32) (x * 255.0f));
 }
-#else
-GLOBAL_ASM("asm/math_util/arctan2_f.s")
-#endif
 
-#ifdef NON_EQUIVALENT
 /**
  * Computes the square root of a 16.16 fixed-point number and returns the result in the same format.
  * Due to differences in rounding, the result from this C implementation may differ by 1 from the
@@ -806,26 +680,13 @@ GLOBAL_ASM("asm/math_util/arctan2_f.s")
 UNUSED s32 fix32_sqrt(s32 x) {
     return FTOFIX32(sqrtf(FIX32TOF(x)));
 }
-#else
-GLOBAL_ASM("asm/math_util/fix32_sqrt.s")
-#endif
 
 // Untested
-#ifdef NON_EQUIVALENT
 UNUSED s32 bad_int_sqrt(s32 arg0) {
     return (s32) (sqrtf((f32) arg0 / 65536.0f) * 65536.0f);
 }
-#else
-GLOBAL_ASM("asm/math_util/bad_int_sqrt.s")
-#endif
-
-GLOBAL_ASM("asm/math_util/sins_f.s")
-GLOBAL_ASM("asm/math_util/coss_f.s")
-GLOBAL_ASM("asm/math_util/coss.s")
-GLOBAL_ASM("asm/math_util/sins_2.s")
 
 // Untested
-#ifdef NON_EQUIVALENT
 UNUSED s32 calc_dyn_lighting_for_level_segment(LevelModelSegment *segment, s32 *vec3_ints) {
     s32 dotProduct;
     s32 numVertsInBatch;
@@ -869,11 +730,7 @@ UNUSED s32 calc_dyn_lighting_for_level_segment(LevelModelSegment *segment, s32 *
     }
     return vertCount;
 }
-#else
-GLOBAL_ASM("asm/math_util/calc_dyn_lighting_for_level_segment.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Signed distance field calculation. It's used to calculate the level of intersection between a point and a triangle.
  */
@@ -894,17 +751,8 @@ f32 area_triangle_2d(f32 x0, f32 z0, f32 x1, f32 z1, f32 x2, f32 z2) {
     }
     return sqrtf(result);
 }
-#else
-GLOBAL_ASM("asm/math_util/area_triangle_2d.s")
-#endif
 
-GLOBAL_ASM("asm/math_util/set_breakpoint.s")
-
-#ifdef NON_MATCHING
 void dmacopy_doubleword(void *src, void *dst, u32 end) {
     s32 size = end - (u32) dst;
     memcpy(dst, src, size);
 }
-#else
-GLOBAL_ASM("asm/math_util/dmacopy_doubleword.s")
-#endif
