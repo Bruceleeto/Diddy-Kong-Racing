@@ -8813,7 +8813,6 @@ void trackmenu_render_2D(s32 x, s32 y, char *hubName, char *trackName, s32 rectO
 }
 
 // https://decomp.me/scratch/bQDRA
-#ifdef NON_MATCHING
 // trackmenu_render_names
 void func_8008FF1C(UNUSED s32 updateRate) {
     s32 i; // sp7C
@@ -8935,9 +8934,6 @@ void func_8008FF1C(UNUSED s32 updateRate) {
     }
     gTrackSelectVertsFlip = 1 - gTrackSelectVertsFlip;
 }
-#else
-#pragma GLOBAL_ASM("asm/nonmatchings/menu/func_8008FF1C.s")
-#endif
 
 /**
  * If the track hasn't been loaded already, tell thread30 to load the track in the background.

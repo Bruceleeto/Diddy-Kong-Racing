@@ -19,9 +19,6 @@ extern s32 *gCollisionCandidates;
 extern s8 *gCollisionSurfaces;
 extern s32 gNumCollisionCandidates;
 
-// All handwritten assembly, below.
-
-#ifdef NON_MATCHING
 /**
  * Populates a list of triangle candidates that will be tested for collision in resolve_collisions.
  * Calculates a single bounding rectangle that contains all origin and target points.
@@ -177,11 +174,7 @@ void generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets
 out:
     gNumCollisionCandidates = j;
 }
-#else
-GLOBAL_ASM("asm/collision/generate_collision_candidates.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Computes the overlap between a rectangle and a segment's bounding box, returning a 16-bit grid mask.
  * The bounding box is divided into an 8x8 grid. The function determines which grid columns (X) and rows (Z)
@@ -268,11 +261,7 @@ s32 compute_grid_overlap_mask(LevelModelSegmentBoundingBox *bbox, s32 x1, s32 z1
 
     return mask;
 }
-#else
-GLOBAL_ASM("asm/collision/compute_grid_overlap_mask.s")
-#endif
 
-#ifdef NON_MATCHING
 /**
  * Resolves collisions for a list of moving objects against previously identified collision candidates.
  * For each object, the function checks whether the path from `origin` to `target` intersects any collision plane.
@@ -503,6 +492,3 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
 
     return collisionMask;
 }
-#else
-GLOBAL_ASM("asm/collision/resolve_collisions.s")
-#endif

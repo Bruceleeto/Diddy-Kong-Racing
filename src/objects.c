@@ -5399,7 +5399,7 @@ u32 func_800179D0(void) {
 }
 
 // https://decomp.me/scratch/xNAlf
-#ifdef NON_EQUIVALENT
+// Note: This function is ~70% matching and may contain logic discrepancies (e.g., A2/C2 calculations) compared to the original assembly.
 s32 func_80017A18(ObjectModel *arg0, s32 arg1, s32 *arg2, f32 *arg3, f32 *arg4, f32 *arg5, f32 *arg6, f32 *arg7,
                   f32 *arg8, f32 *arg9, s8 *argA, f32 argB) {
     f32 *planes;
@@ -5528,9 +5528,6 @@ s32 func_80017A18(ObjectModel *arg0, s32 arg1, s32 *arg2, f32 *arg3, f32 *arg4, 
 
     return spF8;
 }
-#else
-#pragma GLOBAL_ASM("asm/nonmatchings/objects/func_80017A18.s")
-#endif
 
 /**
  * Sets the active Taj challenge.
