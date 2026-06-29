@@ -9,10 +9,11 @@ typedef s16 VertexList;
 typedef u8 TriangleList;
 typedef u32 uintptr_t;
 
-#if defined(__sgi)
-#define stubbed_printf
+#ifdef NON_MATCHING
+void isv_printf(const char *fmt, ...);
+#define stubbed_printf isv_printf
 #else
-#define stubbed_printf(...)
+#define stubbed_printf
 #endif
 
 #endif
