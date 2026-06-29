@@ -182,7 +182,7 @@ void thread3_main(UNUSED void *unused) {
 void init_game(void) {
     s32 viMode;
 
-    stubbed_printf(sDebugRomBuildInfo);
+    stubbed_printf(sDebugRomBuildInfo[0]);
     mempool_init_main();
     gzip_init();
 #ifdef ANTI_TAMPER
