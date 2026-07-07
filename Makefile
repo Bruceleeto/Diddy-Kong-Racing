@@ -59,13 +59,13 @@ BUILD_DIR = build
 SRC_DIR   = src
 LIBULTRA_DIR = libultra
 ASM_DIRS  = asm asm/data asm/assets asm/nonmatchings
-HASM_DIRS = $(SRC_DIR)/hasm $(SRC_DIR)/hasm/ido $(LIBULTRA_DIR)/src/os $(LIBULTRA_DIR)/src/gu $(LIBULTRA_DIR)/src/libc
+HASM_DIRS = $(SRC_DIR)/hasm $(LIBULTRA_DIR)/src/os $(LIBULTRA_DIR)/src/gu $(LIBULTRA_DIR)/src/libc
 LIBULTRA_SRC_DIRS  = $(LIBULTRA_DIR) $(LIBULTRA_DIR)/src $(LIBULTRA_DIR)/src/audio $(LIBULTRA_DIR)/src/audio/mips1
 LIBULTRA_SRC_DIRS += $(LIBULTRA_DIR)/src/debug $(LIBULTRA_DIR)/src/gu $(LIBULTRA_DIR)/src/io
 LIBULTRA_SRC_DIRS += $(LIBULTRA_DIR)/src/libc $(LIBULTRA_DIR)/src/os $(LIBULTRA_DIR)/src/sc
 
 
-SRC_DIRS = $(SRC_DIR) $(LIBULTRA_SRC_DIRS)
+SRC_DIRS = $(SRC_DIR) $(SRC_DIR)/hasm $(LIBULTRA_SRC_DIRS)
 SYMBOLS_DIR = ver/symbols
 
 TOOLS_DIR = tools
@@ -97,7 +97,7 @@ O_FILES := $(foreach file,$(S_FILES),$(BUILD_DIR)/$(file).o) \
            $(foreach file,$(C_FILES),$(BUILD_DIR)/$(file).o) \
            $(foreach file,$(BIN_FILES),$(BUILD_DIR)/$(file).o)
 
-O_FILES_LD := $(filter-out $(BUILD_DIR)/asm/assets/assets.s.o, \
+O_FILES_LD := $(filter-out $(BUILD_DIR)/asm/assets/assets.s.o $(BUILD_DIR)/$(SRC_DIR)/hasm/collision.c.o, \
 	$(foreach file,$(S_FILES),$(BUILD_DIR)/$(file).o) \
 	$(foreach file,$(C_FILES),$(BUILD_DIR)/$(file).o))
 
@@ -185,7 +185,7 @@ C_DEFINES += -DCIC_ID=$(BOOT_CIC)
 INCLUDE_CFLAGS  = -I . -I include -I include/libc  -I include/PR -I include/sys -I $(BIN_DIRS) -I $(SRC_DIR) -I $(LIBULTRA_DIR)
 INCLUDE_CFLAGS += -I $(LIBULTRA_DIR)/src/gu -I $(LIBULTRA_DIR)/src/libc -I $(LIBULTRA_DIR)/src/io  -I $(LIBULTRA_DIR)/src/sc
 INCLUDE_CFLAGS += -I $(LIBULTRA_DIR)/src/audio -I $(LIBULTRA_DIR)/src/os
-INCLUDE_CFLAGS += -I $(SRC_DIR)/hasm -I $(SRC_DIR)/hasm/ido
+INCLUDE_CFLAGS += -I $(SRC_DIR)/hasm
 
 ASFLAGS        = -march=vr4300 -32 -G0 -mabi=32 $(ASM_DEFINES) $(INCLUDE_CFLAGS)
 OBJCOPYFLAGS   = -O binary
@@ -270,9 +270,6 @@ $(BUILD_DIR)/$(LIBULTRA_DIR)/%.s.o: OPT_FLAGS := -O1
 $(BUILD_DIR)/$(LIBULTRA_DIR)/%.s.o: MIPSISET := -mips2
 $(BUILD_DIR)/$(LIBULTRA_DIR)/src/libc/%.s.o: OPT_FLAGS := -O2
 $(BUILD_DIR)/$(LIBULTRA_DIR)/src/os/exceptasm.s.o: MIPSISET := -mips3 -32
-
-$(BUILD_DIR)/$(SRC_DIR)/hasm/ido/math_util.s.o: OPT_FLAGS := -O2
-$(BUILD_DIR)/$(SRC_DIR)/hasm/ido/math_util.s.o: MIPSISET := -mips3 -32
 
 # Allow dollar sign to be used in var names for this file alone
 # It allows us to return the current stack pointer
@@ -454,13 +451,6 @@ ifeq ($(COMPILER),ido)
 # libultra asm files - Compile with the ido compiler
 $(BUILD_DIR)/$(LIBULTRA_DIR)/%.s.o: $(LIBULTRA_DIR)/%.s | build_assets
 	$(call print,Assembling Libultra:,$<,$@)
-	$(V)$(CC) -c $(CFLAGS) $(CC_WARNINGS) $(OPT_FLAGS) $(MIPSISET) -o $@ $<
-	$(V)$(STRIP) --strip-unneeded $@
-	@if [ "$(MIPSISET)" = "-mips3 -32" ]; then \
-		$(PYTHON) $(TOOLS_DIR)/python/patchmips3.py $@ || rm $@; \
-	fi
-$(BUILD_DIR)/$(SRC_DIR)/hasm/ido/%.s.o: $(SRC_DIR)/hasm/ido/%.s | build_assets
-	$(call print,Assembling IDO:,$<,$@)
 	$(V)$(CC) -c $(CFLAGS) $(CC_WARNINGS) $(OPT_FLAGS) $(MIPSISET) -o $@ $<
 	$(V)$(STRIP) --strip-unneeded $@
 	@if [ "$(MIPSISET)" = "-mips3 -32" ]; then \
