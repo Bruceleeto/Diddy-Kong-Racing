@@ -64,8 +64,10 @@ for directory in chain.from_iterable(os.walk(path) for path in paths):
         print(filename + ": " + str(noneq_count))
     if global_asm_count > 0:
         print(filename + ": " + str(global_asm_count))
-    # NOTE: As of now there is no distinction between unattempted files and unfinished ones.
-    if (nonm_count + noneq_count + global_asm_count) == 0 :
+    # Only GLOBAL_ASM marks an actual unfinished decomp hole. NON_MATCHING/NON_EQUIVALENT
+    # text alone can appear in files that just use it as an #ifdef guard for unrelated
+    # conditional compilation (e.g. isv_print.c, llcvt.c) - that doesn't make them unsafe for gcc.
+    if global_asm_count == 0:
       outfile.write("    $(BUILD_DIR)/")
       outfile.write(os.path.splitext(filename)[0])
       outfile.write(".c.o    \\\n")

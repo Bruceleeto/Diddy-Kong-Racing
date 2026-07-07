@@ -309,7 +309,7 @@ void mempool_free_addr(u8 *address) {
             if (slot->flags == SLOT_USED || slot->flags == SLOT_SAFEGUARD) {
                 mempool_slot_clear(poolIndex, slotIndex);
             }
-            break;
+            return;
         }
         slot = &slots[slotIndex];
     }

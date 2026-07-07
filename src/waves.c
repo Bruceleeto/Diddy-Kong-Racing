@@ -1397,19 +1397,30 @@ void func_800BBF78(LevelModel *model) {
         }
     }
 
+    stubbed_printf("wave bbox diffX=%d diffZ=%d startX=%d startZ=%d boundsX1=%d boundsX2=%d boundsZ1=%d boundsZ2=%d\n",
+                   gWaveBoundingBoxDiffX, gWaveBoundingBoxDiffZ, gWaveBoundingBoxX1, gWaveBoundingBoxZ1,
+                   gWaveBlockBoundsX1, gWaveBlockBoundsX2, gWaveBlockBoundsZ1, gWaveBlockBoundsZ2);
     gWaveBlockPosX = gWaveBoundingBoxX1;
-    while (gWaveBlockBoundsX1 < gWaveBlockPosX) {
-        gWaveBlockPosX -= gWaveBoundingBoxDiffX;
+    if (gWaveBoundingBoxDiffX > 0) {
+        while (gWaveBlockBoundsX1 < gWaveBlockPosX) {
+            gWaveBlockPosX -= gWaveBoundingBoxDiffX;
+        }
     }
+    stubbed_printf("post X while, posX=%d\n", gWaveBlockPosX);
 
     gWaveBlockPosZ = gWaveBoundingBoxZ1;
-    while (gWaveBlockBoundsZ1 < gWaveBlockPosZ) {
-        gWaveBlockPosZ -= gWaveBoundingBoxDiffZ;
+    if (gWaveBoundingBoxDiffZ > 0) {
+        while (gWaveBlockBoundsZ1 < gWaveBlockPosZ) {
+            gWaveBlockPosZ -= gWaveBoundingBoxDiffZ;
+        }
     }
+    stubbed_printf("post Z while, posZ=%d\n", gWaveBlockPosZ);
 
     gWaveTileCountX = ((gWaveBlockBoundsX2 - gWaveBlockPosX) / gWaveBoundingBoxDiffX) + 1;
     gWaveTileCountZ = ((gWaveBlockBoundsZ2 - gWaveBlockPosZ) / gWaveBoundingBoxDiffZ) + 1;
     gWaveTileGridCount = (subdivisions * gWaveTileCountX) + 1;
+    stubbed_printf("tileCountX=%d tileCountZ=%d tileGridCount=%d subdiv=%d\n", gWaveTileCountX, gWaveTileCountZ,
+                   gWaveTileGridCount, subdivisions);
 
     if (D_800E30D4 != NULL) {
         mempool_free(D_800E30D4);

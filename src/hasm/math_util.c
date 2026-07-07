@@ -259,9 +259,12 @@ void mtxf_transform_point(float mf[4][4], float x, float y, float z, float *ox, 
  * Official name: mathMtxFastXFMF
  */
 void mtxf_transform_dir(MtxF *mf, Vec3f *in, Vec3f *out) {
-    out->f[0] = (in->f[0] * (*mf)[0][0]) + (in->f[1] * (*mf)[1][0]) + (in->f[2] * (*mf)[2][0]);
-    out->f[1] = (in->f[0] * (*mf)[0][1]) + (in->f[1] * (*mf)[1][1]) + (in->f[2] * (*mf)[2][1]);
-    out->f[2] = (in->f[0] * (*mf)[0][2]) + (in->f[1] * (*mf)[1][2]) + (in->f[2] * (*mf)[2][2]);
+    f32 x = in->f[0];
+    f32 y = in->f[1];
+    f32 z = in->f[2];
+    out->f[0] = (x * (*mf)[0][0]) + (y * (*mf)[1][0]) + (z * (*mf)[2][0]);
+    out->f[1] = (x * (*mf)[0][1]) + (y * (*mf)[1][1]) + (z * (*mf)[2][1]);
+    out->f[2] = (x * (*mf)[0][2]) + (y * (*mf)[1][2]) + (z * (*mf)[2][2]);
 }
 
 /**

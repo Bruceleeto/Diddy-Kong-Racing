@@ -507,6 +507,7 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         vehicleId = gCurrentDefaultVehicle;
     }
     set_vehicle_id_for_menu(vehicleId);
+    stubbed_printf("post vehicle swap\n");
     if (gCurrentLevelHeader->race_type == RACETYPE_HUBWORLD) {
         if (settings->worldId - 1 >= 0) {
             var_s0 = 8 << (settings->worldId + 31);
@@ -552,8 +553,10 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         cutsceneId = CUTSCENE_ID_UNK_64;
     }
     cutscene_id_set(cutsceneId);
+    stubbed_printf("pre init_track\n");
     init_track(gCurrentLevelHeader->geometry, gCurrentLevelHeader->skybox, numberOfPlayers, vehicleId, entranceId,
                gCurrentLevelHeader->collectables, gCurrentLevelHeader->unkBA);
+    stubbed_printf("post init_track\n");
     if (gCurrentLevelHeader->fogNear == 0 && gCurrentLevelHeader->fogFar == 0 && gCurrentLevelHeader->fogR == 0 &&
         gCurrentLevelHeader->fogG == 0 && gCurrentLevelHeader->fogB == 0) {
         for (var_s0 = 0; var_s0 < 4; var_s0++) {
@@ -592,6 +595,7 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
                       gCurrentLevelHeader->bgColorBlue);
     video_delta_reset();
     func_8007AB24(gCurrentLevelHeader->unk4[numberOfPlayers]);
+    stubbed_printf("level_load body end\n");
 }
 
 /**

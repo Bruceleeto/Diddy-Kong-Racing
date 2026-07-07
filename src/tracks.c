@@ -231,20 +231,27 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
         i = numberOfPlayers + 1;
     }
 
+    stubbed_printf("pre waves_init waveCount=%d\n", gWaveBlockCount);
     if (gWaveBlockCount) {
         waves_init(gCurrentLevelModel, gCurrentLevelHeader2, i);
     }
+    stubbed_printf("post waves_init waveCount=%d\n", gWaveBlockCount);
 
     cam_set_layout(numberOfPlayers);
     skydome_spawn(skybox);
+    stubbed_printf("post skydome_spawn\n");
     gTrackTexAnimOffset = 0;
     gTrackTexAnimFlags = RENDER_TEX_ANIM;
     path_enable();
     track_spawn_objects(arg6, 0);
+    stubbed_printf("post track_spawn_objects arg6\n");
     track_spawn_objects(collectables, 1);
+    stubbed_printf("post track_spawn_objects collectables\n");
     gScenePlayerViewports = numberOfPlayers;
     track_setup_racers(vehicle, entranceId, numberOfPlayers);
+    stubbed_printf("post track_setup_racers\n");
     racerfx_alloc(72, 64);
+    stubbed_printf("post racerfx_alloc\n");
 
     if (geometry == 0 && entranceId == 0) {
         transition_begin(&gCircleFadeToBlack);
@@ -262,6 +269,7 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
         gShadowHeapTris[i] = (Triangle *) mempool_alloc_safe(sizeof(Triangle) * 800, COLOUR_TAG_YELLOW);
         gShadowHeapVerts[i] = (Vertex *) mempool_alloc_safe(sizeof(Vertex) * 2000, COLOUR_TAG_YELLOW);
     }
+    stubbed_printf("post shadow heap alloc\n");
 
     gShadowHeapFlip = 0;
     shadow_update(SHADOW_SCENERY, SHADOW_SCENERY, LOGIC_NULL);
@@ -270,12 +278,15 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
     shadow_update(SHADOW_SCENERY, SHADOW_SCENERY, LOGIC_NULL);
     shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, LOGIC_NULL);
     gShadowHeapFlip = 0;
+    stubbed_printf("post shadow_update\n");
     if (gCurrentLevelHeader2->useVoid) {
         gVoidColourR = gCurrentLevelHeader2->voidColour.red;
         gVoidColourG = gCurrentLevelHeader2->voidColour.green;
         gVoidColourB = gCurrentLevelHeader2->voidColour.blue;
         void_init(numberOfPlayers + 1);
+        stubbed_printf("post void_init\n");
     }
+    stubbed_printf("init_track end\n");
 }
 
 /**
@@ -2851,7 +2862,10 @@ void generate_track(s32 modelId) {
     temp -= ((s32) temp % 16); // Align to 16-byte boundary.
 
     asset_load(ASSET_LEVEL_MODELS, temp, mdl, temp_s4);
+    stubbed_printf("pre gzip_inflate\n");
     gzip_inflate((u8 *) temp, (u8 *) gCurrentLevelModel);
+    stubbed_printf("post gzip_inflate segs=%d tex=%d\n", gCurrentLevelModel->numberOfSegments,
+                   gCurrentLevelModel->numberOfTextures);
     mempool_free(gLevelModelTable); // Done with the level models table, so free it.
 
     mdl = (s32) gCurrentLevelModel;
@@ -2893,7 +2907,9 @@ void generate_track(s32 modelId) {
     mempool_free(gTrackModelHeap);
     mempool_alloc_fixed(temp_s4, (u8 *) gTrackModelHeap, COLOUR_TAG_YELLOW);
     mempool_free_timer(2);
+    stubbed_printf("pre minimap_init\n");
     minimap_init(gCurrentLevelModel);
+    stubbed_printf("post minimap_init\n");
 
     for (i = 0; i < gCurrentLevelModel->numberOfSegments; i++) {
         for (temp_s4 = 0; temp_s4 < gCurrentLevelModel->segments[i].numberOfBatches; temp_s4++) {
@@ -2912,6 +2928,7 @@ void generate_track(s32 modelId) {
         }
     }
     set_texture_colour_tag(COLOUR_TAG_MAGENTA);
+    stubbed_printf("generate_track end\n");
 }
 
 void func_8002C71C(LevelModelSegment *segment) {
