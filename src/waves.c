@@ -265,6 +265,8 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
     sineStep2 = (gWaveController.initSine[1].sineStep << 16) / gWaveController.seedSize;
     gWaveLowerY = 10000.0f;
     gWaveUpperY = -10000.0f;
+    stubbed_printf("pre seedSize loop, seedSize=%d tileCount=%d subdiv=%d\n", gWaveController.seedSize,
+                   gWaveController.tileCount, gWaveController.subdivisions);
     for (i_2 = 0; i_2 < gWaveController.seedSize; i_2++) {
         gWaveHeightTable[i_2] = (sins_f(sineVar1) * gWaveController.initSine[0].height) +
                                 (gWaveController.initSine[1].height * sins_f(sineVar2));
@@ -280,6 +282,7 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
         sineVar1 += sineStep1;
         sineVar2 += sineStep2;
     };
+    stubbed_printf("post seedSize loop\n");
     save_rng_seed();
     set_rng_seed('WAVF');
 
@@ -291,6 +294,7 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
             var_s5++;
         }
     }
+    stubbed_printf("post tileCount^2 loop\n");
     var_s5 = 0;
     i_2 = 0;
     load_rng_seed();
@@ -299,6 +303,9 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
     } else {
         playerCount = 4;
     }
+    stubbed_printf("pre vertex loop playerCount=%d v0=%x v1=%x v2=%x v3=%x\n", playerCount,
+                   (u32) gWaveVertices[0][0], (u32) gWaveVertices[1][0], (u32) gWaveVertices[2][0],
+                   (u32) gWaveVertices[3][0]);
     for (var_s3 = 0; var_s3 < 25; var_s3++) {
         if (0 <= gWaveController.subdivisions) {
             do {
@@ -325,6 +332,7 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
             i_2 = 0;
         }
     }
+    stubbed_printf("post vertex loop\n");
 
     var_s5 = 0;
     for (i_2 = 0; i_2 < gWaveController.subdivisions; i_2++) {
@@ -344,7 +352,9 @@ void waves_init(LevelModel *model, LevelHeader *header, s32 playerCount) {
             var_s5 += 2;
         }
     }
+    stubbed_printf("post triangle loop, pre func_800BC6C8\n");
     func_800BC6C8();
+    stubbed_printf("post func_800BC6C8\n");
 
     var_s5 = (gWaveController.subdivisions + 1) * gWaveController.subdivisions;
     for (i = 0; i < ARRAY_COUNT(D_8012A028); i++) {
@@ -1620,6 +1630,7 @@ void func_800BCC70(LevelModel *model) {
     Vec2i *spA4;
     u8 *spA0;
 
+    stubbed_printf("func_800BCC70 enter\n");
     subdivisions = gWaveController.subdivisions;
     if (gWaveController.doubleDensity) {
         subdivisions *= 2;
@@ -1646,6 +1657,7 @@ void func_800BCC70(LevelModel *model) {
 
     stepX = gWaveBoundingBoxW / subdivisions;
     stepZ = gWaveBoundingBoxH / subdivisions;
+    stubbed_printf("pre collision_get_y loop, numSegs=%d\n", model->numberOfSegments);
     for (i = 0, var_s5 = 0; i < model->numberOfSegments; i++) {
         if (D_8012A0E8[gWaveModel[i].unkB] & (1 << gWaveModel[i].unkA)) {
             spA4[(gWaveModel[i].unkB * gWaveTileCountX) + gWaveModel[i].unkA].i[0] = i;
@@ -1657,6 +1669,9 @@ void func_800BCC70(LevelModel *model) {
                 for (k = 0; k <= subdivisions; k++) {
                     // var_v0 stores the length of spAC
                     collisionCount = collision_get_y(i, spA8[k] + x, spA8[sp184] + z, colY);
+                    if (collisionCount > 30) {
+                        stubbed_printf("collision_get_y OVERFLOW count=%d seg=%d\n", collisionCount, i);
+                    }
                     if (collisionCount == 0) {
                         var_a2 = 255;
                     } else {
@@ -1690,6 +1705,7 @@ void func_800BCC70(LevelModel *model) {
             // clang-format on
         }
     }
+    stubbed_printf("post collision_get_y loop\n");
 
     for (sp184 = 0; sp184 < gWaveTileCountZ; sp184++) {
         for (k = 0; k < gWaveTileCountX; k++) {
@@ -1850,6 +1866,7 @@ void func_800BCC70(LevelModel *model) {
     mempool_free(spA8);
     mempool_free(spA4);
     mempool_free(spA0);
+    stubbed_printf("func_800BCC70 end\n");
 }
 
 s32 func_800BDC80(s32 arg0, unk8011C3B8 *arg1, unk8011C8B8 *arg2, f32 shadowXNegPosition, f32 shadowZNegPosition,

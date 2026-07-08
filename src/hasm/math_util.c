@@ -990,6 +990,7 @@ s32 coss_2(s16 angle) {
  * watchpoint takes effect.
  */
 void set_breakpoint(u32 addr) {
+#ifdef __GNUC__
     u32 watchLo = addr | WATCHLO_WTRAP;
     u32 watchHi = WATCHHI_VALIDMASK;
 
@@ -998,6 +999,7 @@ void set_breakpoint(u32 addr) {
                       "nop\n nop\n nop\n nop\n nop\n"
                       :
                       : "r"(watchLo), "r"(watchHi));
+#endif
 }
 
 /**

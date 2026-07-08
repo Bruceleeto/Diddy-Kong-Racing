@@ -1,5 +1,13 @@
 # Diddy Kong Racing
 
+tldr
+make setup
+make extract
+make -j8 COMPILER=gcc
+make -j8 COMPILER=ido NM=1
+
+
+
 This repo contains a work-in-progress decompilation of Diddy Kong Racing for the N64. You will need to have a original copy of the ROM to extract the game's assets.
 
 All versions are supported, and the US 1.0 version (SHA1 = 0cb115d8716dbbc2922fda38e533b9fe63bb9670) of the game is the default if not specified.

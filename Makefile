@@ -290,7 +290,8 @@ endif
 $(GCC_SAFE_FILES): CC := $(CROSS)gcc
 $(GCC_SAFE_FILES): CC_WARNINGS :=
 $(GCC_SAFE_FILES): MIPSISET := -mips3
-$(GCC_SAFE_FILES): OPT_FLAGS := -Os
+$(GCC_SAFE_FILES): OPT_FLAGS := -O1 
+# Should be Os 
 $(GCC_SAFE_FILES): CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS) $(C_DEFINES) \
 	-EB \
 	-march=vr4300 \
@@ -303,13 +304,11 @@ $(GCC_SAFE_FILES): CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS
 	-ffreestanding \
 	-fno-builtin \
 	-fno-common \
+	-fno-toplevel-reorder \
 	-mno-long-calls \
-	-ffast-math \
-	-funsafe-math-optimizations \
 	-fno-merge-constants \
 	-fno-strict-aliasing \
 	-fno-zero-initialized-in-bss \
-	-fsingle-precision-constant \
 	-funsigned-char \
 	-fwrapv \
 	-falign-functions=16 \
