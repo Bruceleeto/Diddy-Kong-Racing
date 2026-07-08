@@ -75,7 +75,6 @@ ctx_includes.c
 tools/n64crc
 !tools/build
 m2cfiles/
-gcc_safe_files.mk
 tools/ido-recomp
 *.DS_Store
 tools/binutils

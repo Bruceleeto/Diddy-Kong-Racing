@@ -283,16 +283,12 @@ $(BUILD_DIR)/$(LIBULTRA_DIR)/%.c.o: CC_CHECK := :
 ### Targets
 
 ifeq ($(COMPILER),gcc)
-	DUMMY != $(PYTHON) $(TOOLS_DIR)/python/gcc_generate.py gcc_safe_files.mk
-	include gcc_safe_files.mk
-endif
-
-$(GCC_SAFE_FILES): CC := $(CROSS)gcc
-$(GCC_SAFE_FILES): CC_WARNINGS :=
-$(GCC_SAFE_FILES): MIPSISET := -mips3
-$(GCC_SAFE_FILES): OPT_FLAGS := -O1 
-# Should be Os 
-$(GCC_SAFE_FILES): CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS) $(C_DEFINES) \
+$(BUILD_DIR)/%.c.o: CC := $(CROSS)gcc
+$(BUILD_DIR)/%.c.o: CC_WARNINGS :=
+$(BUILD_DIR)/%.c.o: MIPSISET := -mips3
+$(BUILD_DIR)/%.c.o: OPT_FLAGS := -O1
+# Should be Os
+$(BUILD_DIR)/%.c.o: CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS) $(C_DEFINES) \
 	-EB \
 	-march=vr4300 \
 	-mabi=32 \
@@ -313,6 +309,7 @@ $(GCC_SAFE_FILES): CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS
 	-fwrapv \
 	-falign-functions=16 \
 	-G 0
+endif
 
 default: all
 
