@@ -31,7 +31,7 @@ s32 D_8011D634;
 s16 *gAnimationTable;
 s32 *gObjectAnimationTable;
 s32 gModelAnimOffsetID;
-s32 D_8011D644;
+s16 *D_8011D644;
 
 /******************************/
 
@@ -54,7 +54,7 @@ void allocate_object_model_pools(void) {
     gNumModelIDs--;
     gAnimationTable = (s16 *) asset_table_load(ASSET_ANIMATION_IDS);
     gObjectAnimationTable = (s32 *) asset_table_load(ASSET_OBJECT_ANIMATIONS_TABLE);
-    D_8011D644 = (s32) mempool_alloc_safe(0xC00, COLOUR_TAG_GREEN);
+    D_8011D644 = (s16 *) mempool_alloc_safe(0xC00, COLOUR_TAG_GREEN);
     gModelAnimOffsetID = 0;
 
 #ifdef ANTI_TAMPER
