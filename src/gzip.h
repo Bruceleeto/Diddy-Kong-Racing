@@ -22,5 +22,9 @@ s32 gzip_size_uncompressed(s32 assetIndex, s32 assetOffset);
 u8 *gzip_inflate(u8 *compressedInput, u8 *decompressedOutput);
 void gzip_huft_build(u32 *b, u32 n, u32 s, u16 *d, u16 *e, huft **t, s32 *m);
 s32 gzip_inflate_block(void);
+void gzip_inflate_dynamic(void);
+void gzip_inflate_fixed(void);
+void gzip_inflate_stored(void);
+void gzip_inflate_codes(huft *tl, huft *td, s32 bl, s32 bd);
 
 #endif

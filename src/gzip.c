@@ -12,6 +12,46 @@ u8 *gzip_inflate_output = NULL;
 
 /*******************************/
 
+/************ .rodata ************/
+
+/* Tables for deflate from PKZIP's appnote.txt. */
+
+/* Order of the bit length code lengths */
+u8 gzip_border[19] = {
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
+};
+
+/* Copy lengths for literal codes 257..285 */
+u16 gzip_cplens[31] = {
+    3,  4,  5,  6,  7,  8,  9,  10,  11,  13,  15,  17,  19,  23, 27, 31,
+    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258, 0,  0
+};
+
+/* Extra bits for literal codes 257..285 (99 == invalid) */
+u8 gzip_cplext[31] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
+    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0, 99, 99
+};
+
+/* Copy offsets for distance codes 0..29 */
+u16 gzip_cpdist[30] = {
+    1,   2,   3,   4,   5,    7,    9,    13,   17,   25,   33,   49,   65,    97,    129,
+    193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577
+};
+
+/* Extra bits for distance codes */
+u8 gzip_cpdext[30] = {
+    0, 0, 0, 0, 1, 1, 2, 2, 3,  3,  4,  4,  5,  5,  6,
+    6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
+};
+
+u16 gzip_mask_bits[17] = {
+    0x0000, 0x0001, 0x0003, 0x0007, 0x000F, 0x001F, 0x003F, 0x007F, 0x00FF,
+    0x01FF, 0x03FF, 0x07FF, 0x0FFF, 0x1FFF, 0x3FFF, 0x7FFF, 0xFFFF
+};
+
+/*********************************/
+
 /************ .bss ************/
 
 u32 gzip_bit_buffer;
@@ -241,4 +281,337 @@ void gzip_huft_build(u32 *b, u32 n, u32 s, u16 *d, u16 *e, huft **t, s32 *m) {
         }
     }
     return;
+}
+
+/* Bit-buffer macros for the inflate functions, following the classic gzip
+   NEEDBITS/DUMPBITS pattern. Unlike stock gzip there is no input refill
+   callback: bytes come straight from the inPtr cursor. b, k and inPtr must
+   be locals of the function using these. */
+#define NEEDBITS(n)                     \
+    while (k < (n)) {                   \
+        b |= ((u32) *inPtr++) << k;     \
+        k += 8;                         \
+    }
+#define DUMPBITS(n) \
+    {               \
+        b >>= (n);  \
+        k -= (n);   \
+    }
+
+/**
+ * Decompress one deflate block and return 0 if it was the last block of the
+ * stream, nonzero otherwise (the caller in gzip_inflate() loops until 0).
+ * Errors from the per-type handlers are not detectable: like the original
+ * hand-written asm, everything below is void and assumes well-formed input.
+ */
+s32 gzip_inflate_block(void) {
+    u32 e; /* last block flag */
+    u32 t; /* block type */
+    register u32 b; /* bit buffer */
+    register u32 k; /* number of bits in bit buffer */
+    u8 *inPtr;
+
+    /* reset the huft bump allocator; tables are rebuilt per block */
+    gHuftTablePos = 0;
+
+    b = gzip_bit_buffer;
+    k = gzip_num_bits;
+    inPtr = gzip_inflate_input;
+
+    /* read in last block bit */
+    NEEDBITS(1);
+    e = b & 1;
+    DUMPBITS(1);
+
+    /* read in block type */
+    NEEDBITS(2);
+    t = b & 3;
+    DUMPBITS(2);
+
+    gzip_inflate_input = inPtr;
+    gzip_bit_buffer = b;
+    gzip_num_bits = k;
+
+    if (t == 2) {
+        gzip_inflate_dynamic();
+    } else if (t == 1) {
+        gzip_inflate_fixed();
+    } else {
+        /* type 0; an invalid type 3 also lands here, as in the original asm */
+        gzip_inflate_stored();
+    }
+
+    return 1 - e;
+}
+
+/**
+ * Decompress an inflated type 2 (dynamic Huffman codes) block.
+ */
+void gzip_inflate_dynamic(void) {
+    huft *tl;           /* literal/length code table */
+    huft *td;           /* distance code table */
+    s32 bl;             /* lookup bits for tl */
+    s32 bd;             /* lookup bits for td */
+    u32 nb;             /* number of bit length codes */
+    u32 nl;             /* number of literal/length codes */
+    u32 nd;             /* number of distance codes */
+    u32 j;
+    u32 l;              /* last length */
+    u32 m;              /* mask for bit lengths table */
+    s32 count;          /* number of lengths left to get */
+    u32 *llp;           /* cursor into ll */
+    huft *t;            /* pointer to table entry */
+    u32 ll[288 + 32];   /* literal/length and distance code lengths */
+    register u32 b;     /* bit buffer */
+    register u32 k;     /* number of bits in bit buffer */
+    u8 *inPtr;
+
+    b = gzip_bit_buffer;
+    k = gzip_num_bits;
+    inPtr = gzip_inflate_input;
+
+    /* read in table lengths */
+    NEEDBITS(5);
+    nl = 257 + (b & 0x1F); /* number of literal/length codes */
+    DUMPBITS(5);
+    NEEDBITS(5);
+    nd = 1 + (b & 0x1F); /* number of distance codes */
+    DUMPBITS(5);
+    NEEDBITS(4);
+    nb = 4 + (b & 0xF); /* number of bit length codes */
+    DUMPBITS(4);
+
+    /* read in bit-length-code lengths */
+    for (j = 0; j < nb; j++) {
+        NEEDBITS(3);
+        ll[gzip_border[j]] = b & 7;
+        DUMPBITS(3);
+    }
+    for (; j < 19; j++) {
+        ll[gzip_border[j]] = 0;
+    }
+
+    /* build decoding table for trees--single level, 7 bit lookup */
+    bl = 7;
+    gzip_huft_build(ll, 19, 19, NULL, NULL, &tl, &bl);
+
+    /* read in literal and distance code lengths */
+    m = gzip_mask_bits[bl];
+    count = nl + nd;
+    llp = ll;
+    l = 0;
+    while (count != 0) {
+        NEEDBITS((u32) bl);
+        t = tl + (b & m);
+        j = t->v.n;
+        DUMPBITS(t->b);
+        if (j < 16) {        /* length of code in bits (0..15) */
+            *llp++ = l = j;  /* save last length in l */
+            count--;
+        } else if (j == 16) { /* repeat last length 3 to 6 times */
+            NEEDBITS(2);
+            j = 3 + (b & 3);
+            DUMPBITS(2);
+            count -= j;
+            while (j--) {
+                *llp++ = l;
+            }
+        } else if (j == 17) { /* 3 to 10 zero length codes */
+            NEEDBITS(3);
+            j = 3 + (b & 7);
+            DUMPBITS(3);
+            count -= j;
+            while (j--) {
+                *llp++ = 0;
+            }
+            l = 0;
+        } else { /* j == 18: 11 to 138 zero length codes */
+            NEEDBITS(7);
+            j = 11 + (b & 0x7F);
+            DUMPBITS(7);
+            count -= j;
+            while (j--) {
+                *llp++ = 0;
+            }
+            l = 0;
+        }
+    }
+
+    /* restore the global bit buffer */
+    gzip_inflate_input = inPtr;
+    gzip_bit_buffer = b;
+    gzip_num_bits = k;
+
+    /* build the decoding tables for literal/length and distance codes */
+    bl = 9; /* lbits */
+    gzip_huft_build(ll, nl, 257, gzip_cplens, (u16 *) gzip_cplext, &tl, &bl);
+    bd = 6; /* dbits */
+    gzip_huft_build(ll + nl, nd, 0, gzip_cpdist, (u16 *) gzip_cpdext, &td, &bd);
+
+    /* decompress until an end-of-block code */
+    gzip_inflate_codes(tl, td, bl, bd);
+}
+
+/**
+ * Decompress an inflated type 1 (fixed Huffman codes) block.
+ */
+void gzip_inflate_fixed(void) {
+    huft *tl; /* literal/length code table */
+    huft *td; /* distance code table */
+    s32 bl;   /* lookup bits for tl */
+    s32 bd;   /* lookup bits for td */
+    s32 i;
+    u32 l[288]; /* length list for huft_build */
+
+    /* set up literal table */
+    for (i = 0; i < 144; i++) {
+        l[i] = 8;
+    }
+    for (; i < 256; i++) {
+        l[i] = 9;
+    }
+    for (; i < 280; i++) {
+        l[i] = 7;
+    }
+    for (; i < 288; i++) { /* make a complete, but wrong code set */
+        l[i] = 8;
+    }
+    /* Note: the original asm stored its bl/bd seed values (7 and 5) to dead
+       stack slots and passed huft_build pointers to uninitialized ones; it
+       only worked because huft_build clamps *m into the [min,max] code
+       length range. Initializing them properly is behavior-neutral. */
+    bl = 7;
+    gzip_huft_build(l, 288, 257, gzip_cplens, (u16 *) gzip_cplext, &tl, &bl);
+
+    /* set up distance table */
+    for (i = 0; i < 30; i++) { /* make an incomplete code set */
+        l[i] = 5;
+    }
+    bd = 5;
+    gzip_huft_build(l, 30, 0, gzip_cpdist, (u16 *) gzip_cpdext, &td, &bd);
+
+    /* decompress until an end-of-block code */
+    gzip_inflate_codes(tl, td, bl, bd);
+}
+
+/**
+ * "Decompress" an inflated type 0 (stored) block.
+ */
+void gzip_inflate_stored(void) {
+    u32 n;          /* number of bytes in block */
+    register u32 b; /* bit buffer */
+    register u32 k; /* number of bits in bit buffer */
+    u8 *inPtr;
+    u8 *outPtr;
+
+    b = gzip_bit_buffer;
+    k = gzip_num_bits;
+    inPtr = gzip_inflate_input;
+    outPtr = gzip_inflate_output;
+
+    /* go to byte boundary */
+    n = k & 7;
+    DUMPBITS(n);
+
+    /* get the length and its complement (the complement is read but,
+       unlike stock gzip, never verified) */
+    NEEDBITS(16);
+    n = b & 0xFFFF;
+    DUMPBITS(16);
+    NEEDBITS(16);
+    DUMPBITS(16);
+
+    /* After the byte-align, the two 16-bit reads leave the bit buffer
+       holding exactly 0 bits, so the stored bytes can be copied straight
+       from the input cursor. */
+    while (n != 0) {
+        *outPtr++ = *inPtr++;
+        n--;
+    }
+
+    gzip_inflate_input = inPtr;
+    gzip_inflate_output = outPtr;
+    gzip_bit_buffer = b;
+    gzip_num_bits = k;
+}
+
+/**
+ * Inflate (decompress) the codes in a deflated (compressed) block.
+ * tl, td: literal/length and distance decoder tables.
+ * bl, bd: number of bits decoded by tl[] and td[].
+ * Unlike stock gzip this writes through the output cursor directly (no 32K
+ * sliding window) and has no invalid-code (e == 99) check.
+ */
+void gzip_inflate_codes(huft *tl, huft *td, s32 bl, s32 bd) {
+    u32 e;          /* table entry flag/number of extra bits */
+    u32 n;          /* length for copy */
+    huft *t;        /* pointer to table entry */
+    u32 ml, md;     /* masks for bl and bd bits */
+    u8 *src;        /* source for back-reference copy */
+    register u32 b; /* bit buffer */
+    register u32 k; /* number of bits in bit buffer */
+    u8 *inPtr;
+    u8 *outPtr;
+
+    b = gzip_bit_buffer;
+    k = gzip_num_bits;
+    inPtr = gzip_inflate_input;
+    outPtr = gzip_inflate_output;
+
+    ml = gzip_mask_bits[bl]; /* precompute masks for speed */
+    md = gzip_mask_bits[bd];
+    for (;;) { /* do until end of block */
+        NEEDBITS((u32) bl);
+        t = tl + (b & ml);
+        e = t->e;
+        while (e > 16) { /* walk subtables */
+            DUMPBITS(t->b);
+            e -= 16;
+            NEEDBITS(e);
+            t = t->v.t + (b & gzip_mask_bits[e]);
+            e = t->e;
+        }
+        DUMPBITS(t->b);
+        if (e == 16) { /* then it's a literal */
+            *outPtr++ = t->v.n;
+            continue;
+        }
+
+        /* exit if end of block */
+        if (e == 15) {
+            break;
+        }
+
+        /* get length of block to copy */
+        NEEDBITS(e);
+        n = t->v.n + (b & gzip_mask_bits[e]);
+        DUMPBITS(e);
+
+        /* decode distance of block to copy */
+        NEEDBITS((u32) bd);
+        t = td + (b & md);
+        e = t->e;
+        while (e > 16) {
+            DUMPBITS(t->b);
+            e -= 16;
+            NEEDBITS(e);
+            t = t->v.t + (b & gzip_mask_bits[e]);
+            e = t->e;
+        }
+        DUMPBITS(t->b);
+        NEEDBITS(e);
+        src = outPtr - t->v.n - (b & gzip_mask_bits[e]);
+        DUMPBITS(e);
+
+        /* do the copy; must be a forward byte-by-byte copy since the
+           source can overlap the bytes being written (LZ77 runs) */
+        do {
+            *outPtr++ = *src++;
+        } while (--n != 0);
+    }
+
+    gzip_inflate_input = inPtr;
+    gzip_inflate_output = outPtr;
+    gzip_bit_buffer = b;
+    gzip_num_bits = k;
 }

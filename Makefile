@@ -206,14 +206,12 @@ CFLAGS += $(C_DEFINES)
 CFLAGS += $(INCLUDE_CFLAGS)
 
 CHECK_WARNINGS := -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-parameter -Wno-switch -Werror-implicit-function-declaration
+# Unused-variable/value warnings are noise in a decomp (leftover temps are everywhere)
+CHECK_WARNINGS += -Wno-unused-variable -Wno-unused-value -Wno-unused-but-set-variable
 ifeq ($(DETECTED_OS), macos)
 	ifeq ($(NON_MATCHING),0)
-		CHECK_WARNINGS += -Wno-unused-value -Wno-deprecated-non-prototype -Wno-array-bounds -Wno-self-assign -Wno-uninitialized -Wno-unused-but-set-variable -Wno-unused-variable
+		CHECK_WARNINGS += -Wno-deprecated-non-prototype -Wno-array-bounds -Wno-self-assign -Wno-uninitialized
 		CHECK_WARNINGS += -Wno-pointer-to-int-cast -Wno-constant-conversion -Wno-int-to-pointer-cast
-	endif
-else
-	ifeq ($(NON_MATCHING),0)
-		CHECK_WARNINGS += -Wno-unused-variable -Wno-unused-value -Wno-unused-but-set-variable
 	endif
 endif
 CC_CHECK := $(GCC) -fsyntax-only -fno-builtin -funsigned-char $(C_STANDARD) -DAVOID_UB -DCC_CHECK -D_LANGUAGE_C -DNON_MATCHING -DNON_EQUIVALENT $(CHECK_WARNINGS) $(INCLUDE_CFLAGS) $(C_DEFINES) $(GCC_COLOR)
