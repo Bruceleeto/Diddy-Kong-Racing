@@ -2700,9 +2700,9 @@ s32 func_8002B9BC(Object *obj, f32 *arg1, Vec3f *arg2, s32 arg3) {
 
 /**
  * Searches for intersecting surfaces, then returns the Y values of all the intersecting points, in order.
- * There is no limit for surfaces returned, so not feeding a large enough yOut array could cause problems.
+ * Writes at most maxYOut values to yOut; surfaces beyond that are dropped.
  */
-s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut) {
+s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut, s32 maxYOut) {
     LevelModelSegment *currentSegment;
     LevelModelSegmentBoundingBox *currentBoundingBox;
     Triangle *tri;
@@ -2809,7 +2809,7 @@ s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut) {
                     tempVec4f.y = currentSegment->collisionPlanes[4 * temp + 1];
                     tempVec4f.z = currentSegment->collisionPlanes[4 * temp + 2];
                     tempVec4f.w = currentSegment->collisionPlanes[4 * temp + 3];
-                    if (tempVec4f.y != 0.0) {
+                    if (tempVec4f.y != 0.0 && yOutCount < maxYOut) {
                         yOut[yOutCount] = -(((tempVec4f.x * xIn) + (tempVec4f.z * zIn) + tempVec4f.w) / tempVec4f.y);
                         yOutCount++;
                     }
@@ -3885,9 +3885,12 @@ void func_8002F440(void) {
     Triangle *tri;
     Vertex *vert;
     s32 alpha;
-    s16 sp90[6];
+    // These must hold up to 7 vertices: func_8002FF6C clips a triangle against 4
+    // planes, and unk0 (the loop bound writing these) can reach 3+4=7. They were
+    // sized [6], and the overflow corrupted gcc's stack frame (infinite loop).
+    s16 sp90[8];
     s32 var_s2;
-    s16 sp80[6];
+    s16 sp80[8];
     f32 temp_f18;
     f32 yRotCos;
     f32 yRotSin;

@@ -1668,7 +1668,7 @@ void func_800BCC70(LevelModel *model) {
                 x = gWaveModel[i].originX;
                 for (k = 0; k <= subdivisions; k++) {
                     // var_v0 stores the length of spAC
-                    collisionCount = collision_get_y(i, spA8[k] + x, spA8[sp184] + z, colY);
+                    collisionCount = collision_get_y(i, spA8[k] + x, spA8[sp184] + z, colY, 30);
                     if (collisionCount > 30) {
                         stubbed_printf("collision_get_y OVERFLOW count=%d seg=%d\n", collisionCount, i);
                     }

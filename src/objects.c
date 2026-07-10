@@ -9779,7 +9779,7 @@ void mode_init_taj_race(void) {
         lvlSeg =
             get_level_segment_index_from_position(newRacerEntry.common.x, checkpointNode->y, newRacerEntry.common.z);
         newRacerEntry.common.y =
-            collision_get_y(lvlSeg, newRacerEntry.common.x, newRacerEntry.common.z, yOut) ? yOut[0] : checkpointNode->y;
+            collision_get_y(lvlSeg, newRacerEntry.common.x, newRacerEntry.common.z, yOut, 8) ? yOut[0] : checkpointNode->y;
         newRacerEntry.common.size = 16;
         newRacerEntry.angleY = racer->steerVisualRotation;
         newRacerEntry.angleX = 0;
@@ -9948,7 +9948,7 @@ CheckpointNode *func_800230D0(Object *obj, Object_Racer *racer) {
         obj->segmentID =
             get_level_segment_index_from_position(obj->trans.x_position, obj->trans.y_position, obj->trans.z_position);
     }
-    yOutCount = collision_get_y(obj->segmentID, obj->trans.x_position, obj->trans.z_position, yOut);
+    yOutCount = collision_get_y(obj->segmentID, obj->trans.x_position, obj->trans.z_position, yOut, 9);
     if (yOutCount != 0) {
         obj->trans.y_position = yOut[yOutCount - 1];
     }
