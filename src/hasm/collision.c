@@ -251,7 +251,7 @@ s32 compute_grid_overlap_mask(LevelModelSegmentBoundingBox *bbox, s32 x1, s32 z1
     cell_z = bbox_z1;
 
     for (i = 0; i < 8; i++) {
-        if (cell_z + cell_height >= z1 && z2 >= bbox_z1) {
+        if (cell_z + cell_height >= z1 && z2 >= cell_z) {
             mask |= v1;
         }
 

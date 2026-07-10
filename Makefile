@@ -97,7 +97,7 @@ O_FILES := $(foreach file,$(S_FILES),$(BUILD_DIR)/$(file).o) \
            $(foreach file,$(C_FILES),$(BUILD_DIR)/$(file).o) \
            $(foreach file,$(BIN_FILES),$(BUILD_DIR)/$(file).o)
 
-O_FILES_LD := $(filter-out $(BUILD_DIR)/asm/assets/assets.s.o $(BUILD_DIR)/$(SRC_DIR)/hasm/collision.c.o, \
+O_FILES_LD := $(filter-out $(BUILD_DIR)/asm/assets/assets.s.o, \
 	$(foreach file,$(S_FILES),$(BUILD_DIR)/$(file).o) \
 	$(foreach file,$(C_FILES),$(BUILD_DIR)/$(file).o))
 
