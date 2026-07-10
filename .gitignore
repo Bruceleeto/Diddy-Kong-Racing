@@ -80,3 +80,4 @@ tools/ido-recomp
 tools/binutils
 *.d
 treemap.html
+docs/
