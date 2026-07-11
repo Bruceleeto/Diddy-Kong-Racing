@@ -1,10 +1,14 @@
 # Diddy Kong Racing
 
 tldr
-make setup
-make extract
-make -j8 COMPILER=gcc
-make -j8 COMPILER=ido NM=1
+
+`make setup`
+
+`make extract`
+
+`make -j8 COMPILER=gcc`
+
+`make -j8 COMPILER=ido NM=1`
 
 
 
