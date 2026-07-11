@@ -1,0 +1,288 @@
+# Makefile.pc — native Linux build of the DKR game code (the port).
+#
+# Usage:
+#   make -f Makefile.pc -j8            # compile all game objects (default target)
+#   make -f Makefile.pc -j8 link       # attempt to link (will fail until the
+#                                      #  platform shim layer exists — missing
+#                                      #  libultra/RSP/video symbols are the worklist)
+#   make -f Makefile.pc clean
+#
+# Notes:
+# - BITS=32 by default: the decomp assumes 4-byte pointers everywhere (structs
+#   overlaying ROM data, pointers stashed in u32). 64-bit comes later, on purpose.
+# - libultra C files ARE built (only the hand-written .s files — CP0/cache/
+#   exception/boot — get replaced by host shims). Files that poke MMIO registers
+#   (io/, timers) will need #ifdef TARGET_PC surgery or shim replacements, but
+#   they start out in the build so the worklist is visible as compile errors.
+# - src/hasm/softfloat_conv.c and llmuldiv_gcc.s excluded: host libgcc provides those.
+# - -DTARGET_PC replaces -DTARGET_N64; use it to #ifdef the platform split.
+
+CC      := gcc
+BITS    ?= 32
+BUILD   := build/pc
+
+DEFINES := \
+	-DTARGET_PC \
+	-D_FINALROM \
+	-DNDEBUG \
+	-DF3DDKR_GBI \
+	-DVERSION_US_V77 \
+	-DAVOID_UB \
+	-DNON_MATCHING \
+	-DBUILD_VERSION=VERSION_G \
+	-DBUILD_VERSION_STRING=\"2.0G\" \
+	-D_MIPS_SZLONG=32
+
+INCLUDES := \
+	-I . \
+	-I include \
+	-I include/libc \
+	-I include/PR \
+	-I include/sys \
+	-I assets \
+	-I src \
+	-I src/hasm \
+	-I libultra \
+	-I libultra/src/gu \
+	-I libultra/src/libc \
+	-I libultra/src/io \
+	-I libultra/src/sc \
+	-I libultra/src/audio \
+	-I libultra/src/os
+
+OPT      ?= -O1
+CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) $(INCLUDES) \
+	-fno-builtin \
+	-fno-common \
+	-fno-strict-aliasing \
+	-funsigned-char \
+	-fwrapv \
+	-MMD -MP
+
+# Every game-code source file, individually.
+SRC_FILES := \
+	src/asset_loading.c \
+	src/audio.c \
+	src/audiomgr.c \
+	src/audiosfx.c \
+	src/audio_spatial.c \
+	src/audio_vehicle.c \
+	src/borders.c \
+	src/camera.c \
+	src/fade_transition.c \
+	src/font.c \
+	src/game.c \
+	src/game_text.c \
+	src/game_ui.c \
+	src/get_stack_pointer.c \
+	src/gzip.c \
+	src/isv_print.c \
+	src/joypad.c \
+	src/lights.c \
+	src/main.c \
+	src/memory.c \
+	src/menu.c \
+	src/object_functions.c \
+	src/object_models.c \
+	src/objects.c \
+	src/os_yield_data.c \
+	src/particles.c \
+	src/printf.c \
+	src/racer.c \
+	src/rcp_dkr.c \
+	src/save_data.c \
+	src/screen_asset.c \
+	src/set_rsp_segment.c \
+	src/textures_sprites.c \
+	src/thread0_epc.c \
+	src/thread30_bgload.c \
+	src/thread3_main.c \
+	src/tracks.c \
+	src/unused_string.c \
+	src/vehicle_bluey.c \
+	src/vehicle_bubbler.c \
+	src/vehicle_rocket.c \
+	src/vehicle_smokey.c \
+	src/vehicle_tricky.c \
+	src/vehicle_wizpig.c \
+	src/video.c \
+	src/waves.c \
+	src/weather.c \
+	src/hasm/collision.c \
+	src/hasm/math_util.c \
+	src/hasm/obj_animate.c \
+	src/hasm/obj_shade_fast.c
+
+# libultra C sources, individually. The .s files (exceptasm, cache/CP0 ops,
+# bcopy/bzero/bcmp, sqrtf, libm_vals) are NOT here — those become host shims.
+LIBULTRA_FILES := \
+	libultra/src/audio/bnkf.c \
+	libultra/src/audio/cents2ratio.c \
+	libultra/src/audio/copy.c \
+	libultra/src/audio/cseq.c \
+	libultra/src/audio/cspgetchlvol.c \
+	libultra/src/audio/cspgetstate.c \
+	libultra/src/audio/cspgettempo.c \
+	libultra/src/audio/cspplay.c \
+	libultra/src/audio/cspsetbank.c \
+	libultra/src/audio/cspsetchlvol.c \
+	libultra/src/audio/cspsetpan.c \
+	libultra/src/audio/cspsetseq.c \
+	libultra/src/audio/cspsettempo.c \
+	libultra/src/audio/cspsetvol.c \
+	libultra/src/audio/cspstop.c \
+	libultra/src/audio/env.c \
+	libultra/src/audio/event.c \
+	libultra/src/audio/filter.c \
+	libultra/src/audio/heapalloc.c \
+	libultra/src/audio/heapinit.c \
+	libultra/src/audio/load.c \
+	libultra/src/audio/mainbus.c \
+	libultra/src/audio/mips1/auxbus.c \
+	libultra/src/audio/mips1/cspgetfadein.c \
+	libultra/src/audio/mips1/csplayer.c \
+	libultra/src/audio/mips1/cspsetfadein.c \
+	libultra/src/audio/mips1/drvrnew.c \
+	libultra/src/audio/mips1/reverb.c \
+	libultra/src/audio/mips1/seqchannel.c \
+	libultra/src/audio/mips1/seqplayer.c \
+	libultra/src/audio/mips1/synallocfx.c \
+	libultra/src/audio/mips1/synsetpan.c \
+	libultra/src/audio/mips1/synstartvoiceparam.c \
+	libultra/src/audio/mips1/synthesizer.c \
+	libultra/src/audio/mips1/unknown_064690.c \
+	libultra/src/audio/resample.c \
+	libultra/src/audio/save.c \
+	libultra/src/audio/seqpgetfxmix.c \
+	libultra/src/audio/sl.c \
+	libultra/src/audio/synaddplayer.c \
+	libultra/src/audio/synallocvoice.c \
+	libultra/src/audio/syndelete.c \
+	libultra/src/audio/synfreevoice.c \
+	libultra/src/audio/synsetfxmix.c \
+	libultra/src/audio/synsetpitch.c \
+	libultra/src/audio/synsetpriority.c \
+	libultra/src/audio/synsetvol.c \
+	libultra/src/audio/synstartvoice.c \
+	libultra/src/audio/synstopvoice.c \
+	libultra/src/debug/assert.c \
+	libultra/src/debug/kdebugserver.c \
+	libultra/src/gu/cosf.c \
+	libultra/src/gu/mtxutil.c \
+	libultra/src/gu/perspective.c \
+	libultra/src/gu/sinf.c \
+	libultra/src/io/ai.c \
+	libultra/src/io/aigetlen.c \
+	libultra/src/io/aisetfreq.c \
+	libultra/src/io/aisetnextbuf.c \
+	libultra/src/io/conteepprobe.c \
+	libultra/src/io/conteepread.c \
+	libultra/src/io/conteepwrite.c \
+	libultra/src/io/contpfs.c \
+	libultra/src/io/contramread.c \
+	libultra/src/io/contramwrite.c \
+	libultra/src/io/contreaddata.c \
+	libultra/src/io/controller.c \
+	libultra/src/io/crc.c \
+	libultra/src/io/devmgr.c \
+	libultra/src/io/dp.c \
+	libultra/src/io/dpgetstat.c \
+	libultra/src/io/dpsetnextbuf.c \
+	libultra/src/io/dpsetstat.c \
+	libultra/src/io/epirawdma.c \
+	libultra/src/io/epirawwrite.c \
+	libultra/src/io/leointerrupt.c \
+	libultra/src/io/motor.c \
+	libultra/src/io/pfsallocatefile.c \
+	libultra/src/io/pfschecker.c \
+	libultra/src/io/pfsdeletefile.c \
+	libultra/src/io/pfsfilestate.c \
+	libultra/src/io/pfsfreeblocks.c \
+	libultra/src/io/pfsinit.c \
+	libultra/src/io/pfsisplug.c \
+	libultra/src/io/pfsnumfiles.c \
+	libultra/src/io/pfsreadwritefile.c \
+	libultra/src/io/pfsreformat.c \
+	libultra/src/io/pfssearchfile.c \
+	libultra/src/io/piacs.c \
+	libultra/src/io/pidma.c \
+	libultra/src/io/pigetcmdq.c \
+	libultra/src/io/pimgr.c \
+	libultra/src/io/pirawdma.c \
+	libultra/src/io/pirawread.c \
+	libultra/src/io/si.c \
+	libultra/src/io/siacs.c \
+	libultra/src/io/sirawdma.c \
+	libultra/src/io/sirawread.c \
+	libultra/src/io/sirawwrite.c \
+	libultra/src/io/sp.c \
+	libultra/src/io/spgetstat.c \
+	libultra/src/io/sprawdma.c \
+	libultra/src/io/spsetpc.c \
+	libultra/src/io/spsetstat.c \
+	libultra/src/io/sptask.c \
+	libultra/src/io/sptaskyield.c \
+	libultra/src/io/sptaskyielded.c \
+	libultra/src/io/vi.c \
+	libultra/src/io/viblack.c \
+	libultra/src/io/vigetcurrcontext.c \
+	libultra/src/io/vigetcurrframebuf.c \
+	libultra/src/io/vigetnextframebuf.c \
+	libultra/src/io/vimgr.c \
+	libultra/src/io/visetevent.c \
+	libultra/src/io/visetmode.c \
+	libultra/src/io/visetspecial.c \
+	libultra/src/io/viswapbuf.c \
+	libultra/src/io/viswapcontext.c \
+	libultra/src/io/vitbl.c \
+	libultra/src/libc/ldiv.c \
+	libultra/src/libc/ll.c \
+	libultra/src/libc/llcvt.c \
+	libultra/src/libc/rmonPrintf.c \
+	libultra/src/libc/string.c \
+	libultra/src/libc/xldtob.c \
+	libultra/src/libc/xlitob.c \
+	libultra/src/libc/xprintf.c \
+	libultra/src/os/createmesgqueue.c \
+	libultra/src/os/createthread.c \
+	libultra/src/os/destroythread.c \
+	libultra/src/os/getactivequeue.c \
+	libultra/src/os/getthreadpri.c \
+	libultra/src/os/gettime.c \
+	libultra/src/os/initialize.c \
+	libultra/src/os/jammesg.c \
+	libultra/src/os/recvmesg.c \
+	libultra/src/os/resetglobalintmask.c \
+	libultra/src/os/sendmesg.c \
+	libultra/src/os/seteventmesg.c \
+	libultra/src/os/sethwinterrupt.c \
+	libultra/src/os/setthreadpri.c \
+	libultra/src/os/settime.c \
+	libultra/src/os/settimer.c \
+	libultra/src/os/startthread.c \
+	libultra/src/os/stopthread.c \
+	libultra/src/os/thread.c \
+	libultra/src/os/timerintr.c \
+	libultra/src/os/virtualtophysical.c \
+	libultra/src/os/yieldthread.c \
+	libultra/src/sc/sched.c
+
+O_FILES := $(addprefix $(BUILD)/,$(SRC_FILES:.c=.o) $(LIBULTRA_FILES:.c=.o))
+D_FILES := $(O_FILES:.o=.d)
+
+.PHONY: all link clean
+
+all: $(O_FILES)
+	@echo "PC objects built: $(words $(O_FILES)) ($(words $(SRC_FILES)) game + $(words $(LIBULTRA_FILES)) libultra)"
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+link: $(O_FILES)
+	$(CC) -m$(BITS) -o $(BUILD)/dkr.pc $(O_FILES) -lm
+
+clean:
+	rm -rf $(BUILD)
+
+-include $(D_FILES)

@@ -10,6 +10,10 @@ tldr
 
 `make -j8 COMPILER=ido NM=1`
 
+Linux port:
+
+`make -f Makefile.pc -j8`
+
 
 
 This repo contains a work-in-progress decompilation of Diddy Kong Racing for the N64. You will need to have a original copy of the ROM to extract the game's assets.
