@@ -5399,7 +5399,9 @@ u32 func_800179D0(void) {
 }
 
 // https://decomp.me/scratch/xNAlf
-// Note: This function is ~70% matching and may contain logic discrepancies (e.g., A2/C2 calculations) compared to the original assembly.
+// 2026-07-11: verified against baserom asm (ROM 0x18618). The B>0.707 branch originally
+// solved the plane equation at (x1,z1) — the new position — not (x2,z2); using A2/C2
+// (A*x2/C*z2) here caused the map-specific "caught on the track lip" collision bug.
 s32 func_80017A18(ObjectModel *arg0, s32 arg1, s32 *arg2, f32 *arg3, f32 *arg4, f32 *arg5, f32 *arg6, f32 *arg7,
                   f32 *arg8, f32 *arg9, s8 *argA, f32 argB) {
     f32 *planes;
@@ -5496,7 +5498,7 @@ s32 func_80017A18(ObjectModel *arg0, s32 arg1, s32 *arg2, f32 *arg3, f32 *arg4, 
                     if (var_a2) {
                         redoLoop = TRUE;
                         if (B > 0.707) {
-                            y1 = (spC0 - (A2 + C2 + D)) / B;
+                            y1 = (spC0 - ((A * x1) + (C * z1) + D)) / B;
                         } else {
                             x1 -= sum2 * A;
                             y1 -= sum2 * B;
