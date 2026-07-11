@@ -23,6 +23,7 @@ BUILD   := build/pc
 
 DEFINES := \
 	-DTARGET_PC \
+	-D_LANGUAGE_C \
 	-D_FINALROM \
 	-DNDEBUG \
 	-DF3DDKR_GBI \
@@ -33,10 +34,12 @@ DEFINES := \
 	-DBUILD_VERSION_STRING=\"2.0G\" \
 	-D_MIPS_SZLONG=32
 
-INCLUDES := \
+# linux/ (platform code) compiles WITHOUT -I include/libc: those headers are N64
+# stubs that shadow the real system libc (their stdio.h only declares sprintf).
+# Game code keeps the shadow; platform code gets the host's actual headers.
+INCLUDES_REIMPL := \
 	-I . \
 	-I include \
-	-I include/libc \
 	-I include/PR \
 	-I include/sys \
 	-I assets \
@@ -50,17 +53,23 @@ INCLUDES := \
 	-I libultra/src/audio \
 	-I libultra/src/os
 
+INCLUDES := -I include/libc $(INCLUDES_REIMPL)
+
 OPT      ?= -O1
-CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) $(INCLUDES) \
+BASE_CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) \
 	-fno-builtin \
 	-fno-common \
 	-fno-strict-aliasing \
 	-funsigned-char \
 	-fwrapv \
 	-MMD -MP
+CFLAGS        := $(BASE_CFLAGS) $(INCLUDES)
+CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 
 # Every game-code source file, individually.
 SRC_FILES := \
+	linux/main.c \
+	linux/reimpl.c \
 	src/asset_loading.c \
 	src/audio.c \
 	src/audiomgr.c \
@@ -270,19 +279,24 @@ LIBULTRA_FILES := \
 O_FILES := $(addprefix $(BUILD)/,$(SRC_FILES:.c=.o) $(LIBULTRA_FILES:.c=.o))
 D_FILES := $(O_FILES:.o=.d)
 
-.PHONY: all link clean
+TARGET := dkracing
 
-all: $(O_FILES)
-	@echo "PC objects built: $(words $(O_FILES)) ($(words $(SRC_FILES)) game + $(words $(LIBULTRA_FILES)) libultra)"
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(O_FILES)
+	$(CC) -m$(BITS) $(O_FILES) -o $(TARGET) -lm
+
+$(BUILD)/linux/%.o: linux/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS_REIMPL) -c -o $@ $<
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-link: $(O_FILES)
-	$(CC) -m$(BITS) -o $(BUILD)/dkr.pc $(O_FILES) -lm
-
 clean:
-	rm -rf $(BUILD)
+	rm -rf $(BUILD) $(TARGET)
 
 -include $(D_FILES)
