@@ -3,7 +3,9 @@
 // where the two games needed the same symbol; DKR-specific ones added at the
 // bottom of each section.
 
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
 
 typedef signed char s8;
@@ -55,6 +57,17 @@ s32 D_B0000578 = 0x8965;
 // Math library data (was libultra/src/gu/libm_vals.s)
 // ---------------------------------------------------------------------------
 float __libm_qnan_f = __builtin_nanf("");
+
+// ---------------------------------------------------------------------------
+// Debug printing (was src/isv_print.c writing to the IS-Viewer MMIO device at
+// 0xB3FF0000 — the game's stubbed_printf channel; goes to stdout here)
+// ---------------------------------------------------------------------------
+void isv_printf(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+}
 
 // ---------------------------------------------------------------------------
 // Cache management (no caches to manage on the host)
