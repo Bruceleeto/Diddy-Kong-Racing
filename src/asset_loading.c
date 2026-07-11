@@ -27,6 +27,12 @@ u32 *gAssetsLookupTable;
 // These are both defined in the generated dkr.ld file.
 extern u8 __ASSETS_LUT_START[], __ASSETS_LUT_END[];
 
+#ifdef TARGET_PC
+// linux/reimpl.c: assets served from assets/assets{,.lut}.bin on disk.
+extern u32 pc_asset_lut_size(void);
+extern void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes);
+#endif
+
 /**
  * Set up the peripheral interface message queues and scheduling.
  * This will send messages when DMA reads are finished.
@@ -44,7 +50,11 @@ void pi_init(void) {
     osSendMesg(&gDmaMutex, (OSMesg) 1, OS_MESG_NOBLOCK);
 #endif
 
+#ifdef TARGET_PC
+    assetTableSize = pc_asset_lut_size();
+#else
     assetTableSize = __ASSETS_LUT_END - __ASSETS_LUT_START;
+#endif
     gAssetsLookupTable = (u32 *) mempool_alloc_safe(assetTableSize, COLOUR_TAG_GREY);
     mempool_locked_set((u8 *) gAssetsLookupTable);
     dmacopy_internal((u32) __ASSETS_LUT_START, (u32) gAssetsLookupTable, (s32) assetTableSize);
@@ -265,6 +275,9 @@ void dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
 // Looks like v2 ROMs made an alternate version of this function, and this is the original.
 void dmacopy_internal(u32 romOffset, u32 ramAddress, s32 numBytes) {
 #endif
+#ifdef TARGET_PC
+    pc_dmacopy(romOffset, ramAddress, numBytes);
+#else
     OSMesg dmaMesg;
     s32 numBytesToDMA;
 
@@ -281,4 +294,5 @@ void dmacopy_internal(u32 romOffset, u32 ramAddress, s32 numBytes) {
         romOffset += numBytesToDMA;
         ramAddress += numBytesToDMA;
     }
+#endif
 }

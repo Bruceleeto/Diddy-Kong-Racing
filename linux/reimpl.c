@@ -6,6 +6,8 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 typedef signed char s8;
@@ -40,6 +42,97 @@ u8 *main_BSS_START[1] = { 0 };
 // PC: a static pool. memory.c's "ramEnd - (s32)&gMainMemoryPool" sizing math
 // still needs TARGET_PC surgery to use this pool's real size instead.
 u8 gMainMemoryPool[16 * 1024 * 1024] __attribute__((aligned(16)));
+
+// ---------------------------------------------------------------------------
+// Asset "DMA" — the DKR equivalent of the OoT port's DmaMgr_DmaRomToRam.
+// On N64 the asset LUT and asset data sit in cart ROM right after the code,
+// bracketed by __ASSETS_LUT_START/__ASSETS_LUT_END. On PC the same bytes live
+// in the files the N64 build already produces (assets/assets.lut.bin and
+// assets/assets.bin); dmacopy addresses are translated back to file offsets
+// relative to the two stub symbols above.
+// The LUT is an array of big-endian u32s — byteswapped once at load. Asset
+// *contents* are left big-endian; each parse site gets fixed as it comes up.
+// ---------------------------------------------------------------------------
+static u8 *sAssetLut = NULL;
+static u32 sAssetLutSize = 0;
+static u8 *sAssetsBin = NULL;
+static u32 sAssetsBinSize = 0;
+
+static u8 *pc_load_file(const char *path, u32 *sizeOut) {
+    FILE *f = fopen(path, "rb");
+    long size;
+    u8 *buf;
+
+    if (f == NULL) {
+        fprintf(stderr, "ASSETS: cannot open %s (run from the repo root, and build the N64 assets first)\n", path);
+        exit(1);
+    }
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = malloc(size);
+    if (fread(buf, 1, size, f) != (size_t) size) {
+        fprintf(stderr, "ASSETS: short read on %s\n", path);
+        exit(1);
+    }
+    fclose(f);
+    *sizeOut = (u32) size;
+    return buf;
+}
+
+static void pc_assets_init(void) {
+    u32 i;
+
+    if (sAssetLut != NULL) {
+        return;
+    }
+    sAssetLut = pc_load_file("assets/assets.lut.bin", &sAssetLutSize);
+    sAssetsBin = pc_load_file("assets/assets.bin", &sAssetsBinSize);
+
+    // LUT: entry count followed by offsets, all big-endian u32 — swap in place.
+    for (i = 0; i + 3 < sAssetLutSize; i += 4) {
+        u8 *p = &sAssetLut[i];
+        u8 t0 = p[0], t1 = p[1];
+        p[0] = p[3];
+        p[1] = p[2];
+        p[2] = t1;
+        p[3] = t0;
+    }
+    printf("ASSETS: lut %u bytes, data %u bytes\n", sAssetLutSize, sAssetsBinSize);
+}
+
+u32 pc_asset_lut_size(void) {
+    pc_assets_init();
+    return sAssetLutSize;
+}
+
+void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
+    pc_assets_init();
+
+    if (romOffset == (u32) (uintptr_t) __ASSETS_LUT_START) {
+        if ((u32) numBytes > sAssetLutSize) {
+            numBytes = sAssetLutSize;
+        }
+        memcpy((void *) (uintptr_t) ramAddress, sAssetLut, numBytes);
+        return;
+    }
+
+    if (romOffset >= (u32) (uintptr_t) __ASSETS_LUT_END) {
+        u32 offset = romOffset - (u32) (uintptr_t) __ASSETS_LUT_END;
+        if (offset < sAssetsBinSize) {
+            if (offset + numBytes > sAssetsBinSize) {
+                fprintf(stderr, "ASSETS: read past end (offset 0x%X + 0x%X > 0x%X), clamped\n", offset, numBytes,
+                        sAssetsBinSize);
+                numBytes = sAssetsBinSize - offset;
+            }
+            memcpy((void *) (uintptr_t) ramAddress, sAssetsBin + offset, numBytes);
+            return;
+        }
+    }
+
+    fprintf(stderr, "ASSETS: dmacopy from unknown ROM address 0x%X (%d bytes) — zero-filled\n", romOffset, numBytes);
+    memset((void *) (uintptr_t) ramAddress, 0, numBytes);
+}
 
 // ---------------------------------------------------------------------------
 // Boot globals (normally set up by the PIF/boot code)
