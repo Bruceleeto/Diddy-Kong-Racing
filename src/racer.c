@@ -2564,7 +2564,7 @@ void func_80049794(s32 updateRate, f32 updateRateF, Object *obj, Object_Racer *r
     f32 var_f6;
     s32 racerTrickType;
     f32 segmentXVelocity;
-    f32 sp60[4]; // Should be MtxF, but produces a worse score.
+    MtxF sp60; // Retail-matching decomp used f32[4] for match score — 48 bytes short; mtxf_from_transform fills a full MtxF.
     s8 playerObjectMoved;
     f32 var_f14;
     s32 steerVisualRotationOffset;

@@ -771,7 +771,16 @@ static u16 atan2_lookup(f32 y, f32 x) {
     if (x == 0) {
         ret = gArcTanTable[0];
     } else {
-        ret = gArcTanTable[(s32) (y / x * 1024 + 0.5f)];
+        // Callers guarantee |y| <= |x|, but extreme inputs (overflowed
+        // float->int conversions upstream) can break that; unclamped, the
+        // original read garbage RAM on N64 and segfaults on PC.
+        s32 index = (s32) (y / x * 1024 + 0.5f);
+        if (index < 0) {
+            index = 0;
+        } else if (index > 1024) {
+            index = 1024;
+        }
+        ret = gArcTanTable[index];
     }
     return ret;
 }
@@ -819,7 +828,15 @@ s32 atan2s(s32 xDelta, s32 zDelta) {
 }
 
 u16 arctan2_f(f32 y, f32 x) {
-    return atan2s((s32) (y * 255.0f), (s32) (x * 255.0f));
+    // Out-of-range f32->s32 conversion is implementation-defined: the VR4300
+    // saturates to INT_MAX, x86 yields INT_MIN — and INT_MIN survives atan2s'
+    // negation, breaking its |y| <= |x| lookup invariant. Saturate explicitly
+    // (to a negatable value) so both platforms agree.
+    f32 fy = y * 255.0f;
+    f32 fx = x * 255.0f;
+    s32 sy = (fy >= 2147483520.0f) ? 0x7FFFFFFF : (fy <= -2147483520.0f) ? -0x7FFFFFFF : (s32) fy;
+    s32 sx = (fx >= 2147483520.0f) ? 0x7FFFFFFF : (fx <= -2147483520.0f) ? -0x7FFFFFFF : (s32) fx;
+    return atan2s(sy, sx);
 }
 
 /**

@@ -290,7 +290,11 @@ void mempool_free_queue_clear(void) {
             gFreeQueue[i].freeTimer = gFreeQueue[gFreeQueueCount - 1].freeTimer;
             gFreeQueueCount--;
         } else {
-            stubbed_printf("\n*** mm Error *** ---> Can't free ram at this location: %x\n", gFreeQueue[i].dataAddress);
+            // Fires for every queued free whose timer hasn't expired yet (they
+            // free fine on a later pass) — pure noise now that stubbed_printf
+            // is real.
+            // stubbed_printf("\n*** mm Error *** ---> Can't free ram at this location: %x\n",
+            //                gFreeQueue[i].dataAddress);
             i++;
         }
     }

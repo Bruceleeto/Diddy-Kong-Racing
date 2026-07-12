@@ -544,6 +544,8 @@ TextureHeader *load_texture(s32 id) {
     if (!gTempTextureHeader->header.isCompressed) {
         tex = (TextureHeader *) mempool_alloc(numberOfTextures * TEXTURE_GFX_SIZE + assetSize, gTexColourTag);
         if (tex == NULL) {
+            stubbed_printf("TEXLOAD FAIL(u) id=%d n=%d size=%d tag=%d\n", id, numberOfTextures,
+                           numberOfTextures * TEXTURE_GFX_SIZE + assetSize, gTexColourTag);
             return NULL;
         }
         asset_load(assetSection, (u32) tex, assetOffset, assetSize);
@@ -555,6 +557,8 @@ TextureHeader *load_texture(s32 id) {
         uncompressedSize = byteswap32((u8 *) &gTempTextureHeader->uncompressedSize) + sizeof(TextureHeader);
         tex = (TextureHeader *) mempool_alloc(numberOfTextures * TEXTURE_GFX_SIZE + uncompressedSize, gTexColourTag);
         if (tex == NULL) {
+            stubbed_printf("TEXLOAD FAIL(c) id=%d n=%d size=%d tag=%d\n", id, numberOfTextures,
+                           numberOfTextures * TEXTURE_GFX_SIZE + uncompressedSize, gTexColourTag);
             return NULL;
         }
 

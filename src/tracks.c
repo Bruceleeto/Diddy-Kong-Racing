@@ -1134,9 +1134,9 @@ s32 func_80027568(void) {
     ret = FALSE;
     for (var_t4 = 0; var_t4 < gNumCollisionCandidates && ret == FALSE; var_t4++) {
         flipSide = gCollisionCandidates[var_t4];
-        if (flipSide > 0) {
+        if (COLLISION_ENTRY_IS_SEGMENT(flipSide)) {
             // this is segment Entry
-            segment = (LevelModelSegment *) PHYS_TO_K0(flipSide);
+            segment = COLLISION_ENTRY_SEGMENT(flipSide);
         } else {
             colNode = (CollisionNode *) flipSide;
             curViewport = colNode->colPlaneIndex << 2;

@@ -130,7 +130,9 @@ static void pc_swap_object_model(ObjectModel *mdl) {
     }
     pc_swap16_buf((u8 *) mdl + (uintptr_t) mdl->attachPoints, mdl->numberOfAttachPoints * 2);
     pc_swap16_buf((u8 *) mdl + (uintptr_t) mdl->collisionSpheres, mdl->collisionSpheresSize * 2);
-    pc_swap32_buf((u8 *) mdl + (uintptr_t) mdl->animatedVertexIndices, mdl->numberOfAnimatedVertices * 4);
+    // Despite the s32* declaration, obj_animate reads this as an s16 slot map
+    // with one entry per model vertex.
+    pc_swap16_buf((u8 *) mdl + (uintptr_t) mdl->animatedVertexIndices, mdl->numberOfVertices * 2);
 }
 #endif
 
@@ -1008,12 +1010,18 @@ s32 model_anim_init(ObjectModel *model, s32 modelID) {
         gzip_inflate((u8 *) animAddress, (u8 *) model->animations[i].anim);
         temp = model->animations[i].anim;
 #ifdef TARGET_PC
-        // Big-endian length word. The keyframe data past it is NOT swapped
-        // here yet — obj_animate consumers read it raw.
+        // Big-endian length word.
         pc_swap32_buf(temp, 4);
 #endif
         model->animations[i].animLength = *temp;
         model->animations[i].anim++;
+#ifdef TARGET_PC
+        // Keyframe-0 base pose: numberOfAnimatedVertices x 3 big-endian s16
+        // deltas at animData+0xC (obj_animate). Keyframe headers are read
+        // bytewise there and the per-keyframe deltas are s8 — neither needs
+        // swapping.
+        pc_swap16_buf(model->animations[i].animData + 0xC, model->numberOfAnimatedVertices * 6);
+#endif
         i++;
         start++;
         i2++;

@@ -21,8 +21,14 @@ ALCSPlayer *gMusicPlayer = NULL;  // Official Name: tuneSeqPlayer
 #define MUSIC_PC_GUARD(retval) \
     if (gMusicPlayer == NULL) \
     return retval
+// Same for the sfx side: gSoundBank is allocated by sound_init, which doesn't
+// run on PC, so bank-walking sfx queries no-op through this.
+#define SFX_PC_GUARD(retval) \
+    if (gSoundBank == NULL) \
+    return retval
 #else
 #define MUSIC_PC_GUARD(retval)
+#define SFX_PC_GUARD(retval)
 #endif
 
 ALCSPlayer *gJinglePlayer = NULL; // Official Name: ambientSeqPlayer
@@ -864,6 +870,7 @@ UNUSED void sound_channel_volume_all(u16 volume) {
  * Return the audible distance of the sound effect.
  */
 u16 sound_distance(u16 soundId) {
+    SFX_PC_GUARD(0);
     if (soundId > gSoundCount) {
         return 0;
     }
@@ -879,6 +886,14 @@ void sound_play(u16 soundID, SoundHandle *handlePtr) {
     f32 pitch;
     s32 soundBite;
 
+#ifdef TARGET_PC
+    if (gSoundBank == NULL) {
+        if (handlePtr != NULL) {
+            *handlePtr = NULL;
+        }
+        return;
+    }
+#endif
     if (soundID > gSoundCount) {
         if (handlePtr != NULL) {
             *handlePtr = NULL;
@@ -931,6 +946,16 @@ void sound_play_spatial(u16 soundID, f32 x, f32 y, f32 z, SoundHandle *handlePtr
  * Official Name: amSndPlayDirect
  */
 void sound_play_direct(u16 soundID, SoundHandle *handlePtr) {
+#ifdef TARGET_PC
+    // Bail silently with no bank: on N64 these sounds are legal, so taking
+    // the "illegal sound" print below would be spurious PC-only log spam.
+    if (gSoundBank == NULL) {
+        if (handlePtr) {
+            *handlePtr = NULL;
+        }
+        return;
+    }
+#endif
     if (soundID <= 0 || sound_count() < soundID) {
         stubbed_printf("amSndPlayDirect: Somebody tried to play illegal sound %d\n", soundID);
         if (handlePtr) {
@@ -950,7 +975,9 @@ void sound_play_direct(u16 soundID, SoundHandle *handlePtr) {
  * Official Name: amSndSetVol
  */
 void sound_volume_set_relative(u16 soundID, SoundHandle soundHandle, u8 volume) {
-    s32 newVolume = ((s32) (gSoundTable[soundID].volume * (volume / 127.0f))) * 256;
+    s32 newVolume;
+    SFX_PC_GUARD();
+    newVolume = ((s32) (gSoundTable[soundID].volume * (volume / 127.0f))) * 256;
     if (soundHandle) {
         sndp_set_param(soundHandle, AL_SNDP_VOL_EVT, newVolume);
     }
@@ -981,6 +1008,7 @@ UNUSED void sound_pitch_set(SoundHandle soundHandle, u32 pitch) {
  * Official name: amGetSfxCount
  */
 u16 sound_count(void) {
+    SFX_PC_GUARD(0);
     return gSoundBank->bankArray[0]->instArray[0]->soundCount;
 }
 
@@ -1029,6 +1057,7 @@ UNUSED void music_table_properties(MusicData **table, s32 *size, s32 *count) {
  * Official Name: amSoundIsLooped
  */
 u8 sound_is_looped(u16 soundID) {
+    SFX_PC_GUARD(0);
     if (soundID <= 0 || gSoundBank->bankArray[0]->instArray[0]->soundCount < soundID) {
         return 0;
     }

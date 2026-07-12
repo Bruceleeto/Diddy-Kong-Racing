@@ -316,7 +316,10 @@ s32 gInitAINodes;
 s32 D_8011AF14;
 f32 gElevationHeights[5];
 s32 D_8011AF2C;
-ShadeProperties *gWorldShading; // Effectively unused.
+// Effectively unused. Retail declared 4 bytes (a pointer) but
+// set_world_shading fills it as a whole ShadeProperties, overrunning into the
+// neighbouring globals — harmless only under retail's layout. Real storage now.
+ShadeProperties gWorldShading;
 s32 D_8011AF34;
 s32 D_8011AF38[10];
 Object_MidiFade *D_8011AF60;
@@ -769,7 +772,23 @@ void allocate_object_pools(void) {
         // Table only — the misc *section* is mixed-format data; each
         // get_misc_asset consumer owns the endianness of its own piece.
         extern void pc_swap32_buf(void *buf, u32 numBytes);
+        extern void pc_swap16_buf(void *buf, u32 numBytes);
         pc_swap32_buf(gAssetsMiscTable, asset_table_size(ASSET_MISC_TABLE));
+
+        // ASSET_MISC_20: the 10 Object_Boost racer-FX entries read by
+        // racerfx_alloc — 27 f32s of boost data plus sprite/texture ids per
+        // entry. The trailing fields (unk70..tex) are runtime state.
+        {
+            Object_Boost *boost = (Object_Boost *) &gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_20]];
+            s32 n;
+            _Static_assert(sizeof(Object_Boost) == 0x80, "Object_Boost layout drifted from N64");
+            _Static_assert(__builtin_offsetof(Object_Boost, spriteId) == 0x6C,
+                           "Object_Boost layout drifted from N64");
+            for (n = 0; n < NUMBER_OF_CHARACTERS; n++) {
+                pc_swap32_buf(&boost[n], 0x6C);        // car/hovercraft/flying boost data, 27 x f32
+                pc_swap16_buf(&boost[n].spriteId, 4);  // spriteId, textureId
+            }
+        }
     }
 #endif
     gAssetsMiscTableLength = 0;
@@ -1018,18 +1037,18 @@ static void pc_swap_spawn_entry_fields(u8 *entryBytes) {
     LevelObjectEntry *entry = (LevelObjectEntry *) entryBytes;
     s32 objType = entryBytes[0] | ((entryBytes[1] & 0x80) << 1);
     s16 headerType = gAssetsLvlObjTranslationTable[objType];
-    ObjectHeader *header;
+    ObjectHeader tmpHeader;
     s8 behavior;
 
     if (headerType >= gAssetsObjectHeadersTableLength) {
         headerType = 0;
     }
-    header = load_object_header(headerType);
-    if (header == NULL) {
-        return;
-    }
-    behavior = header->behaviorId;
-    try_free_object_header(headerType);
+    // Peek behaviorId (an s8, endianness-free) straight from the asset into a
+    // stack buffer: going through load_object_header/try_free_object_header
+    // here would push a mempool free per entry onto the deferred-free queue,
+    // which never drains during level load and overflows on dense maps.
+    asset_load(ASSET_OBJECTS, (u32) &tmpHeader, gAssetsObjectHeadersTable[headerType], sizeof(ObjectHeader));
+    behavior = tmpHeader.behaviorId;
 
     switch (behavior) {
         case BHV_RACER:
@@ -8054,7 +8073,7 @@ UNUSED void func_8001D248(UNUSED s32 arg0, UNUSED s32 arg1, UNUSED s32 arg2) {
  * Presumably intended for level geometry, which supports shading, but never uses it.
  */
 void set_world_shading(f32 ambient, f32 diffuse, s16 angleX, s16 angleY, s16 angleZ) {
-    set_shading_properties((ShadeProperties *) &gWorldShading, ambient, diffuse, angleX, angleY, angleZ);
+    set_shading_properties(&gWorldShading, ambient, diffuse, angleX, angleY, angleZ);
 }
 
 /**

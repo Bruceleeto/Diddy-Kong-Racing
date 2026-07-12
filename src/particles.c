@@ -544,6 +544,13 @@ void init_particle_buffers(s32 maxTriangleParticles, s32 maxRectangleParticles, 
 
     if (gParticleDummys == NULL) {
         assetBuffer = (s16 *) asset_table_load(ASSET_DUMMY_PARTICLE_IDS);
+#ifdef TARGET_PC
+        {
+            // Big-endian s16 sprite-id table (helper in linux/reimpl.c).
+            extern void pc_swap16_buf(void *buf, u32 numBytes);
+            pc_swap16_buf(assetBuffer, asset_table_size(ASSET_DUMMY_PARTICLE_IDS));
+        }
+#endif
         gParticleDummyCount = 0;
         while (assetBuffer[gParticleDummyCount] != -1) {
             gParticleDummyCount++;
