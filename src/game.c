@@ -25,6 +25,11 @@
 #include "video.h"
 #include "weather.h"
 
+#ifdef TARGET_PC
+// Big-endian asset offset tables (helper in linux/reimpl.c).
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+#endif
+
 /************ .data ************/
 
 char *gTempLevelNames = NULL;
@@ -72,6 +77,9 @@ void level_global_init(void) {
     s32 j;
     header = mempool_alloc_safe(sizeof(LevelHeader), COLOUR_TAG_YELLOW);
     gTempAssetTable = (s32 *) asset_table_load(ASSET_LEVEL_HEADERS_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_LEVEL_HEADERS_TABLE));
+#endif
     i = 0;
     while (i < 16) {
         gRaceTypeCountTable[i++] = 0;
@@ -112,6 +120,9 @@ void level_global_init(void) {
     mempool_free(gTempAssetTable);
     mempool_free(header);
     gTempAssetTable = (s32 *) asset_table_load(ASSET_LEVEL_NAMES_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_LEVEL_NAMES_TABLE));
+#endif
     for (i = 0; gTempAssetTable[i] != (-1); i++) {}
     i--;
     size = gTempAssetTable[i] - gTempAssetTable[0];
@@ -376,6 +387,9 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
     }
     settings = get_settings();
     gTempAssetTable = (s32 *) asset_table_load(ASSET_LEVEL_HEADERS_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_LEVEL_HEADERS_TABLE));
+#endif
 
     for (i = 0; gTempAssetTable[i] != -1; i++) {}
     i--;
@@ -740,6 +754,9 @@ void aitable_init(s8 *aiLevelTable) {
         aiLevel = 5;
     }
     gTempAssetTable = (s32 *) asset_table_load(ASSET_AI_BEHAVIOUR_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_AI_BEHAVIOUR_TABLE));
+#endif
     tableIndexCount = 0;
     while (-1 != (s32) gTempAssetTable[tableIndexCount]) {
         tableIndexCount++;

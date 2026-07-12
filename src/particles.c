@@ -255,6 +255,18 @@ void free_particle_assets(void) {
 #ifdef TARGET_PC
 // Particle assets are big-endian (see docs/linux_port.md). Descriptors and
 // behaviours are mixed-width structs, so they get field-wise swaps.
+//
+// The swaps (and the game's struct-overlay reads) are only correct if the
+// host lays these structs out exactly like the N64 compiler did — proven at
+// build time against the headers' documented offsets:
+_Static_assert(sizeof(ParticleDescriptor) == 0x18, "ParticleDescriptor layout drifted from N64");
+_Static_assert(__builtin_offsetof(ParticleDescriptor, scale) == 0x10, "ParticleDescriptor layout drifted from N64");
+_Static_assert(sizeof(ParticleBehaviour) == 0xA0, "ParticleBehaviour layout drifted from N64");
+_Static_assert(__builtin_offsetof(ParticleBehaviour, velocityModifierRange) == 0x74,
+               "ParticleBehaviour layout drifted from N64");
+_Static_assert(__builtin_offsetof(ParticleBehaviour, colourLoop) == 0x9C, "ParticleBehaviour layout drifted from N64");
+_Static_assert(sizeof(ColorLoopEntry) == 0x8, "ColorLoopEntry layout drifted from N64");
+
 extern void pc_swap32_buf(void *buf, u32 numBytes);
 
 static void pc_swap16p(void *p) {
