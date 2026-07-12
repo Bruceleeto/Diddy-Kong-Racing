@@ -12,6 +12,12 @@
 #   (io/, timers) will need #ifdef TARGET_PC surgery or shim replacements, but
 #   they start out in the build so the worklist is visible as compile errors.
 # - src/hasm/softfloat_conv.c and llmuldiv_gcc.s excluded: host libgcc provides those.
+# - libultra/src/gu/{sinf,cosf}.c excluded: they build their polynomial constants as
+#   big-endian {hi,lo} word pairs of a double (the du union in guint.h), so on a
+#   little-endian host every coefficient is byte-swapped garbage. They are #pragma weak,
+#   so leaving them out hands sinf/cosf to the host libm (-lm). The OoT DC port omits
+#   them the same way. Symptom when they were in: guPerspectiveF's cot went NaN, which
+#   NaN'd columns 0 and 1 of every MVP.
 # - -DTARGET_PC replaces -DTARGET_N64; use it to #ifdef the platform split.
 
 CC      := gcc
@@ -63,9 +69,14 @@ BASE_CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) \
 CFLAGS        := $(BASE_CFLAGS) $(INCLUDES)
 CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 
+# The renderer (linux/main.c) is SDL2 + OpenGL. On the default 32-bit build this
+# needs the i386 SDL2/GL runtime, not the host's 64-bit one.
+LIBS := -lm -lSDL2 -lGL
+
 # Every game-code source file, individually.
 SRC_FILES := \
 	linux/main.c \
+	linux/gfx.c \
 	linux/reimpl.c \
 	src/asset_loading.c \
 	src/audio.c \
@@ -172,10 +183,8 @@ LIBULTRA_FILES := \
 	libultra/src/audio/synstopvoice.c \
 	libultra/src/debug/assert.c \
 	libultra/src/debug/kdebugserver.c \
-	libultra/src/gu/cosf.c \
 	libultra/src/gu/mtxutil.c \
 	libultra/src/gu/perspective.c \
-	libultra/src/gu/sinf.c \
 	libultra/src/io/ai.c \
 	libultra/src/io/aigetlen.c \
 	libultra/src/io/aisetfreq.c \
@@ -261,7 +270,7 @@ TARGET := dkracing
 all: $(TARGET)
 
 $(TARGET): $(O_FILES)
-	$(CC) -m$(BITS) $(O_FILES) -o $(TARGET) -lm
+	$(CC) -m$(BITS) $(O_FILES) -o $(TARGET) $(LIBS)
 
 $(BUILD)/linux/%.o: linux/%.c
 	@mkdir -p $(dir $@)
