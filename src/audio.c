@@ -13,6 +13,18 @@
 /************ .data ************/
 
 ALCSPlayer *gMusicPlayer = NULL;  // Official Name: tuneSeqPlayer
+
+#ifdef TARGET_PC
+// Audio is not initialized on PC (audio_init early-returns), so the public
+// music API no-ops. gMusicPlayer is created by audio_init, so it doubles as
+// the "music system initialized" flag.
+#define MUSIC_PC_GUARD(retval) \
+    if (gMusicPlayer == NULL) \
+    return retval
+#else
+#define MUSIC_PC_GUARD(retval)
+#endif
+
 ALCSPlayer *gJinglePlayer = NULL; // Official Name: ambientSeqPlayer
 u8 gMusicBaseVolume = 127;
 u8 sfxRelativeVolume = 127;
@@ -228,6 +240,7 @@ void sound_volume_change(s32 behaviour) {
  * Prevents changing of background music.
  */
 void music_change_off(void) {
+    MUSIC_PC_GUARD();
     gBlockMusicChange = TRUE;
 }
 
@@ -235,6 +248,7 @@ void music_change_off(void) {
  * Allows changing of background music.
  */
 void music_change_on(void) {
+    MUSIC_PC_GUARD();
     gBlockMusicChange = FALSE;
 }
 
@@ -244,6 +258,7 @@ void music_change_on(void) {
  * Official Name: amTunePlay
  */
 void music_play(u8 seqID) {
+    MUSIC_PC_GUARD();
     if (gBlockMusicChange == FALSE && gMusicSliderVolume != 0) {
         gCurrentSequenceID = seqID;
         gMusicBaseVolume = 127;
@@ -262,6 +277,7 @@ void music_play(u8 seqID) {
  * Official Name: amTuneVoiceLimit
  */
 void music_voicelimit_set(u8 voiceLimit) {
+    MUSIC_PC_GUARD();
     if (gBlockVoiceLimitChange == FALSE) {
         set_voice_limit(gMusicPlayer, voiceLimit);
     }
@@ -271,6 +287,7 @@ void music_voicelimit_set(u8 voiceLimit) {
  * Prevent the background music voice limit from being changed.
  */
 void music_voicelimit_change_off(void) {
+    MUSIC_PC_GUARD();
     gBlockVoiceLimitChange = TRUE;
 }
 
@@ -278,6 +295,7 @@ void music_voicelimit_change_off(void) {
  * Allow the background music voice limit to be changed.
  */
 void music_voicelimit_change_on(void) {
+    MUSIC_PC_GUARD();
     gBlockVoiceLimitChange = FALSE;
 }
 
@@ -285,6 +303,7 @@ void music_voicelimit_change_on(void) {
  * Update the jingle players voice limit.
  */
 void music_jingle_voicelimit_set(u8 voiceLimit) {
+    MUSIC_PC_GUARD();
     set_voice_limit(gJinglePlayer, voiceLimit);
 }
 
@@ -297,6 +316,7 @@ UNUSED void func_80000C68(u8 arg0) {
  * Give it a positive number to fade in, otherwise, give it a negative one to fade out.
  */
 void music_fade(s32 time) {
+    MUSIC_PC_GUARD();
     sMusicDelayTimer = 0;
     sMusicDelayLength = (time * 60) >> 8;
 }
@@ -305,6 +325,7 @@ void music_fade(s32 time) {
  * Sets the background music volume back to normal.
  */
 void music_volume_reset(void) {
+    MUSIC_PC_GUARD();
     sMusicDelayTimer = 0;
     sMusicDelayLength = 0;
     sMusicFadeVolume = 1.0f;
@@ -321,6 +342,11 @@ void sound_update_queue(u8 updateRate) {
     s32 i;
     s32 j;
 
+#ifdef TARGET_PC
+    // Audio subsystem is not initialized on PC (see audio_init) — the whole
+    // per-frame music/sfx pump would deref NULL players.
+    return;
+#endif
     if (sMusicDelayLength > 0) {
         sMusicDelayTimer += updateRate;
         sMusicFadeVolume = ((f32) sMusicDelayTimer) / ((f32) sMusicDelayLength);
@@ -393,6 +419,7 @@ void sound_clear_delayed(void) {
  * Return the channel mask of the music player.
  */
 u16 music_channel_get_mask(void) {
+    MUSIC_PC_GUARD(0);
     return gMusicPlayer->chanMask;
 }
 
@@ -401,6 +428,7 @@ u16 music_channel_get_mask(void) {
  * Official Name: amTuneSetChlMask
  */
 void music_dynamic_set(u16 channelMask) {
+    MUSIC_PC_GUARD();
     u32 i;
     if (gMusicNextSeqID) {
         gDynamicMusicChannelMask = channelMask;
@@ -421,6 +449,7 @@ void music_dynamic_set(u16 channelMask) {
  * Official Name: amTuneMuteChl
  */
 void music_channel_off(u8 channel) {
+    MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alSeqChOff(gMusicPlayer, channel);
     }
@@ -430,6 +459,7 @@ void music_channel_off(u8 channel) {
  * Return true if the given channel is currently active.
  */
 s32 music_channel_active(s32 channel) {
+    MUSIC_PC_GUARD(0);
     return (gMusicPlayer->chanMask & (1 << channel)) == 0;
 }
 
@@ -438,6 +468,7 @@ s32 music_channel_active(s32 channel) {
  * Official Name: amTuneUnmuteChl
  */
 void music_channel_on(u8 channel) {
+    MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alSeqChOn(gMusicPlayer, channel);
     }
@@ -447,6 +478,7 @@ void music_channel_on(u8 channel) {
  * Set the panning level of the given channel for the music player.
  */
 void music_channel_pan_set(u8 channel, ALPan pan) {
+    MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alCSPSetChlPan(gMusicPlayer, channel, pan);
     }
@@ -457,6 +489,7 @@ void music_channel_pan_set(u8 channel, ALPan pan) {
  * Official Name: amTuneSetChlVolume
  */
 void music_channel_volume_set(u8 channel, u8 volume) {
+    MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alCSPSetChlVol(gMusicPlayer, channel, volume);
     }
@@ -466,6 +499,7 @@ void music_channel_volume_set(u8 channel, u8 volume) {
  * Return the volume of the given channel in the music player.
  */
 UNUSED u8 music_channel_volume(u8 channel) {
+    MUSIC_PC_GUARD(0);
     if (channel >= AUDIO_CHANNELS) {
         return 0;
     } else {
@@ -477,6 +511,7 @@ UNUSED u8 music_channel_volume(u8 channel) {
  * Set this channel to fade in over time.
  */
 void music_channel_fade_set(u8 channel, ALPan fade) {
+    MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alCSPSetFadeIn(gMusicPlayer, channel, fade);
     }
@@ -486,6 +521,7 @@ void music_channel_fade_set(u8 channel, ALPan fade) {
  * Return the fade volume of the given channel.
  */
 u8 music_channel_fade(u8 channel) {
+    MUSIC_PC_GUARD(0);
     if (channel >= AUDIO_CHANNELS) {
         return 0;
     }
@@ -498,6 +534,7 @@ u8 music_channel_fade(u8 channel) {
  * Official Name: amTuneResetChls
  */
 void music_channel_reset_all(void) {
+    MUSIC_PC_GUARD();
     u32 channel;
     if (gBlockMusicChange == FALSE) {
         for (channel = 0; channel < AUDIO_CHANNELS; channel++) {
@@ -535,6 +572,7 @@ UNUSED u8 func_80001358(u8 chan1, u8 chan2, s32 arg2) {
  * Retrieves the FX mix levels of all audio channels.
  */
 UNUSED void music_get_fx_mix_all_channels(u8 *channelFXMix) {
+    MUSIC_PC_GUARD();
     s32 channelIdx;
     for (channelIdx = 0; channelIdx < gMusicPlayer->maxChannels; channelIdx++) {
         channelFXMix[channelIdx] = alSeqpGetChlFXMix((ALSeqPlayer *) gMusicPlayer, channelIdx);
@@ -548,6 +586,7 @@ UNUSED void music_get_fx_mix_all_channels(u8 *channelFXMix) {
  * Official Name: amTuneScaleTempo
  */
 void music_tempo_set_relative(f32 tempo) {
+    MUSIC_PC_GUARD();
     music_tempo_set((s32) ((f32) (u32) (music_tempo() & 0xFF) * tempo));
 }
 
@@ -556,6 +595,7 @@ void music_tempo_set_relative(f32 tempo) {
  * Official name: amTuneSetTempoBPM
  */
 void music_tempo_set(s32 tempo) {
+    MUSIC_PC_GUARD();
     if (tempo != 0) {
         f32 inv_tempo = (1.0f / tempo);
         alCSPSetTempo(gMusicPlayer, (s32) (inv_tempo * 60000000.0f));
@@ -568,6 +608,7 @@ void music_tempo_set(s32 tempo) {
  * Official name: amTuneGetTempoBPM
  */
 s16 music_tempo(void) {
+    MUSIC_PC_GUARD(0);
     return sMusicTempo;
 }
 
@@ -575,6 +616,7 @@ s16 music_tempo(void) {
  * Returns true if background music is currently playing.
  */
 u8 music_is_playing(void) {
+    MUSIC_PC_GUARD(0);
     return (alCSPGetState(gMusicPlayer) == AL_PLAYING);
 }
 
@@ -583,6 +625,7 @@ u8 music_is_playing(void) {
  * Loops itself round, so the final result will return 0.0f - 1.0f.
  */
 f32 music_animation_fraction(void) {
+    MUSIC_PC_GUARD(0.0f);
     f32 tmp;
     u32 cnt = osGetCount();
     if ((u32) audioPrevCount < cnt) {
@@ -614,6 +657,7 @@ UNUSED void sound_get_properties(u8 poolID, u8 *tempo, u8 *volume, u8 *reverb) {
  * Official NAme: amAmbientPlay
  */
 void music_jingle_play_safe(u8 jingleID) {
+    MUSIC_PC_GUARD();
     if (music_jingle_playing() == SEQUENCE_NONE) {
         music_sequence_start(gCurrentJingleID = jingleID, gJinglePlayer);
         gJinglePlaying = TRUE;
@@ -634,6 +678,7 @@ void sound_jingle_tempo_set(s32 tempo) {
  * Official Name: amTuneStop
  */
 void music_stop(void) {
+    MUSIC_PC_GUARD();
     if (gBlockMusicChange == FALSE) {
         music_sequence_stop(gMusicPlayer);
     }
@@ -644,6 +689,7 @@ void music_stop(void) {
  * If the setting changed, then either stop or start music.
  */
 UNUSED void music_enabled_set(u8 setting) {
+    MUSIC_PC_GUARD();
     if (setting != gCanPlayMusic) {
         gCanPlayMusic = setting;
         if (setting) {
@@ -658,6 +704,7 @@ UNUSED void music_enabled_set(u8 setting) {
  * Return whether background music can be played.
  */
 u8 music_can_play(void) {
+    MUSIC_PC_GUARD(0);
     return gCanPlayMusic;
 }
 
@@ -666,6 +713,7 @@ u8 music_can_play(void) {
  * Official Name: amAmbientStop
  */
 void music_jingle_stop(void) {
+    MUSIC_PC_GUARD();
     if (music_jingle_playing() == SEQUENCE_NONE) {
         gCurrentJingleID = SEQUENCE_NONE;
         music_sequence_stop(gJinglePlayer);
@@ -677,6 +725,7 @@ void music_jingle_stop(void) {
  * Official Name: amTuneGetSeqNo
  */
 u8 music_current_sequence(void) {
+    MUSIC_PC_GUARD(0);
     if (gCurrentSequenceID != SEQUENCE_NONE && gMusicPlayer->state == AL_PLAYING) {
         return gCurrentSequenceID;
     } else {
@@ -689,6 +738,7 @@ u8 music_current_sequence(void) {
  * Otherwise, return what's currently playing.
  */
 UNUSED u8 music_next(void) {
+    MUSIC_PC_GUARD(0);
     if (gMusicNextSeqID) {
         return gMusicNextSeqID;
     } else {
@@ -701,6 +751,7 @@ UNUSED u8 music_next(void) {
  * Official Name: amAmbientGetSeqNo
  */
 u8 music_jingle_current(void) {
+    MUSIC_PC_GUARD(0);
     return gCurrentJingleID;
 }
 
@@ -710,6 +761,7 @@ u8 music_jingle_current(void) {
  * Official Name: amTuneSetVolume
  */
 void music_volume_set(u8 volume) {
+    MUSIC_PC_GUARD();
     f32 normalized_vol;
 
     gMusicBaseVolume = volume;
@@ -723,6 +775,7 @@ void music_volume_set(u8 volume) {
  * Official Name: amTuneSetGlobalVolume
  */
 void music_volume_config_set(u32 slider_val) {
+    MUSIC_PC_GUARD();
     f32 normalized_vol;
 
     slider_val = (slider_val <= 256) ? slider_val : 256;
@@ -736,6 +789,7 @@ void music_volume_config_set(u32 slider_val) {
  * Official Name: amTuneGetVolume
  */
 u8 music_volume(void) {
+    MUSIC_PC_GUARD(0);
     return gMusicBaseVolume;
 }
 
@@ -743,6 +797,7 @@ u8 music_volume(void) {
  * Return the music volume set by the player.
  */
 s32 music_volume_config(void) {
+    MUSIC_PC_GUARD(0);
     return gMusicSliderVolume;
 }
 
@@ -752,6 +807,7 @@ s32 music_volume_config(void) {
  * Official Name: amAmbientSetVolume
  */
 void music_jingle_volume_set(u8 arg0) {
+    MUSIC_PC_GUARD();
     sfxRelativeVolume = arg0;
     alCSPSetVol(gJinglePlayer, (s16) (sndp_get_global_volume() * sfxRelativeVolume));
 }
@@ -761,6 +817,7 @@ void music_jingle_volume_set(u8 arg0) {
  * Official Name: amAmbientSetPan
  */
 void music_jingle_pan_set(ALPan pan) {
+    MUSIC_PC_GUARD();
     u32 iChan;
     for (iChan = 0; iChan < AUDIO_CHANNELS; iChan++) {
         alCSPSetChlPan(gJinglePlayer, iChan, pan);
@@ -773,6 +830,7 @@ void music_jingle_pan_set(ALPan pan) {
  * Official Name: amDittyPlay
  */
 void music_jingle_play(u8 seqID) {
+    MUSIC_PC_GUARD();
     gCanPlayJingle = TRUE;
     music_sequence_start(gCurrentJingleID = seqID, gJinglePlayer);
 }
@@ -929,6 +987,7 @@ u16 sound_count(void) {
  * Return mumber of playable sequences in the table.
  */
 u8 music_sequence_count(void) {
+    MUSIC_PC_GUARD(0);
     return gSequenceTable->seqCount;
 }
 
@@ -952,6 +1011,7 @@ void sound_table_properties(SoundData **table, s32 *size, s32 *count) {
  * Writes the music sound table address, size and element count into the arguments.
  */
 UNUSED void music_table_properties(MusicData **table, s32 *size, s32 *count) {
+    MUSIC_PC_GUARD();
     if (table != NULL) {
         *table = gSeqSoundTable;
     }
@@ -1002,6 +1062,7 @@ ALCSPlayer *sound_seqplayer_init(s32 maxVoices, s32 maxEvents) {
  * Stop the current sequence then set the parameters for the next sequence.
  */
 void music_sequence_start(u8 seqID, ALCSPlayer *seqPlayer) {
+    MUSIC_PC_GUARD();
     music_sequence_stop(seqPlayer);
     if (seqID < gSequenceTable->seqCount) {
         if (seqPlayer == gMusicPlayer) {
@@ -1018,6 +1079,7 @@ void music_sequence_start(u8 seqID, ALCSPlayer *seqPlayer) {
  * If the sequence player is currently inactive, start a new sequence with the current properties.
  */
 void music_sequence_init(ALCSPlayer *seqp, void *sequence, u8 *seqID, ALCSeq *seq) {
+    MUSIC_PC_GUARD();
     s32 i;
 
     if ((alCSPGetState(seqp) == AL_STOPPED) && (*seqID != 0)) {
@@ -1060,6 +1122,7 @@ void music_sequence_init(ALCSPlayer *seqp, void *sequence, u8 *seqID, ALCSeq *se
  * Stops the current playing sequence for the given sequence player.
  */
 void music_sequence_stop(ALCSPlayer *seqPlayer) {
+    MUSIC_PC_GUARD();
     if (gMusicPlayer == seqPlayer && gMusicPlaying) {
         alCSPStop(seqPlayer);
         gMusicPlaying = FALSE;

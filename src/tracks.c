@@ -2833,6 +2833,83 @@ s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut, s32 maxY
     return yOutCount;
 }
 
+#ifdef TARGET_PC
+// Decompressed level models are big-endian. Swapped in place in three stages
+// matching generate_track's parse order: the LevelModel header before its
+// offsets become pointers, each LevelModelSegment header before ITS offsets
+// become pointers, and the segment's arrays before track_init_collision and
+// the vertex-colour pass read them. Helpers in linux/reimpl.c.
+extern void pc_swap16_buf(void *buf, u32 numBytes);
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+
+_Static_assert(sizeof(LevelModel) == 0x4C, "LevelModel layout drifted from N64");
+_Static_assert(sizeof(LevelModelSegment) == 0x44, "LevelModelSegment layout drifted from N64");
+_Static_assert(sizeof(TriangleBatchInfo) == 0xC, "TriangleBatchInfo layout drifted from N64");
+_Static_assert(sizeof(Vertex) == 10, "Vertex layout drifted from N64");
+_Static_assert(sizeof(Triangle) == 0x10, "Triangle layout drifted from N64");
+_Static_assert(sizeof(BspTreeNode) == 8, "BspTreeNode layout drifted from N64");
+
+static void pc_swap_level_model_header(LevelModel *mdl) {
+    pc_swap32_buf(mdl, 0x18);                   // textures..segmentsBspTree offsets
+    pc_swap16_buf(&mdl->numberOfTextures, 8);   // counts (4 x s16)
+    pc_swap32_buf(&mdl->minimapSpriteIndex, 4);
+    pc_swap16_buf(&mdl->minimapRotation, 4);    // minimapRotation, unk26
+    pc_swap32_buf(&mdl->minimapXScale, 8);      // f32 scales
+    pc_swap16_buf(&mdl->minimapOffsetXAdv1, 8); // 4 x s16 offsets
+    pc_swap32_buf(&mdl->minimapColor, 4);
+    pc_swap16_buf(&mdl->lowerXBounds, 12);      // 6 x s16 bounds
+    pc_swap32_buf(&mdl->modelSize, 4);
+}
+
+static void pc_swap_level_segment_headers(LevelModel *mdl) {
+    s32 k;
+
+    for (k = 0; k < mdl->numberOfSegments; k++) {
+        LevelModelSegment *seg = &mdl->segments[k];
+        pc_swap32_buf(seg, 0x1C);                 // 7 pointer/offset words
+        pc_swap16_buf(&seg->numberOfVertices, 6); // vertex/triangle/batch counts
+        pc_swap16_buf(&seg->unk28, 2);
+        pc_swap32_buf(&seg->unk2C, 4);
+        pc_swap16_buf(&seg->unk30, 4); // unk30, unk32
+        pc_swap32_buf(&seg->unk34, 4);
+        pc_swap16_buf(&seg->unk38, 2);
+        pc_swap32_buf(&seg->unk3C, 4);
+    }
+    pc_swap16_buf(mdl->segmentsBoundingBoxes, mdl->numberOfSegments * sizeof(LevelModelSegmentBoundingBox));
+    // BSP interior nodes: one fewer than there are segments (leaves).
+    for (k = 0; k < mdl->numberOfSegments - 1; k++) {
+        BspTreeNode *node = &mdl->segmentsBspTree[k];
+        pc_swap16_buf(&node->leftNode, 4); // leftNode, rightNode
+        pc_swap16_buf(&node->splitValue, 2);
+    }
+    // Texture table: first word of each entry is the texture index that
+    // generate_track feeds to load_texture; the rest are u8s.
+    for (k = 0; k < mdl->numberOfTextures; k++) {
+        pc_swap32_buf(&mdl->textures[k].texture, 4);
+    }
+}
+
+static void pc_swap_level_segment_contents(LevelModelSegment *seg) {
+    s32 i;
+
+    for (i = 0; i < seg->numberOfVertices; i++) {
+        pc_swap16_buf(&seg->vertices[i], 6); // x, y, z; r/g/b/a are u8
+    }
+    for (i = 0; i < seg->numberOfTriangles; i++) {
+        pc_swap16_buf(&seg->triangles[i].uv0, 12); // uv0/uv1/uv2, 6 x s16; flags/indices are u8
+    }
+    for (i = 0; i < seg->numberOfBatches + 1; i++) { // +1: sentinel entry
+        TriangleBatchInfo *b = &seg->batches[i];
+        pc_swap16_buf(&b->verticesOffset, 4); // verticesOffset, facesOffset
+        pc_swap32_buf(&b->flags, 4);
+    }
+    // One facet-planes entry (4 x u16 plane indices) per triangle.
+    for (i = 0; i < seg->numberOfTriangles; i++) {
+        pc_swap16_buf(&seg->collisionFacets[i], sizeof(CollisionFacetPlanes));
+    }
+}
+#endif
+
 // Loads a level track from the index in the models table.
 void generate_track(s32 modelId) {
     s32 i, j, k;
@@ -2847,6 +2924,13 @@ void generate_track(s32 modelId) {
     gCollisionSurfaces = mempool_alloc_safe(MAX_COLLISION_CANDIDATES, COLOUR_TAG_YELLOW);
     gNumCollisionCandidates = 0;
     gLevelModelTable = (s32 *) asset_table_load(ASSET_LEVEL_MODELS_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian asset offset table (helper in linux/reimpl.c).
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gLevelModelTable, asset_table_size(ASSET_LEVEL_MODELS_TABLE));
+    }
+#endif
 
     for (i = 0; gLevelModelTable[i] != -1; i++) {}
     i--;
@@ -2864,6 +2948,9 @@ void generate_track(s32 modelId) {
     asset_load(ASSET_LEVEL_MODELS, temp, mdl, temp_s4);
     stubbed_printf("pre gzip_inflate\n");
     gzip_inflate((u8 *) temp, (u8 *) gCurrentLevelModel);
+#ifdef TARGET_PC
+    pc_swap_level_model_header(gCurrentLevelModel);
+#endif
     stubbed_printf("post gzip_inflate segs=%d tex=%d\n", gCurrentLevelModel->numberOfSegments,
                    gCurrentLevelModel->numberOfTextures);
     mempool_free(gLevelModelTable); // Done with the level models table, so free it.
@@ -2877,11 +2964,18 @@ void generate_track(s32 modelId) {
     LOCAL_OFFSET_TO_RAM_ADDRESS(u8 *, gCurrentLevelModel->segmentsBitfields);
     LOCAL_OFFSET_TO_RAM_ADDRESS(BspTreeNode *, gCurrentLevelModel->segmentsBspTree);
 
+#ifdef TARGET_PC
+    pc_swap_level_segment_headers(gCurrentLevelModel);
+#endif
+
     for (k = 0; k < gCurrentLevelModel->numberOfSegments; k++) {
         LOCAL_OFFSET_TO_RAM_ADDRESS(Vertex *, gCurrentLevelModel->segments[k].vertices);
         LOCAL_OFFSET_TO_RAM_ADDRESS(Triangle *, gCurrentLevelModel->segments[k].triangles);
         LOCAL_OFFSET_TO_RAM_ADDRESS(TriangleBatchInfo *, gCurrentLevelModel->segments[k].batches);
         LOCAL_OFFSET_TO_RAM_ADDRESS(CollisionFacetPlanes *, gCurrentLevelModel->segments[k].collisionFacets);
+#ifdef TARGET_PC
+        pc_swap_level_segment_contents(&gCurrentLevelModel->segments[k]);
+#endif
     }
     for (k = 0; k < gCurrentLevelModel->numberOfTextures; k++) {
         gCurrentLevelModel->textures[k].texture =

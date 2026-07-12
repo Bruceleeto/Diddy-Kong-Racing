@@ -145,7 +145,11 @@ void cam_init(void) {
     gAdjustViewportHeight = FALSE;
     gAntiPiracyViewport = FALSE;
 
+#ifndef TARGET_PC
+    // PI status poll before the raw cart read below — no PI hardware on PC
+    // (linux/reimpl.c's D_B0000578 already answers the read with the magic).
     WAIT_ON_IOBUSY(stat);
+#endif
 
     // 0xB0000578 is a direct read from the ROM as opposed to RAM
     if (((D_B0000578 & 0xFFFF) & 0xFFFF) != 0x8965) {
