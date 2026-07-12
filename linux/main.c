@@ -82,11 +82,18 @@ s32 pc_retrace_wait(void) {
 #define GFX_MAX_DEPTH 16    // display-list recursion guard
 #define GFX_MAX_TRI_VERTS 65536
 
+// A vertex in clip space — post-matrix, pre-divide. Kept unprojected because
+// near-plane clipping has to interpolate here, before the divide by w (a vertex
+// behind the camera has w <= 0, and dividing by it is exactly the garbage the
+// clip exists to prevent).
 typedef struct {
-    f32 clip[4];    // post-matrix, pre-divide — what billboarded vertices offset from
-    f32 sx, sy, sz; // screen space (N64 pixels) plus depth
+    f32 clip[4];
     u8 r, g, b;
 } GfxVertex;
+
+// Clip anything closer than this. The N64 clips against w, and w is the
+// camera-space depth, so this is the near plane in world units.
+#define GFX_NEAR_W 1.0f
 
 static u32 sGfxFrameCount = 0;
 
@@ -150,17 +157,6 @@ static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
         }
     }
 
-    if (dst->clip[3] > 0.0f) {
-        f32 invW = 1.0f / dst->clip[3];
-        dst->sx = (dst->clip[0] * invW * sVpScaleX) + sVpTransX;
-        dst->sy = sVpTransY - (dst->clip[1] * invW * sVpScaleY);
-        // Negated so nearer geometry gets the smaller depth under GL_LESS.
-        dst->sz = -(dst->clip[2] * invW);
-    } else {
-        dst->sx = 0.0f;
-        dst->sy = 0.0f;
-        dst->sz = 0.0f;
-    }
     dst->r = v->r;
     dst->g = v->g;
     dst->b = v->b;
@@ -195,14 +191,82 @@ static void handle_vertex(u32 w0, u32 w1) {
 
 }
 
+/**
+ * Perspective divide plus the viewport map — the last thing the RSP does before
+ * handing a vertex to the RDP. Only ever called on clipped vertices, so w is
+ * guaranteed positive here.
+ */
 static void push_corner(const GfxVertex *v) {
-    sTriVerts[sTriVertCount].x = v->sx;
-    sTriVerts[sTriVertCount].y = v->sy;
-    sTriVerts[sTriVertCount].z = v->sz;
+    f32 invW = 1.0f / v->clip[3];
+
+    sTriVerts[sTriVertCount].x = (v->clip[0] * invW * sVpScaleX) + sVpTransX;
+    sTriVerts[sTriVertCount].y = sVpTransY - (v->clip[1] * invW * sVpScaleY);
+    // Negated so nearer geometry gets the smaller depth under GL_LESS.
+    sTriVerts[sTriVertCount].z = -(v->clip[2] * invW);
     sTriVerts[sTriVertCount].r = v->r;
     sTriVerts[sTriVertCount].g = v->g;
     sTriVerts[sTriVertCount].b = v->b;
     sTriVertCount++;
+}
+
+/**
+ * Split the edge a->b where it crosses the near plane, at the point where
+ * w == GFX_NEAR_W. Colour interpolates linearly in clip space along with the
+ * position, which is what the RSP's own clipper does.
+ */
+static void clip_edge(const GfxVertex *a, const GfxVertex *b, GfxVertex *out) {
+    f32 t = (GFX_NEAR_W - a->clip[3]) / (b->clip[3] - a->clip[3]);
+    s32 i;
+
+    for (i = 0; i < 4; i++) {
+        out->clip[i] = a->clip[i] + ((b->clip[i] - a->clip[i]) * t);
+    }
+    out->r = (u8) (a->r + ((f32) (b->r - a->r) * t));
+    out->g = (u8) (a->g + ((f32) (b->g - a->g) * t));
+    out->b = (u8) (a->b + ((f32) (b->b - a->b) * t));
+}
+
+/**
+ * Clip a triangle against the near plane (Sutherland-Hodgman on the single
+ * w >= GFX_NEAR_W plane), then fan-triangulate whatever polygon survives and
+ * emit it. One clipped triangle yields 0, 1 or 2 output triangles.
+ */
+static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVertex *v2) {
+    const GfxVertex *in[3];
+    GfxVertex poly[4];
+    s32 numOut = 0;
+    s32 i;
+
+    in[0] = v0;
+    in[1] = v1;
+    in[2] = v2;
+
+    for (i = 0; i < 3; i++) {
+        const GfxVertex *cur = in[i];
+        const GfxVertex *next = in[(i + 1) % 3];
+        s32 curIn = cur->clip[3] >= GFX_NEAR_W;
+        s32 nextIn = next->clip[3] >= GFX_NEAR_W;
+
+        if (curIn) {
+            poly[numOut++] = *cur;
+        }
+        if (curIn != nextIn) {
+            clip_edge(cur, next, &poly[numOut++]);
+        }
+    }
+
+    if (numOut < 3) {
+        return; // entirely behind the near plane
+    }
+
+    for (i = 2; i < numOut; i++) {
+        if (sTriVertCount + 3 > GFX_MAX_TRI_VERTS) {
+            return;
+        }
+        push_corner(&poly[0]);
+        push_corner(&poly[i - 1]);
+        push_corner(&poly[i]);
+    }
 }
 
 /**
@@ -219,21 +283,8 @@ static void handle_polygon(u32 w0, u32 w1) {
     }
 
     for (i = 0; i < count; i++) {
-        const GfxVertex *v0 = &sVerts[tris[i].vi0 % GFX_MAX_VERTS];
-        const GfxVertex *v1 = &sVerts[tris[i].vi1 % GFX_MAX_VERTS];
-        const GfxVertex *v2 = &sVerts[tris[i].vi2 % GFX_MAX_VERTS];
-
-        // There is no near-plane clipping yet, so drop any triangle that isn't
-        // entirely in front of the camera rather than project it wrongly.
-        if (v0->clip[3] <= 0.0f || v1->clip[3] <= 0.0f || v2->clip[3] <= 0.0f) {
-            continue;
-        }
-        if (sTriVertCount + 3 > GFX_MAX_TRI_VERTS) {
-            break;
-        }
-        push_corner(v0);
-        push_corner(v1);
-        push_corner(v2);
+        emit_triangle(&sVerts[tris[i].vi0 % GFX_MAX_VERTS], &sVerts[tris[i].vi1 % GFX_MAX_VERTS],
+                      &sVerts[tris[i].vi2 % GFX_MAX_VERTS]);
     }
 }
 
