@@ -180,14 +180,6 @@ LIBULTRA_FILES := \
 	libultra/src/io/aigetlen.c \
 	libultra/src/io/aisetfreq.c \
 	libultra/src/io/aisetnextbuf.c \
-	libultra/src/io/conteepprobe.c \
-	libultra/src/io/conteepread.c \
-	libultra/src/io/conteepwrite.c \
-	libultra/src/io/contpfs.c \
-	libultra/src/io/contramread.c \
-	libultra/src/io/contramwrite.c \
-	libultra/src/io/contreaddata.c \
-	libultra/src/io/controller.c \
 	libultra/src/io/crc.c \
 	libultra/src/io/devmgr.c \
 	libultra/src/io/dp.c \
@@ -197,18 +189,6 @@ LIBULTRA_FILES := \
 	libultra/src/io/epirawdma.c \
 	libultra/src/io/epirawwrite.c \
 	libultra/src/io/leointerrupt.c \
-	libultra/src/io/motor.c \
-	libultra/src/io/pfsallocatefile.c \
-	libultra/src/io/pfschecker.c \
-	libultra/src/io/pfsdeletefile.c \
-	libultra/src/io/pfsfilestate.c \
-	libultra/src/io/pfsfreeblocks.c \
-	libultra/src/io/pfsinit.c \
-	libultra/src/io/pfsisplug.c \
-	libultra/src/io/pfsnumfiles.c \
-	libultra/src/io/pfsreadwritefile.c \
-	libultra/src/io/pfsreformat.c \
-	libultra/src/io/pfssearchfile.c \
 	libultra/src/io/piacs.c \
 	libultra/src/io/pidma.c \
 	libultra/src/io/pigetcmdq.c \
@@ -217,7 +197,6 @@ LIBULTRA_FILES := \
 	libultra/src/io/pirawread.c \
 	libultra/src/io/si.c \
 	libultra/src/io/siacs.c \
-	libultra/src/io/sirawdma.c \
 	libultra/src/io/sirawread.c \
 	libultra/src/io/sirawwrite.c \
 	libultra/src/io/sp.c \

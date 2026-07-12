@@ -13,6 +13,7 @@
 typedef signed char s8;
 typedef signed int s32;
 typedef unsigned char u8;
+typedef unsigned short u16;
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
@@ -151,6 +152,135 @@ s32 D_B0000578 = 0x8965;
 // Math library data (was libultra/src/gu/libm_vals.s)
 // ---------------------------------------------------------------------------
 float __libm_qnan_f = __builtin_nanf("");
+
+// ---------------------------------------------------------------------------
+// SI bus — controllers, EEPROM saves, controller paks, rumble.
+// The N64 talks to all of these through PIF-RAM DMA over the Serial Interface
+// (the libultra cont*/pfs*/eeprom*/motor files, dropped from the PC build).
+// Constructive lies instead: one controller in port 0 with neutral input, an
+// erased EEPROM (game falls back to creating default saves), and no
+// controller paks / rumble paks plugged in anywhere.
+// TODO: real host input (this is where it plugs in) and EEPROM persisted to a
+// save file on disk.
+// ---------------------------------------------------------------------------
+#define PC_CONT_TYPE_NORMAL 0x0005
+#define PC_CONT_NO_RESPONSE 0x8
+#define PC_PFS_ERR_NOPACK 1
+#define PC_MAXCONTROLLERS 4
+
+typedef struct {
+    u16 type;
+    u8 status;
+    u8 error;
+} PCContStatus;
+
+typedef struct {
+    u16 button;
+    s8 stick_x;
+    s8 stick_y;
+    u8 error;
+} PCContPad;
+
+extern s32 osSendMesg(void *mq, void *msg, s32 flags);
+
+s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
+    s32 i;
+
+    *bitpattern = 1; // controller in port 0 only
+    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
+        status[i].type = (i == 0) ? PC_CONT_TYPE_NORMAL : 0;
+        status[i].status = 0;
+        status[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
+    }
+    return 0;
+}
+
+s32 osContStartReadData(void *mq) {
+    // Poll "completes" instantly: post the done-message the game waits for.
+    osSendMesg(mq, NULL, 0 /* OS_MESG_NOBLOCK */);
+    return 0;
+}
+
+void osContGetReadData(PCContPad *pads) {
+    s32 i;
+
+    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
+        pads[i].button = 0;
+        pads[i].stick_x = 0;
+        pads[i].stick_y = 0;
+        pads[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
+    }
+}
+
+s32 osEepromProbe(void *mq) {
+    return 1; // EEPROM_TYPE_4K — present
+}
+
+s32 osEepromRead(void *mq, u8 address, u8 *buffer) {
+    memset(buffer, 0xFF, 8); // erased EEPROM block
+    return 0;
+}
+
+s32 osEepromWrite(void *mq, u8 address, u8 *buffer) {
+    return 0; // accepted, not persisted (yet)
+}
+
+s32 osPfsInit(void *mq, void *pfs, s32 channel) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsIsPlug(void *mq, u8 *pattern) {
+    *pattern = 0;
+    return 0;
+}
+
+s32 osPfsFileState(void *pfs, s32 fileNo, void *state) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsReadWriteFile(void *pfs, s32 fileNo, u8 flag, s32 offset, s32 size, u8 *data) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsNumFiles(void *pfs, s32 *maxFiles, s32 *filesUsed) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsFreeBlocks(void *pfs, s32 *bytesNotUsed) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsReFormat(void *pfs, void *mq, s32 channel) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsFindFile(void *pfs, u16 companyCode, u32 gameCode, u16 *gameName, u16 *extName, s32 *fileNo) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsDeleteFile(void *pfs, u16 companyCode, u32 gameCode, u16 *gameName, u16 *extName) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsChecker(void *pfs) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osPfsAllocateFile(void *pfs, u16 companyCode, u32 gameCode, u16 *gameName, u16 *extName, s32 size, s32 *fileNo) {
+    return PC_PFS_ERR_NOPACK;
+}
+
+s32 osMotorInit(void *mq, void *pfs, s32 channel) {
+    return PC_PFS_ERR_NOPACK; // no rumble pak
+}
+
+s32 osMotorStart(void *pfs) {
+    return 0;
+}
+
+s32 osMotorStop(void *pfs) {
+    return 0;
+}
 
 // ---------------------------------------------------------------------------
 // Debug printing (was src/isv_print.c writing to the IS-Viewer MMIO device at
