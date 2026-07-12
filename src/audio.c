@@ -203,6 +203,7 @@ void sound_volume_reset(u8 skipReset) {
  * Official Name: amSetMuteMode
  */
 void sound_volume_change(s32 behaviour) {
+    MUSIC_PC_GUARD();
     switch (behaviour) {
         case VOLUME_LOWER: // Mute most sound effects and half the volume of music.
             sndp_set_group_volume(0, 0);

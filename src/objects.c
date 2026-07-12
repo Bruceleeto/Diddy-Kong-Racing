@@ -1008,6 +1008,98 @@ s32 normalise_time(s32 timer) {
     }
 }
 
+#ifdef TARGET_PC
+// Object-map spawn entries are big-endian; the layout past the common header
+// is per-behavior, mirroring run_object_init_func's dispatch (plus
+// BHV_WAVE_POWER, whose entry obj_loop_wavepower reads). Entry types with only
+// u8/s8 fields need no swap. Runtime-built entries (NEW_OBJECT_ENTRY) never
+// pass through here and stay host-order.
+static void pc_swap_spawn_entry_fields(u8 *entryBytes) {
+    LevelObjectEntry *entry = (LevelObjectEntry *) entryBytes;
+    s32 objType = entryBytes[0] | ((entryBytes[1] & 0x80) << 1);
+    s16 headerType = gAssetsLvlObjTranslationTable[objType];
+    ObjectHeader *header;
+    s8 behavior;
+
+    if (headerType >= gAssetsObjectHeadersTableLength) {
+        headerType = 0;
+    }
+    header = load_object_header(headerType);
+    if (header == NULL) {
+        return;
+    }
+    behavior = header->behaviorId;
+    try_free_object_header(headerType);
+
+    switch (behavior) {
+        case BHV_RACER:
+            pc_swap16_buf(&entry->racer.angleZ, 8); // angleZ/X/Y, playerIndex
+            break;
+        case BHV_FISH:
+            pc_swap16_buf(&entry->fish.unk8, 2);
+            break;
+        case BHV_AUDIO:
+            pc_swap16_buf(&entry->audio.soundId, 4); // soundId, range
+            break;
+        case BHV_AUDIO_LINE:
+        case BHV_AUDIO_LINE_2:
+            pc_swap16_buf(&entry->audioLine.soundID, 2);
+            pc_swap16_buf(&entry->audioLine.unkE, 2);
+            break;
+        case BHV_FOG_CHANGER:
+            pc_swap16_buf(&entry->fogChanger.near, 6); // near, far, switchTimer
+            break;
+        case BHV_TEXTURE_SCROLL:
+            pc_swap16_buf(&entry->texScroll.textureIndex, 2);
+            break;
+        case BHV_LIGHT_RGBA:
+            pc_swap16_buf(&entry->rgbaLighting.radius, 14); // radius..unk1A
+            break;
+        case BHV_WEATHER:
+            pc_swap16_buf(&entry->weather.radius, 8); // radius..unkE
+            pc_swap16_buf(&entry->weather.unk12, 2);
+            break;
+        case BHV_LENS_FLARE:
+            pc_swap16_buf(&entry->lensFlare.angleX, 4); // angleX, angleY
+            break;
+        case BHV_LENS_FLARE_SWITCH:
+            pc_swap16_buf(&entry->lensFlareSwitch.radius, 2);
+            break;
+        case BHV_CHARACTER_FLAG:
+            pc_swap16_buf(&entry->characterFlag.angleZ, 8); // angleZ, radius, angleY, playerIndex
+            break;
+        case BHV_ANIMATION:
+            pc_swap16_buf(&entry->animation.objectIdToSpawn, 4); // objectIdToSpawn, animationStartDelay
+            pc_swap16_buf(&entry->animation.pauseFrameCount, 2);
+            break;
+        case BHV_WAVE_GENERATOR:
+            pc_swap16_buf(&entry->waveGenerator.waveSize, 6); // waveSize, unkC, unkE
+            break;
+        case BHV_WAVE_POWER:
+            pc_swap16_buf(&entry->wavePower.radius, 6); // radius, power, divisor
+            break;
+        case BHV_BUTTERFLY:
+            pc_swap16_buf(&entry->butterfly.unk8, 2);
+            break;
+        case BHV_MIDI_FADE_POINT:
+            pc_swap16_buf(&entry->midiFadePoint.unk8, 4); // unk8, unkA
+            break;
+        case BHV_MIDI_CHANNEL_SET:
+            pc_swap16_buf(&entry->midichset.unk8, 2);
+            break;
+        case BHV_BUBBLER:
+            pc_swap16_buf(&entry->bubbler.particleDensity, 2);
+            break;
+        case BHV_RANGE_TRIGGER:
+            pc_swap16_buf(&entry->rangeTrigger.radius, 4); // radius, particleFlags
+            break;
+        case BHV_FROG:
+            pc_swap16_buf(&entry->frog.homeRadius, 2);
+            break;
+    }
+}
+#endif
+
 /**
  * Load the object map into RAM, then start spawning objects into the world.
  * Also decides whether this race type should be for silver coins or not.
@@ -1083,6 +1175,7 @@ void track_spawn_objects(s32 mapID, s32 index) {
             pc_swap32_buf(mem, 4);
             for (entryOffset = 0; entryOffset < *mem; entryOffset += entrySize) {
                 pc_swap16_buf(entry + 2, 6); // LevelObjectEntryCommon x, y, z
+                pc_swap_spawn_entry_fields(entry);
                 entrySize = entry[1] & 0x3F;
                 entry += entrySize;
             }
