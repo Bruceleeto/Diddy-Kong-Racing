@@ -731,12 +731,25 @@ void allocate_object_pools(void) {
     gDrawbridgeTimers = mempool_alloc_safe(8, COLOUR_TAG_BLUE);
     D_8011AFF4 = mempool_alloc_safe(sizeof(unk800179D0) * 16, COLOUR_TAG_BLUE);
     gAssetsLvlObjTranslationTable = (s16 *) asset_table_load(ASSET_LEVEL_OBJECT_TRANSLATION_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian asset offset tables (helpers in linux/reimpl.c).
+        extern void pc_swap16_buf(void *buf, u32 numBytes);
+        pc_swap16_buf(gAssetsLvlObjTranslationTable, asset_table_size(ASSET_LEVEL_OBJECT_TRANSLATION_TABLE));
+    }
+#endif
     gAssetsLvlObjTranslationTableLength = (asset_table_size(ASSET_LEVEL_OBJECT_TRANSLATION_TABLE) >> 1) - 1;
     while (gAssetsLvlObjTranslationTable[gAssetsLvlObjTranslationTableLength] == 0) {
         gAssetsLvlObjTranslationTableLength--;
     }
     gSpawnObjectHeap = mempool_alloc_safe(OBJECT_BLUEPRINT_SIZE, COLOUR_TAG_BLUE);
     gAssetsObjectHeadersTable = (s32 *) asset_table_load(ASSET_OBJECT_HEADERS_TABLE);
+#ifdef TARGET_PC
+    {
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gAssetsObjectHeadersTable, asset_table_size(ASSET_OBJECT_HEADERS_TABLE));
+    }
+#endif
     gAssetsObjectHeadersTableLength = 0;
     while (-1 != gAssetsObjectHeadersTable[gAssetsObjectHeadersTableLength]) {
         gAssetsObjectHeadersTableLength++;
@@ -751,6 +764,14 @@ void allocate_object_pools(void) {
 
     gAssetsMiscSection = (s32 *) asset_table_load(ASSET_MISC);
     gAssetsMiscTable = (s32 *) asset_table_load(ASSET_MISC_TABLE);
+#ifdef TARGET_PC
+    {
+        // Table only — the misc *section* is mixed-format data; each
+        // get_misc_asset consumer owns the endianness of its own piece.
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gAssetsMiscTable, asset_table_size(ASSET_MISC_TABLE));
+    }
+#endif
     gAssetsMiscTableLength = 0;
     while (-1 != gAssetsMiscTable[gAssetsMiscTableLength]) {
         gAssetsMiscTableLength++;

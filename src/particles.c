@@ -252,6 +252,98 @@ void free_particle_assets(void) {
     }
 }
 
+#ifdef TARGET_PC
+// Particle assets are big-endian (see docs/linux_port.md). Descriptors and
+// behaviours are mixed-width structs, so they get field-wise swaps.
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+
+static void pc_swap16p(void *p) {
+    u8 *b = p;
+    u8 t = b[0];
+    b[0] = b[1];
+    b[1] = t;
+}
+
+static void pc_swap32p(void *p) {
+    pc_swap32_buf(p, 4);
+}
+
+static void pc_swap16_range(void *p, s32 count) {
+    s32 i;
+    for (i = 0; i < count; i++) {
+        pc_swap16p((u8 *) p + i * 2);
+    }
+}
+
+static void pc_swap_particle_descriptor(ParticleDescriptor *d) {
+    pc_swap16p(&d->flags);
+    pc_swap16p(&d->textureID);
+    pc_swap16p(&d->textureFrameStep);
+    pc_swap16p(&d->lifeTime);
+    pc_swap16p(&d->lifeTimeRange);
+    pc_swap16p(&d->opacityTimer);
+    pc_swap32p(&d->scale);
+    // kind/movementType/opacity/opacityVel/colour are u8.
+}
+
+static void pc_swap_particle_behaviour(ParticleBehaviour *b) {
+    pc_swap32p(&b->flags);
+    pc_swap32_buf(&b->emitterPos, 12);
+    pc_swap32p(&b->sourceDistance);
+    pc_swap16_range(&b->sourceRotation, 3);
+    pc_swap16p(&b->maxParticlesFromSamePos);
+    pc_swap16_range(&b->sourceAngularVelocity, 3);
+    pc_swap16_range(&b->emissionDirection, 3);
+    pc_swap16p(&b->maxParticlesInSameDir);
+    pc_swap16_range(&b->emissionDirAngularVelocity, 3);
+    pc_swap32_buf(&b->velocityModifier, 12);
+    pc_swap32p(&b->emissionSpeed);
+    pc_swap16p(&b->spawnInterval);
+    pc_swap16p(&b->burstCount);
+    pc_swap16_range(&b->rotation, 3);
+    pc_swap16_range(&b->angularVelocity, 3);
+    pc_swap32p(&b->scale);
+    pc_swap32p(&b->scaleVelocity);
+    pc_swap32p(&b->movementParam);
+    pc_swap32p(&b->randomizationFlags);
+    pc_swap32p(&b->sourceDistanceRange);
+    pc_swap16_range(&b->sourceDirRange, 3);
+    pc_swap16_range(&b->emissionDirRange, 3);
+    pc_swap32p(&b->emissionSpeedRange);
+    pc_swap32_buf(&b->velocityModifierRange, 12);
+    pc_swap16_range(&b->rotationRange, 3);
+    pc_swap16_range(&b->angularVelocityRange, 3);
+    pc_swap32p(&b->scaleRange);
+    pc_swap32p(&b->scaleVelocityRange);
+    pc_swap32p(&b->movementParamRange);
+    // colourRangeR/G/B/A are u8.
+    pc_swap32p(&b->colourLoop); // still the asset-local offset at this point
+}
+
+// Colour loops live in the shared misc asset and can be referenced by more
+// than one behaviour — swap each one only once.
+static void pc_swap_colour_loop(ColorLoopEntry *cl) {
+    static ColorLoopEntry *swapped[128];
+    static s32 swappedCount = 0;
+    s32 i;
+
+    for (i = 0; i < swappedCount; i++) {
+        if (swapped[i] == cl) {
+            return;
+        }
+    }
+    if (swappedCount < 128) {
+        swapped[swappedCount++] = cl;
+    }
+    pc_swap32p(&cl[0].numEntries);
+    // Entries [2 .. numEntries+1] are indexed at render time; each entry's
+    // numEntries field is a BE s32, r/g/b/a are u8.
+    for (i = 1; i < cl[0].numEntries + 2; i++) {
+        pc_swap32p(&cl[i].numEntries);
+    }
+}
+#endif
+
 /**
  * Load all assets related to particles.
  */
@@ -260,6 +352,9 @@ void init_particle_assets(void) {
 
     free_particle_assets();
     gParticlesAssetTable = (ParticleDescriptor **) asset_table_load(ASSET_PARTICLES_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gParticlesAssetTable, asset_table_size(ASSET_PARTICLES_TABLE));
+#endif
     gParticlesAssetTableCount = -1;
     while (((s32) gParticlesAssetTable[gParticlesAssetTableCount + 1]) != -1) {
         gParticlesAssetTableCount++;
@@ -268,9 +363,15 @@ void init_particle_assets(void) {
     gParticlesAssets = (s32 *) asset_table_load(ASSET_PARTICLES);
     for (i = 0; i < gParticlesAssetTableCount; i++) {
         gParticlesAssetTable[i] = (ParticleDescriptor *) (((u8 *) gParticlesAssets) + ((s32) gParticlesAssetTable[i]));
+#ifdef TARGET_PC
+        pc_swap_particle_descriptor(gParticlesAssetTable[i]);
+#endif
     }
 
     gParticleBehavioursAssetTable = (ParticleBehaviour **) asset_table_load(ASSET_PARTICLE_BEHAVIORS_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gParticleBehavioursAssetTable, asset_table_size(ASSET_PARTICLE_BEHAVIORS_TABLE));
+#endif
     gParticleBehavioursAssetTableCount = -1;
     while (((s32) gParticleBehavioursAssetTable[gParticleBehavioursAssetTableCount + 1]) != -1) {
         gParticleBehavioursAssetTableCount++;
@@ -280,9 +381,15 @@ void init_particle_assets(void) {
     for (i = 0; i < gParticleBehavioursAssetTableCount; i++) {
         gParticleBehavioursAssetTable[i] =
             (ParticleBehaviour *) (((u8 *) gParticleBehavioursAssets) + ((s32) gParticleBehavioursAssetTable[i]));
+#ifdef TARGET_PC
+        pc_swap_particle_behaviour(gParticleBehavioursAssetTable[i]);
+#endif
         if (((u32) gParticleBehavioursAssetTable[i]->colourLoop) != 0xFFFFFFFF) {
             gParticleBehavioursAssetTable[i]->colourLoop =
                 (ColorLoopEntry *) get_misc_asset((s32) gParticleBehavioursAssetTable[i]->colourLoop);
+#ifdef TARGET_PC
+            pc_swap_colour_loop(gParticleBehavioursAssetTable[i]->colourLoop);
+#endif
         }
     }
 }

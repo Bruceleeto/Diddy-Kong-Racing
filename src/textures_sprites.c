@@ -386,6 +386,15 @@ void tex_init_textures(void) {
     gTextureAssetTable[TEX_TABLE_2D] = (s32 *) asset_table_load(ASSET_TEXTURES_2D_TABLE);
     gTextureAssetTable[TEX_TABLE_3D] = (s32 *) asset_table_load(ASSET_TEXTURES_3D_TABLE);
 
+#ifdef TARGET_PC
+    // Offset tables are big-endian u32s (linux/reimpl.c helper).
+    {
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gTextureAssetTable[TEX_TABLE_2D], asset_table_size(ASSET_TEXTURES_2D_TABLE));
+        pc_swap32_buf(gTextureAssetTable[TEX_TABLE_3D], asset_table_size(ASSET_TEXTURES_3D_TABLE));
+    }
+#endif
+
     for (i = 0; gTextureAssetTable[TEX_TABLE_2D][i] != -1; i++) {}
     gTextureTableSize[TEX_TABLE_2D] = --i;
 
@@ -396,6 +405,12 @@ void tex_init_textures(void) {
     gCurrentSpriteAsset = mempool_alloc_safe(MAX_SPRITE_ASSET_SIZE, COLOUR_TAG_MAGENTA);
     gSpriteCacheCount = 0;
     gSpriteOffsetTable = (s32 *) asset_table_load(ASSET_SPRITES_TABLE);
+#ifdef TARGET_PC
+    {
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gSpriteOffsetTable, asset_table_size(ASSET_SPRITES_TABLE));
+    }
+#endif
     gSpriteTableSize = 0;
     while (gSpriteOffsetTable[gSpriteTableSize] != -1) {
         gSpriteTableSize++;

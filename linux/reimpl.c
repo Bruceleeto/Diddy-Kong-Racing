@@ -108,6 +108,34 @@ u32 pc_asset_lut_size(void) {
     return sAssetLutSize;
 }
 
+// Byteswap a buffer of big-endian u32s in place (asset offset tables etc.).
+// Endianness of asset *contents* is handled per parse site — this is the
+// helper those sites share.
+void pc_swap32_buf(void *buf, u32 numBytes) {
+    u8 *p = buf;
+    u32 i;
+
+    for (i = 0; i + 3 < numBytes; i += 4) {
+        u8 t0 = p[i + 0], t1 = p[i + 1];
+        p[i + 0] = p[i + 3];
+        p[i + 1] = p[i + 2];
+        p[i + 2] = t1;
+        p[i + 3] = t0;
+    }
+}
+
+// Same, for buffers of big-endian u16s.
+void pc_swap16_buf(void *buf, u32 numBytes) {
+    u8 *p = buf;
+    u32 i;
+
+    for (i = 0; i + 1 < numBytes; i += 2) {
+        u8 t = p[i];
+        p[i] = p[i + 1];
+        p[i + 1] = t;
+    }
+}
+
 void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
     pc_assets_init();
 
