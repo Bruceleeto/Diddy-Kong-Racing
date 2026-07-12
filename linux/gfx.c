@@ -41,6 +41,46 @@ void gfx_window_init(int width, int height, int scale) {
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_LESS);
     glShadeModel(GL_SMOOTH);
+
+    // Texture alpha is how the N64 cuts out sprites and foliage, so it has to
+    // blend. The alpha test drops fully transparent texels so they don't write
+    // depth and punch holes in whatever is drawn behind them later.
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glEnable(GL_ALPHA_TEST);
+    glAlphaFunc(GL_GREATER, 0.05f);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+}
+
+unsigned int gfx_create_texture(const void *rgba, int width, int height, int clampS, int clampT) {
+    GLuint id = 0;
+
+    if (sWindow == NULL) {
+        return 0;
+    }
+
+    glGenTextures(1, &id);
+    glBindTexture(GL_TEXTURE_2D, id);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, clampS ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, clampT ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+
+    return id;
+}
+
+void gfx_bind_texture(unsigned int handle) {
+    if (sWindow == NULL) {
+        return;
+    }
+
+    if (handle == 0) {
+        glDisable(GL_TEXTURE_2D);
+    } else {
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, handle);
+    }
 }
 
 void gfx_frame_begin(void) {
@@ -60,7 +100,8 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 
     glBegin(GL_TRIANGLES);
     for (i = 0; i < count; i++) {
-        glColor3ub(verts[i].r, verts[i].g, verts[i].b);
+        glColor4ub(verts[i].r, verts[i].g, verts[i].b, verts[i].a);
+        glTexCoord2f(verts[i].u, verts[i].v);
         glVertex3f(verts[i].x, verts[i].y, verts[i].z);
     }
     glEnd();

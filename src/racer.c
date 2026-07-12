@@ -8969,18 +8969,25 @@ void func_8005B818(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateR
     CheckpointNode *checkpoint;
     LevelModel *model;
     f32 var_f28;
-    f32 checkpointX[4];
+    // These five are filled with FIVE checkpoints (the loop below runs i = 0..4,
+    // covering nextCheckpoint-2 .. nextCheckpoint+2), and cubic_spline_interpolation
+    // reads data[index] .. data[index + 3] with index up to 1 — so it reads [4] too.
+    // Sizing them [4], as the decomp did, overruns all five by one element: harmless
+    // on N64 where the strays landed in stack padding, but on any other stack layout
+    // it corrupts the frame (the AI's own position locals) and the racer then steers
+    // at garbage. Same bug class as the shadow UV arrays in tracks.c.
+    f32 checkpointX[5];
     s32 j;
-    f32 checkpointY[4];
+    f32 checkpointY[5];
     f32 var_f12;
-    f32 checkpointZ[4];
+    f32 checkpointZ[5];
     s32 checkpointSplineIdx;
     f32 checkpointDistance;
     UNUSED f32 pad1;
     UNUSED f32 pad2;
-    f32 spB8[4];
+    f32 spB8[5];
     f32 var_f26;
-    f32 spA4[4];
+    f32 spA4[5];
     UNUSED f32 pad3;
     f32 sp9C;
     f32 sp98;

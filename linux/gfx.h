@@ -11,9 +11,11 @@
 
 // A triangle corner, in N64 screen pixels (origin top-left, y down). `z` is the
 // perspective-divided depth, negated so that nearer is smaller (GL_LESS).
+// `u`/`v` are normalised texture coordinates.
 typedef struct {
     float x, y, z;
-    unsigned char r, g, b;
+    float u, v;
+    unsigned char r, g, b, a;
 } GfxTriVert;
 
 // Opens the window and GL context. `width`/`height` are the N64 framebuffer
@@ -22,8 +24,16 @@ void gfx_window_init(int width, int height, int scale);
 
 void gfx_frame_begin(void);
 
+// Uploads an RGBA8888 image and returns a handle for gfx_bind_texture().
+// `clampS`/`clampT` pick clamp vs. repeat wrapping on each axis.
+unsigned int gfx_create_texture(const void *rgba, int width, int height, int clampS, int clampT);
+
+// Binds a texture for subsequent draws. Handle 0 means untextured (the
+// triangles are then shaded from vertex colours alone).
+void gfx_bind_texture(unsigned int handle);
+
 // Draws `count` vertices as GL_TRIANGLES — i.e. count/3 triangles, Gouraud
-// shaded from the vertex colours.
+// shaded from the vertex colours and modulated by the bound texture.
 void gfx_draw_tris(const GfxTriVert *verts, int count);
 
 // Presents the frame and pumps the event queue (exits the process on quit).

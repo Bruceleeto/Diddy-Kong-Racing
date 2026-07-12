@@ -59,7 +59,27 @@ INCLUDES_REIMPL := \
 INCLUDES := -I include/libc $(INCLUDES_REIMPL)
 
 OPT      ?= -O1
-BASE_CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) \
+
+# SANITIZE=1 builds with AddressSanitizer + UBSan. This is the port's single
+# best debugging tool: the decomp is full of out-of-bounds writes that retail's
+# exact stack/data layout absorbed harmlessly (see the three failure classes in
+# docs/linux_port.md), and on N64 each one cost a multi-day bisect to find. ASan
+# reports them with a file and a line, the first time they happen.
+#
+#   make -f Makefile.pc SANITIZE=1 -j8   # then just run ./dkracing
+#
+# Build it into its own object dir so a sanitized build doesn't get mixed with a
+# normal one. -fno-omit-frame-pointer keeps the reported stack traces readable;
+# -fno-common and -g are already on.
+SANITIZE ?= 0
+ifeq ($(SANITIZE),1)
+BUILD    := build/pc-asan
+SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
+else
+SAN_FLAGS :=
+endif
+
+BASE_CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) $(SAN_FLAGS) \
 	-fno-builtin \
 	-fno-common \
 	-fno-strict-aliasing \
@@ -71,7 +91,7 @@ CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 
 # The renderer (linux/main.c) is SDL2 + OpenGL. On the default 32-bit build this
 # needs the i386 SDL2/GL runtime, not the host's 64-bit one.
-LIBS := -lm -lSDL2 -lGL
+LIBS := -lm -lSDL2 -lGL $(SAN_FLAGS)
 
 # Every game-code source file, individually.
 SRC_FILES := \
