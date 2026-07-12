@@ -1948,6 +1948,13 @@ void load_menu_text(s32 language) {
 
     if (gMenuTextLangTable == NULL) {
         gMenuTextLangTable = (s32 *) asset_table_load(ASSET_MENU_TEXT_TABLE);
+#ifdef TARGET_PC
+        {
+            // Big-endian table: [0] string count, [1..4] per-language offsets.
+            extern void pc_swap32_buf(void *buf, u32 numBytes);
+            pc_swap32_buf(gMenuTextLangTable, asset_table_size(ASSET_MENU_TEXT_TABLE));
+        }
+#endif
     }
 
     switch (language) {
@@ -1975,6 +1982,14 @@ void load_menu_text(s32 language) {
     }
 
     asset_load(ASSET_MENU_TEXT, (u32) temp, langIndex, size);
+#ifdef TARGET_PC
+    {
+        // The blob leads with a big-endian string-offset table; the loop below
+        // converts it to pointers. The strings after it are plain chars.
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gMenuText, gMenuTextLangTable[0] * 4);
+    }
+#endif
 
     // TODO: Find a way to clean up the ugly hacks.
     // Fill up the lookup table with proper RAM addresses
@@ -13792,6 +13807,13 @@ void menu_asset_load(s32 assetID) {
 
     if (*gAssetsMenuElementIds == NULL) {
         *gAssetsMenuElementIds = (s16 *) asset_table_load(ASSET_MENU_ELEMENT_IDS);
+#ifdef TARGET_PC
+        {
+            // Big-endian s16 id table (helper in linux/reimpl.c).
+            extern void pc_swap16_buf(void *buf, u32 numBytes);
+            pc_swap16_buf(*gAssetsMenuElementIds, asset_table_size(ASSET_MENU_ELEMENT_IDS));
+        }
+#endif
         for (gMenuElementIdCount = 0; (*gAssetsMenuElementIds)[gMenuElementIdCount] != -1; gMenuElementIdCount++) {}
         gMenuObjectsCount = 0;
         for (i = 0; i < gMenuElementIdCount; i++) {

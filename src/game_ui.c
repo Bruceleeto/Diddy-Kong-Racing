@@ -327,6 +327,13 @@ void hud_init(UNUSED s32 viewportCount) {
     gHudSettings = get_settings();
     gHudSilverCoinRace = check_if_silver_coin_race();
     gAssetHudElementIds = (s16 *) asset_table_load(ASSET_HUD_ELEMENT_IDS);
+#ifdef TARGET_PC
+    {
+        // Big-endian s16 id table (helper in linux/reimpl.c).
+        extern void pc_swap16_buf(void *buf, u32 numBytes);
+        pc_swap16_buf(gAssetHudElementIds, asset_table_size(ASSET_HUD_ELEMENT_IDS));
+    }
+#endif
     gAssetHudElementIdsCount = 0;
 
     while (gAssetHudElementIds[gAssetHudElementIdsCount] != -1) {

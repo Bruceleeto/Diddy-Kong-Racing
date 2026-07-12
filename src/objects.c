@@ -904,6 +904,47 @@ void free_all_objects(void) {
     mempool_free((void *) gObjectMap[1]);
 }
 
+#ifdef TARGET_PC
+// ObjectHeader is a big-endian asset overlay: header fields swapped before the
+// offset->pointer fixups below, then the pointed-to arrays. The ObjectHeader24
+// union at 0x08 stays byte order (its u32 reading in lights.c has a PC-side
+// byte read instead). Helpers in linux/reimpl.c.
+extern void pc_swap16_buf(void *buf, u32 numBytes);
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+
+_Static_assert(sizeof(ObjectHeader) == 0x78, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, modelIds) == 0x10, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, unk24) == 0x24, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, flags) == 0x30, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, shadeAngleY) == 0x3E, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, unk52) == 0x52, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, internalName) == 0x60, "ObjectHeader layout drifted from N64");
+_Static_assert(sizeof(ObjectHeader24) == 0x18, "ObjectHeader24 layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader24, homeX) == 0x0C, "ObjectHeader24 layout drifted from N64");
+
+static void pc_swap_loaded_object_header(ObjectHeader *header) {
+    s32 i;
+
+    pc_swap32_buf(header, 0x10);            // unk0, shadowScale, unk8, scale
+    pc_swap32_buf(&header->modelIds, 0x10); // 4 offset words (modelIds..objectParticles)
+    pc_swap32_buf(&header->unk24, 4);       // unk24 offset (pad20 skipped)
+    pc_swap32_buf(&header->shadeAmbient, 8);
+    pc_swap16_buf(&header->flags, 10);       // flags..unk38
+    pc_swap16_buf(&header->shadeAngleY, 20); // shadeAngleY..unk50
+
+    // Pointed-to arrays, still offsets here — swap via the header base.
+    pc_swap32_buf((u8 *) header + (uintptr_t) header->modelIds, header->numberOfModelIds * 4);
+    pc_swap32_buf((u8 *) header + (uintptr_t) header->vehiclePartIds, header->attachPointCount * 4);
+    pc_swap32_buf((u8 *) header + (uintptr_t) header->objectParticles,
+                  header->particleCount * sizeof(ObjHeaderParticleEntry));
+    for (i = 0; i < header->numLightSources; i++) {
+        ObjectHeader24 *light = &((ObjectHeader24 *) ((u8 *) header + (uintptr_t) header->unk24))[i];
+        pc_swap16_buf(&light->unk6, 2);
+        pc_swap16_buf(&light->homeX, 12); // homeX/Y/Z, radius, unk14, unk16
+    }
+}
+#endif
+
 /**
  * Set the object's header.
  * Search if the intended header is already loaded and use that.
@@ -923,6 +964,9 @@ ObjectHeader *load_object_header(s32 index) {
     address = mempool_alloc_pool((MemoryPoolSlot *) gObjectMemoryPool, size);
     if (address != NULL) {
         asset_load(ASSET_OBJECTS, (u32) address, assetOffset, size);
+#ifdef TARGET_PC
+        pc_swap_loaded_object_header(address);
+#endif
         address->unk24 = (ObjectHeader24 *) ((uintptr_t) address + (uintptr_t) address->unk24);
         address->objectParticles =
             (ObjHeaderParticleEntry *) ((uintptr_t) address + (uintptr_t) address->objectParticles);
@@ -1002,6 +1046,13 @@ void track_spawn_objects(s32 mapID, s32 index) {
     gObjectMapSize[index] = NULL;
     gObjectMapID[index] = mapID;
     objMapTable = (u32 *) asset_table_load(ASSET_LEVEL_OBJECT_MAPS_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian asset offset table (helper in linux/reimpl.c).
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(objMapTable, asset_table_size(ASSET_LEVEL_OBJECT_MAPS_TABLE));
+    }
+#endif
     for (i = 0; objMapTable[i] != 0xFFFFFFFF; i++) {}
     i--;
     if (mapID >= i) {
@@ -1016,6 +1067,27 @@ void track_spawn_objects(s32 mapID, s32 index) {
             ((compressedAsset + gzip_size_uncompressed(ASSET_LEVEL_OBJECT_MAPS, assetOffset)) - (0, assetSize)) + 0x20;
         asset_load(ASSET_LEVEL_OBJECT_MAPS, (u32) compressedAsset, assetOffset, assetSize);
         gzip_inflate(compressedAsset, (u8 *) mem);
+#ifdef TARGET_PC
+        {
+            // Inflated object map is big-endian: a u32 spawn-list byte length,
+            // then variable-size entries whose common header holds three s16
+            // coords. Type-specific fields past the common header are NOT
+            // swapped here yet — spawn handlers reading s16s from entries get
+            // byte-swapped values until each entry type is handled.
+            extern void pc_swap16_buf(void *buf, u32 numBytes);
+            extern void pc_swap32_buf(void *buf, u32 numBytes);
+            _Static_assert(sizeof(LevelObjectEntryCommon) == 8, "LevelObjectEntryCommon layout drifted from N64");
+            u8 *entry = (u8 *) (gObjectMap[index] + sizeof(uintptr_t));
+            s32 entryOffset;
+            s32 entrySize;
+            pc_swap32_buf(mem, 4);
+            for (entryOffset = 0; entryOffset < *mem; entryOffset += entrySize) {
+                pc_swap16_buf(entry + 2, 6); // LevelObjectEntryCommon x, y, z
+                entrySize = entry[1] & 0x3F;
+                entry += entrySize;
+            }
+        }
+#endif
         mempool_free(objMapTable);
         gObjectMapSpawnList[index] = (u8 *) (gObjectMap[index] + sizeof(uintptr_t));
         gObjectMapSize[index] = *mem;
@@ -6903,6 +6975,16 @@ s32 timetrial_load_staff_ghost(s32 mapId) {
 
     gMapDefaultVehicle = leveltable_vehicle_default(mapId);
     ghostTable = (TTGhostTable *) asset_table_load(ASSET_TTGHOSTS_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian entries: mapId/defaultVehicleId are u8, ghostOffset is s32.
+        s32 n;
+        _Static_assert(sizeof(TTGhostTable) == 8, "TTGhostTable layout drifted from N64");
+        for (n = 0; n < (s32) (asset_table_size(ASSET_TTGHOSTS_TABLE) / sizeof(TTGhostTable)); n++) {
+            pc_swap32_buf(&ghostTable[n].ghostOffset, 4);
+        }
+    }
+#endif
 
     nextGhostTable = ghostTable;
     do {

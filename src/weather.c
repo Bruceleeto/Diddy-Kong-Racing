@@ -172,6 +172,13 @@ void weather_init(void) {
     gLensFlareOverrideObjs = 0;
     if (gWeatherAssetTable == NULL) {
         gWeatherAssetTable = (s32 *) asset_table_load(ASSET_WEATHER_PARTICLES);
+#ifdef TARGET_PC
+        {
+            // Big-endian asset offset table (helper in linux/reimpl.c).
+            extern void pc_swap32_buf(void *buf, u32 numBytes);
+            pc_swap32_buf(gWeatherAssetTable, asset_table_size(ASSET_WEATHER_PARTICLES));
+        }
+#endif
         gWeatherAssetTableLength = 0;
         while ((s32) gWeatherAssetTable[gWeatherAssetTableLength] != -1) {
             gWeatherAssetTableLength++;

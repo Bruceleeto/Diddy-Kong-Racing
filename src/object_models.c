@@ -47,6 +47,13 @@ void allocate_object_model_pools(void) {
     gModelCacheCount = 0;
     D_8011D634 = 0;
     gObjectModelTable = (s32 *) asset_table_load(ASSET_OBJECT_MODELS_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian asset offset tables (helpers in linux/reimpl.c).
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gObjectModelTable, asset_table_size(ASSET_OBJECT_MODELS_TABLE));
+    }
+#endif
     gNumModelIDs = 0;
     while (gObjectModelTable[gNumModelIDs] != -1) {
         gNumModelIDs++;
@@ -54,6 +61,14 @@ void allocate_object_model_pools(void) {
     gNumModelIDs--;
     gAnimationTable = (s16 *) asset_table_load(ASSET_ANIMATION_IDS);
     gObjectAnimationTable = (s32 *) asset_table_load(ASSET_OBJECT_ANIMATIONS_TABLE);
+#ifdef TARGET_PC
+    {
+        extern void pc_swap16_buf(void *buf, u32 numBytes);
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap16_buf(gAnimationTable, asset_table_size(ASSET_ANIMATION_IDS));
+        pc_swap32_buf(gObjectAnimationTable, asset_table_size(ASSET_OBJECT_ANIMATIONS_TABLE));
+    }
+#endif
     D_8011D644 = (s16 *) mempool_alloc_safe(0xC00, COLOUR_TAG_GREEN);
     gModelAnimOffsetID = 0;
 
@@ -68,6 +83,56 @@ void allocate_object_model_pools(void) {
     }
 #endif
 }
+
+#ifdef TARGET_PC
+// Inflated object models are big-endian, same layout family as the level model
+// (see tracks.c): header swapped before its offsets become pointers, then the
+// vertex/triangle/batch/attach arrays. Helpers in linux/reimpl.c.
+extern void pc_swap16_buf(void *buf, u32 numBytes);
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+
+_Static_assert(sizeof(ObjectModel) == 0x80, "ObjectModel layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectModel, numberOfAttachPoints) == 0x18, "ObjectModel layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectModel, collisionSpheresSize) == 0x20, "ObjectModel layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectModel, batches) == 0x38, "ObjectModel layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectModel, animatedVertexIndices) == 0x4C, "ObjectModel layout drifted from N64");
+
+static void pc_swap_object_model(ObjectModel *mdl) {
+    s32 i;
+
+    // Header: offsets that become pointers, counts, sizes.
+    pc_swap32_buf(mdl, 0xC); // textures, vertices, triangles
+    pc_swap32_buf(&mdl->attachPoints, 4);
+    pc_swap16_buf(&mdl->numberOfAttachPoints, 4); // numberOfAttachPoints, unk1A
+    pc_swap32_buf(&mdl->collisionSpheres, 4);
+    pc_swap16_buf(&mdl->collisionSpheresSize, 10); // collisionSpheresSize..numberOfBatches
+    pc_swap32_buf(&mdl->fileSize, 4);
+    pc_swap32_buf(&mdl->batches, 4);
+    pc_swap32_buf(&mdl->unk3C, 4);
+    pc_swap16_buf(&mdl->numberOfAnimations, 4); // numberOfAnimations, numberOfAnimatedVertices
+    pc_swap32_buf(&mdl->animatedVertexIndices, 4);
+    pc_swap16_buf(&mdl->hasAnimatedTexture, 2);
+
+    // Arrays, still offsets here — swap via the model base.
+    for (i = 0; i < mdl->numberOfTextures; i++) {
+        pc_swap32_buf(&((TextureInfo *) ((u8 *) mdl + (uintptr_t) mdl->textures))[i].texture, 4);
+    }
+    for (i = 0; i < mdl->numberOfVertices; i++) {
+        pc_swap16_buf(&((Vertex *) ((u8 *) mdl + (uintptr_t) mdl->vertices))[i], 6); // x, y, z
+    }
+    for (i = 0; i < mdl->numberOfTriangles; i++) {
+        pc_swap16_buf(&((Triangle *) ((u8 *) mdl + (uintptr_t) mdl->triangles))[i].uv0, 12); // uv0/uv1/uv2
+    }
+    for (i = 0; i < mdl->numberOfBatches + 1; i++) { // +1: sentinel entry
+        TriangleBatchInfo *batch = &((TriangleBatchInfo *) ((u8 *) mdl + (uintptr_t) mdl->batches))[i];
+        pc_swap16_buf(&batch->verticesOffset, 4); // verticesOffset, facesOffset
+        pc_swap32_buf(&batch->flags, 4);
+    }
+    pc_swap16_buf((u8 *) mdl + (uintptr_t) mdl->attachPoints, mdl->numberOfAttachPoints * 2);
+    pc_swap16_buf((u8 *) mdl + (uintptr_t) mdl->collisionSpheres, mdl->collisionSpheresSize * 2);
+    pc_swap32_buf((u8 *) mdl + (uintptr_t) mdl->animatedVertexIndices, mdl->numberOfAnimatedVertices * 4);
+}
+#endif
 
 /**
  * Load the associated model ID and assign it to the objects gfx data.
@@ -142,6 +207,9 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
     compressedData = (u32) ((u8 *) objMdl + modelSize) - sp48;
     asset_load(ASSET_OBJECT_MODELS, compressedData, temp_s0, sp48);
     gzip_inflate((u8 *) compressedData, (u8 *) objMdl);
+#ifdef TARGET_PC
+    pc_swap_object_model(objMdl);
+#endif
     objMdl->textures = (TextureInfo *) ((s32) objMdl->textures + (u8 *) objMdl);
     objMdl->vertices = (Vertex *) ((s32) objMdl->vertices + (u8 *) objMdl);
     objMdl->triangles = (Triangle *) ((s32) objMdl->triangles + (u8 *) objMdl);
@@ -939,6 +1007,11 @@ s32 model_anim_init(ObjectModel *model, s32 modelID) {
         asset_load(ASSET_OBJECT_ANIMATIONS, animAddress, assetOffset, assetSize);
         gzip_inflate((u8 *) animAddress, (u8 *) model->animations[i].anim);
         temp = model->animations[i].anim;
+#ifdef TARGET_PC
+        // Big-endian length word. The keyframe data past it is NOT swapped
+        // here yet — obj_animate consumers read it raw.
+        pc_swap32_buf(temp, 4);
+#endif
         model->animations[i].animLength = *temp;
         model->animations[i].anim++;
         i++;
