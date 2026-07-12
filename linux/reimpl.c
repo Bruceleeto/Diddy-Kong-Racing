@@ -42,6 +42,7 @@ u8 *main_BSS_START[1] = { 0 };
 // PC: a static pool. memory.c's "ramEnd - (s32)&gMainMemoryPool" sizing math
 // still needs TARGET_PC surgery to use this pool's real size instead.
 u8 gMainMemoryPool[16 * 1024 * 1024] __attribute__((aligned(16)));
+u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
 
 // ---------------------------------------------------------------------------
 // Asset "DMA" — the DKR equivalent of the OoT port's DmaMgr_DmaRomToRam.

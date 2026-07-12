@@ -33,7 +33,17 @@ void mempool_init_main(void) {
     } else {
         ramEnd = RAM_END;
     }
+#ifdef TARGET_PC
+    {
+        // gMainMemoryPool is a static array (linux/reimpl.c), not "the rest
+        // of RAM" — the N64 ramEnd arithmetic is meaningless against a host
+        // address.
+        extern u32 gMainMemoryPoolSize;
+        mempool_init(&gMainMemoryPool, gMainMemoryPoolSize, MAIN_POOL_SLOT_COUNT);
+    }
+#else
     mempool_init(&gMainMemoryPool, ramEnd - (s32) (&gMainMemoryPool), MAIN_POOL_SLOT_COUNT);
+#endif
     mempool_free_timer(2);
     gFreeQueueCount = 0;
 }

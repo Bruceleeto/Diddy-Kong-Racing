@@ -77,6 +77,13 @@ SoundHandle gRacerSoundMask;
  */
 void audio_init(OSSched *sc) {
     s32 i;
+#ifdef TARGET_PC
+    // Audio deferred entirely (OoT-port style): the bank/sequence tables are
+    // big-endian and the synthesizer drives RSP command lists — both are the
+    // audio milestone's problem. Sound globals stay NULL; later audio calls
+    // that trip on them get stubbed as they surface.
+    return;
+#endif
     ALSynConfig synth_config;
     s32 *addrPtr;
     u32 seqfSize;
