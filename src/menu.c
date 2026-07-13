@@ -183,7 +183,16 @@ unk80126878 D_80126878[8];
 f32 D_801268D8;
 UNUSED s32 D_801268DC; // Set to 0 during the title screen, never read.
 s32 gOpeningNameID;
-s16 gTrackSelectIDs[4][6]; // Track Select values?
+//!@bug: menu_track_select_init() fills this with a `for (i = 0; i < 5; i++)`
+// loop, so it writes five rows into a four-row array. Retail really is 48 bytes
+// (gTrackSelectIDs = 0x801268E8, gFFLUnlocked = 0x80126918), so the console
+// scribbles 12 bytes over gFFLUnlocked and D_8012691C every time the track
+// select opens, and evidently survives it. The PC build lays its globals out
+// differently, so those 12 bytes land on something else entirely — which is
+// real, drifting corruption. The fifth row is never read back (every read
+// indexes by gTrackSelectCursorY, which stops at 3), so giving the write a row
+// of its own is behaviour-neutral and keeps the stray store in bounds.
+s16 gTrackSelectIDs[5][6]; // Track Select values?
 s16 gFFLUnlocked;
 UNUSED s32 D_80128464;
 UNUSED s32 D_80128468;
@@ -397,7 +406,16 @@ f32 D_801268D8;
 UNUSED s32 D_801268DC; // Set to 0 during the title screen, never read.
 s32 gOpeningNameID;
 UNUSED s32 D_801268E4;
-s16 gTrackSelectIDs[4][6]; // Track Select values?
+//!@bug: menu_track_select_init() fills this with a `for (i = 0; i < 5; i++)`
+// loop, so it writes five rows into a four-row array. Retail really is 48 bytes
+// (gTrackSelectIDs = 0x801268E8, gFFLUnlocked = 0x80126918), so the console
+// scribbles 12 bytes over gFFLUnlocked and D_8012691C every time the track
+// select opens, and evidently survives it. The PC build lays its globals out
+// differently, so those 12 bytes land on something else entirely — which is
+// real, drifting corruption. The fifth row is never read back (every read
+// indexes by gTrackSelectCursorY, which stops at 3), so giving the write a row
+// of its own is behaviour-neutral and keeps the stray store in bounds.
+s16 gTrackSelectIDs[5][6]; // Track Select values?
 s16 gFFLUnlocked;
 UNUSED s32 D_8012691C;
 UNUSED s32 D_80126920;

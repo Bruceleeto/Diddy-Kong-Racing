@@ -10,6 +10,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "input.h"
+
 typedef signed char s8;
 typedef signed int s32;
 typedef unsigned char u8;
@@ -238,6 +240,8 @@ void osContGetReadData(PCContPad *pads) {
         pads[i].stick_y = 0;
         pads[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
     }
+
+    input_host_read(&pads[0].button, &pads[0].stick_x, &pads[0].stick_y);
 }
 
 s32 osEepromProbe(void *mq) {

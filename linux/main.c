@@ -152,7 +152,19 @@ static u8 sTileClampS = 0;
 static u8 sTileClampT = 0;
 static u16 sTileWidth = 0; // G_SETTILESIZE
 static u16 sTileHeight = 0;
+static u16 sTileUls = 0;   //               the tile's origin within the image
+static u16 sTileUlt = 0;
 static u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
+
+// RDP colour state. Only the 2D path reads these: the triangles get their colour
+// from the vertices, but a rectangle has no vertex colours, so its colour comes
+// entirely from the combiner and these registers.
+static u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
+static u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
+static u32 sCombineW1 = 0;
+static u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
 
 #define GFX_MAX_TEXTURES 1024
 #define GFX_MAX_TEX_TEXELS (512 * 512)
@@ -168,6 +180,37 @@ typedef struct {
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
 static s32 sTexCacheCount = 0;
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
+
+/**
+ * Drop every cached texture that was decoded out of `addr`.
+ *
+ * The cache is keyed on the RAM address the texture was loaded to, and the game
+ * recycles those addresses: the textures of a level it has unloaded are handed
+ * straight back out to the next one. Without this, a new texture landing on an
+ * old address with the same format and size would hit the stale entry and draw
+ * the previous level's pixels — and the cache, never evicting, would fill up and
+ * start refusing to decode anything at all.
+ *
+ * Called from mempool_free_addr() (src/memory.c), the choke point every free in
+ * the game passes through, so a texture's GL object dies exactly when the memory
+ * behind it does. The palette is checked too: a CI texture decoded against a
+ * freed TLUT is just as stale.
+ */
+void pc_gfx_invalidate_texture(const void *addr) {
+    u32 target = (u32) addr;
+    s32 i;
+
+    for (i = 0; i < sTexCacheCount;) {
+        GfxTexture *t = &sTexCache[i];
+
+        if (t->timg == target || t->tlut == target) {
+            gfx_delete_texture(t->handle);
+            sTexCache[i] = sTexCache[--sTexCacheCount];
+        } else {
+            i++;
+        }
+    }
+}
 
 /**
  * Unpack an N64 Mtx (s15.16 fixed point: the integer halves live in the first 8
@@ -550,6 +593,202 @@ static void handle_polygon(u32 w0, u32 w1) {
 }
 
 /**
+ * The colour combiner's RGB inputs, evaluated for a rectangle. A rectangle has
+ * no shade and its texel is applied afterwards by the GL texture unit, so both
+ * TEXEL and SHADE are taken as white here and the result is the constant colour
+ * the texture gets modulated by. That collapses the combiners DKR actually uses
+ * for 2D to exactly the right thing: MODULATEIA_PRIM yields the prim colour,
+ * ENVIRONMENT the env colour, and the font's BLENDT_ENV_ALPHA_A_TxP the text
+ * colour it keeps in env.
+ */
+static f32 cc_rgb(u32 mux, s32 isMultiplier, s32 channel) {
+    switch (mux) {
+        case G_CCMUX_PRIMITIVE:
+            return sPrimColor[channel] / 255.0f;
+        case G_CCMUX_ENVIRONMENT:
+            return sEnvColor[channel] / 255.0f;
+        case G_CCMUX_TEXEL0:
+        case G_CCMUX_TEXEL1:
+        case G_CCMUX_SHADE:
+        case G_CCMUX_1:
+            return 1.0f;
+        default:
+            break;
+    }
+    // The multiplier slot is 5 bits wide, and past 6 it addresses the alpha
+    // registers rather than the colour ones.
+    if (isMultiplier) {
+        switch (mux) {
+            case G_CCMUX_PRIMITIVE_ALPHA:
+                return sPrimColor[3] / 255.0f;
+            case G_CCMUX_ENV_ALPHA:
+                return sEnvColor[3] / 255.0f;
+            case G_CCMUX_TEXEL0_ALPHA:
+            case G_CCMUX_TEXEL1_ALPHA:
+            case G_CCMUX_SHADE_ALPHA:
+                return 1.0f;
+            default:
+                break;
+        }
+    }
+    return 0.0f; // COMBINED, NOISE, K4/K5, LOD_FRAC and the reserved slots
+}
+
+static f32 cc_alpha(u32 mux) {
+    switch (mux) {
+        case G_ACMUX_PRIMITIVE:
+            return sPrimColor[3] / 255.0f;
+        case G_ACMUX_ENVIRONMENT:
+            return sEnvColor[3] / 255.0f;
+        case G_ACMUX_TEXEL0:
+        case G_ACMUX_TEXEL1:
+        case G_ACMUX_SHADE:
+        case G_ACMUX_1:
+            return 1.0f;
+        default:
+            return 0.0f; // COMBINED, LOD_FRAC, PRIM_LOD_FRAC, 0
+    }
+}
+
+static u8 clamp_u8(f32 v) {
+    if (v <= 0.0f) {
+        return 0;
+    }
+    if (v >= 1.0f) {
+        return 0xFF;
+    }
+    return (u8) (v * 255.0f);
+}
+
+/**
+ * Evaluate cycle 0 of the combiner — (a - b) * c + d — into the colour a
+ * rectangle's vertices carry.
+ */
+static void combiner_color(u8 out[4]) {
+    u32 a = (sCombineW0 >> 20) & 0xF;
+    u32 c = (sCombineW0 >> 15) & 0x1F;
+    u32 aA = (sCombineW0 >> 12) & 0x7;
+    u32 cA = (sCombineW0 >> 9) & 0x7;
+    u32 b = (sCombineW1 >> 28) & 0xF;
+    u32 d = (sCombineW1 >> 15) & 0x7;
+    u32 bA = (sCombineW1 >> 12) & 0x7;
+    u32 dA = (sCombineW1 >> 9) & 0x7;
+    s32 i;
+
+    for (i = 0; i < 3; i++) {
+        out[i] = clamp_u8(((cc_rgb(a, FALSE, i) - cc_rgb(b, FALSE, i)) * cc_rgb(c, TRUE, i)) + cc_rgb(d, FALSE, i));
+    }
+    out[3] = clamp_u8(((cc_alpha(aA) - cc_alpha(bA)) * cc_alpha(cA)) + cc_alpha(dA));
+}
+
+/**
+ * Two triangles in screen space, which is all a rectangle is once the RDP is out
+ * of the picture. Depth testing is off: the game clears G_ZBUFFER for its 2D and
+ * relies on display-list order, and so do we.
+ */
+static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 color[4],
+                         u32 texture) {
+    GfxTriVert q[6];
+    s32 i;
+
+    q[0].x = x0; q[0].y = y0; q[0].u = u0; q[0].v = v0;
+    q[1].x = x1; q[1].y = y0; q[1].u = u1; q[1].v = v0;
+    q[2].x = x1; q[2].y = y1; q[2].u = u1; q[2].v = v1;
+    q[3].x = x0; q[3].y = y0; q[3].u = u0; q[3].v = v0;
+    q[4].x = x1; q[4].y = y1; q[4].u = u1; q[4].v = v1;
+    q[5].x = x0; q[5].y = y1; q[5].u = u0; q[5].v = v1;
+
+    for (i = 0; i < 6; i++) {
+        q[i].z = 0.0f;
+        q[i].r = color[0];
+        q[i].g = color[1];
+        q[i].b = color[2];
+        q[i].a = color[3];
+    }
+
+    gfx_set_depth_test(FALSE);
+    gfx_bind_texture(texture);
+    gfx_draw_tris(q, 6);
+    gfx_set_depth_test(TRUE);
+}
+
+/**
+ * G_TEXRECT / G_TEXRECTFLIP — the whole 2D layer: every glyph, HUD sprite and
+ * menu image. `w2`/`w3` are the two G_RDPHALF words that follow the opcode and
+ * carry the texture coordinates.
+ */
+static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
+    // Screen coordinates are 10.2 fixed point, texture coordinates S10.5, and
+    // the per-pixel texture steps S5.10.
+    f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
+    f32 y0 = (w1 & 0xFFF) / 4.0f;
+    f32 x1 = ((w0 >> 12) & 0xFFF) / 4.0f;
+    f32 y1 = (w0 & 0xFFF) / 4.0f;
+    f32 s0 = (f32) (s16) (w2 >> 16) / 32.0f;
+    f32 t0 = (f32) (s16) (w2 & 0xFFFF) / 32.0f;
+    f32 dsdx = (f32) (s16) (w3 >> 16) / 1024.0f;
+    f32 dtdy = (f32) (s16) (w3 & 0xFFFF) / 1024.0f;
+    f32 s1, t1;
+    u8 color[4];
+    u32 texture = texture_current();
+
+    if (texture == 0) {
+        return;
+    }
+
+    // A flipped rect walks s down the rectangle's height and t across its width.
+    if (flip) {
+        s1 = s0 + ((y1 - y0) * dsdx);
+        t1 = t0 + ((x1 - x0) * dtdy);
+    } else {
+        s1 = s0 + ((x1 - x0) * dsdx);
+        t1 = t0 + ((y1 - y0) * dtdy);
+    }
+
+    // The texel coordinates are relative to the image, but the texture we
+    // uploaded starts at the tile's upper-left corner.
+    s0 -= sTileUls / 4.0f;
+    s1 -= sTileUls / 4.0f;
+    t0 -= sTileUlt / 4.0f;
+    t1 -= sTileUlt / 4.0f;
+
+    combiner_color(color);
+    draw_2d_quad(x0, y0, x1, y1, s0 / sTileWidth, t0 / sTileHeight, s1 / sTileWidth, t1 / sTileHeight, color,
+                 texture);
+}
+
+/**
+ * G_FILLRECT — the letterbox bars, dialogue-box backgrounds and screen fades.
+ */
+static void handle_fillrect(u32 w0, u32 w1) {
+    f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
+    f32 y0 = (w1 & 0xFFF) / 4.0f;
+    f32 x1 = ((w0 >> 12) & 0xFFF) / 4.0f;
+    f32 y1 = (w0 & 0xFFF) / 4.0f;
+    u8 color[4];
+
+    if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
+        // Fill mode paints the fill colour flat, and its lower-right corner is
+        // inclusive — one pixel further than the same rect in 1-cycle mode. The
+        // colour's alpha bit is the framebuffer's coverage bit, not
+        // transparency: the rect is opaque whichever way it is set.
+        color[0] = sFillColor[0];
+        color[1] = sFillColor[1];
+        color[2] = sFillColor[2];
+        color[3] = 0xFF;
+        x1 += 1.0f;
+        y1 += 1.0f;
+    } else {
+        combiner_color(color);
+        if (color[3] == 0) {
+            return; // fully transparent — the blender would discard it anyway
+        }
+    }
+
+    draw_2d_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.0f, color, 0);
+}
+
+/**
  * Interpret one display list. A `count` above zero means "at most this many
  * commands" — the task's own display list is bounded by its length rather than
  * a G_ENDDL, and G_DMADL likewise DMAs a fixed-size block. Zero means "run
@@ -638,6 +877,8 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     u32 lrt = w1 & 0xFFF;
                     sTileWidth = ((lrs - uls) >> 2) + 1;
                     sTileHeight = ((lrt - ult) >> 2) + 1;
+                    sTileUls = uls;
+                    sTileUlt = ult;
                 }
                 break;
             }
@@ -652,11 +893,66 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // The palette is whatever G_SETTIMG last pointed at.
                 sTlutAddr = sTimgAddr;
                 break;
+            case (u8) G_TEXRECT:
+            case (u8) G_TEXRECTFLIP: {
+                // A texture rectangle is three display-list words: the opcode,
+                // then G_RDPHALF_1 and G_RDPHALF_2 carrying the texture
+                // coordinates. Skip past them so they are not run as commands.
+                if (count != 0 && i + 2 >= count) {
+                    return; // truncated — the halves are not there to read
+                }
+                handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1, cmd == (u8) G_TEXRECTFLIP);
+                i += 2;
+                break;
+            }
+            case (u8) G_FILLRECT:
+                handle_fillrect(w0, w1);
+                break;
+            case (u8) G_SETCOMBINE:
+                sCombineW0 = w0;
+                sCombineW1 = w1;
+                break;
+            case (u8) G_SETPRIMCOLOR:
+                sPrimColor[0] = (w1 >> 24) & 0xFF;
+                sPrimColor[1] = (w1 >> 16) & 0xFF;
+                sPrimColor[2] = (w1 >> 8) & 0xFF;
+                sPrimColor[3] = w1 & 0xFF;
+                break;
+            case (u8) G_SETENVCOLOR:
+                sEnvColor[0] = (w1 >> 24) & 0xFF;
+                sEnvColor[1] = (w1 >> 16) & 0xFF;
+                sEnvColor[2] = (w1 >> 8) & 0xFF;
+                sEnvColor[3] = w1 & 0xFF;
+                break;
+            case (u8) G_SETFILLCOLOR: {
+                // Two packed RGBA5551 texels, one per 16-bit half of the word;
+                // the game always sets both to the same colour.
+                u16 texel = w1 & 0xFFFF;
+                u32 rgba = rgba16_to_rgba32(texel);
+                sFillColor[0] = rgba & 0xFF;
+                sFillColor[1] = (rgba >> 8) & 0xFF;
+                sFillColor[2] = (rgba >> 16) & 0xFF;
+                sFillColor[3] = (rgba >> 24) & 0xFF;
+                break;
+            }
+            case (u8) G_SETOTHERMODE_H: {
+                // F3D encodes the field as a shift and a bit count, with the
+                // data already sitting at its final position.
+                u32 shift = (w0 >> 8) & 0xFF;
+                u32 length = w0 & 0xFF;
+                u32 mask = (length >= 32) ? 0xFFFFFFFF : (((u32) 1 << length) - 1) << shift;
+                sOtherModeH = (sOtherModeH & ~mask) | (w1 & mask);
+                break;
+            }
+            case (u8) G_RDPSETOTHERMODE:
+                sOtherModeH = w0 & 0x00FFFFFF;
+                break;
             case (u8) G_ENDDL:
                 return;
             default:
-                // Everything else is RDP state (textures, combiners, blenders,
-                // rectangles) — nothing for a wireframe to do.
+                // Everything else is RDP state we do not model (blenders,
+                // scissors, texture filters) plus the G_RDPHALF words consumed
+                // by G_TEXRECT above.
                 break;
         }
     }
@@ -676,6 +972,8 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTlutAddr = 0;
     sTileWidth = 0;
     sTileHeight = 0;
+    sTileUls = 0;
+    sTileUlt = 0;
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
 
     gfx_frame_end();

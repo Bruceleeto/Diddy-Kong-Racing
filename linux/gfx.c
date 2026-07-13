@@ -107,6 +107,27 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
     glEnd();
 }
 
+void gfx_delete_texture(unsigned int handle) {
+    GLuint id = handle;
+
+    if (sWindow == NULL || handle == 0) {
+        return;
+    }
+    glDeleteTextures(1, &id);
+}
+
+void gfx_set_depth_test(int enable) {
+    if (sWindow == NULL) {
+        return;
+    }
+
+    if (enable) {
+        glEnable(GL_DEPTH_TEST);
+    } else {
+        glDisable(GL_DEPTH_TEST);
+    }
+}
+
 void gfx_frame_end(void) {
     SDL_Event event;
 

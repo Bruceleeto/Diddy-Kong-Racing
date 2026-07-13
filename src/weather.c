@@ -654,7 +654,17 @@ void lensflare_render(Gfx **dList, Mtx **mats, Vertex **verts, Camera *camera) {
     f32 magSquared;
     f32 magSquareSquared;
     LensFlareData *lensFlareData;
-    ObjectTransform trans;
+    //!@bug: the flare is drawn by handing render_sprite_billboard() a bare
+    // ObjectTransform cast to an Object *, but that function also reads
+    // obj->animFrame, which sits at Object offset 0x18 — one field past the end
+    // of an ObjectTransform. Retail reads whatever stack byte happened to follow.
+    // Only trans and animFrame are ever touched through the pointer, so this
+    // two-field stand-in gives the read a real, zeroed home and keeps the layout
+    // an Object * expects.
+    struct {
+        ObjectTransform trans;
+        s16 animFrame;
+    } lensObj;
     Gfx *gfxTemp;
     s32 width;
     LevelObjectEntry_LensFlare *lensFlareEntry;
@@ -676,9 +686,10 @@ void lensflare_render(Gfx **dList, Mtx **mats, Vertex **verts, Camera *camera) {
                 pos[0].z = (gLensFlarePos.z * 256.0f) + camera->trans.z_position;
                 magSquared = magnitude * magnitude;
                 magSquareSquared = magSquared * magSquared;
-                trans.rotation.y_rotation = 0;
-                trans.rotation.x_rotation = 0;
-                trans.rotation.z_rotation = 0;
+                lensObj.animFrame = 0;
+                lensObj.trans.rotation.y_rotation = 0;
+                lensObj.trans.rotation.x_rotation = 0;
+                lensObj.trans.rotation.z_rotation = 0;
                 pos[1].x = (pos[1].x * (0, (2 * magnitude))) - gLensFlarePos.x;
                 pos[1].y = (pos[1].y * (0, (2 * magnitude))) - gLensFlarePos.y;
                 pos[1].z = (pos[1].z * (0, (2 * magnitude))) - gLensFlarePos.z;
@@ -692,19 +703,19 @@ void lensflare_render(Gfx **dList, Mtx **mats, Vertex **verts, Camera *camera) {
                     }
                     if (lensFlareData != NULL) {
                         while (lensFlareData->count > 0) {
-                            trans.x_position = pos[0].x;
-                            trans.y_position = pos[0].y;
-                            trans.z_position = pos[0].z;
+                            lensObj.trans.x_position = pos[0].x;
+                            lensObj.trans.y_position = pos[0].y;
+                            lensObj.trans.z_position = pos[0].z;
                             if (i != 0) {
-                                trans.x_position = (lensFlareData->offset * pos[1].x) + pos[0].x;
-                                trans.y_position = (lensFlareData->offset * pos[1].y) + pos[0].y;
-                                trans.z_position = (lensFlareData->offset * pos[1].z) + pos[0].z;
+                                lensObj.trans.x_position = (lensFlareData->offset * pos[1].x) + pos[0].x;
+                                lensObj.trans.y_position = (lensFlareData->offset * pos[1].y) + pos[0].y;
+                                lensObj.trans.z_position = (lensFlareData->offset * pos[1].z) + pos[0].z;
                             }
-                            trans.scale = lensFlareData->scale * magSquared;
+                            lensObj.trans.scale = lensFlareData->scale * magSquared;
                             gDPSetPrimColor((*dList)++, 0, 0, lensFlareData->colour.r, lensFlareData->colour.g,
                                             lensFlareData->colour.b,
                                             (s32) (lensFlareData->colour.a * magSquareSquared));
-                            render_sprite_billboard(dList, mats, verts, (Object *) &trans,
+                            render_sprite_billboard(dList, mats, verts, (Object *) &lensObj,
                                                     gLensFlare->sprites[lensFlareData->count],
                                                     (RENDER_SEMI_TRANSPARENT | RENDER_Z_UPDATE));
                             lensFlareData++;

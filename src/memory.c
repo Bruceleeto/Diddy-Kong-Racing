@@ -321,6 +321,16 @@ void mempool_free_addr(u8 *address) {
 
         if (address == (u8 *) slot->data) {
             if (slot->flags == SLOT_USED || slot->flags == SLOT_SAFEGUARD) {
+#ifdef TARGET_PC
+                {
+                    // The renderer caches decoded textures by the RAM address
+                    // they were loaded to, and this memory is about to be handed
+                    // to something else. Drop anything it decoded out of here
+                    // before the address is reused.
+                    extern void pc_gfx_invalidate_texture(const void *addr);
+                    pc_gfx_invalidate_texture(address);
+                }
+#endif
                 mempool_slot_clear(poolIndex, slotIndex);
             }
             return;

@@ -32,9 +32,17 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cla
 // triangles are then shaded from vertex colours alone).
 void gfx_bind_texture(unsigned int handle);
 
+// Releases a texture created by gfx_create_texture().
+void gfx_delete_texture(unsigned int handle);
+
 // Draws `count` vertices as GL_TRIANGLES — i.e. count/3 triangles, Gouraud
 // shaded from the vertex colours and modulated by the bound texture.
 void gfx_draw_tris(const GfxTriVert *verts, int count);
+
+// Turns depth testing on or off. The 2D overlay (text, HUD, fades) is drawn
+// with the z-buffer disabled and relies on display-list order instead, which is
+// what the game itself does: it clears G_ZBUFFER before every rectangle.
+void gfx_set_depth_test(int enable);
 
 // Presents the frame and pumps the event queue (exits the process on quit).
 void gfx_frame_end(void);

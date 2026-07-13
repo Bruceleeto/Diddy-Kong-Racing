@@ -795,6 +795,29 @@ void allocate_object_pools(void) {
     while (-1 != gAssetsMiscTable[gAssetsMiscTableLength]) {
         gAssetsMiscTableLength++;
     }
+#ifdef TARGET_PC
+    {
+        // The f32 misc assets. Left big-endian, every one of these reads as a
+        // denormal (~0): racers ended up weightless, with no handling and a flat
+        // acceleration curve, so the player could not move. The per-vehicle
+        // tables reached through ObjectHeader (unk5C acceleration, unk5D wheel
+        // offsets) are swapped where they are fetched, in racer.c — their index
+        // is not a constant. ASSET_MISC_20 is handled above as Object_Boost.
+        static const s32 sMiscF32Assets[] = {
+            ASSET_MISC_4,           ASSET_MISC_8,
+            ASSET_MISC_RACER_WEIGHT, ASSET_MISC_RACER_HANDLING,
+            ASSET_MISC_RACER_UNUSED_11, ASSET_MISC_17,
+            ASSET_MISC_18,          ASSET_MISC_MAGNET_DATA,
+            ASSET_MISC_32,          ASSET_MISC_RACERACCELERATION_UNKNOWN0,
+            ASSET_MISC_RACER_HITBOX_SIZE,
+        };
+        s32 n;
+
+        for (n = 0; n < (s32) ARRAY_COUNT(sMiscF32Assets); n++) {
+            pc_swap_misc_f32_once(sMiscF32Assets[n]);
+        }
+    }
+#endif
 
     decrypt_magic_codes(
         &gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_MAGIC_CODES]],
@@ -8435,6 +8458,43 @@ s32 *get_misc_asset(s32 index) {
     }
     return (s32 *) &gAssetsMiscSection[gAssetsMiscTable[index]];
 }
+
+#ifdef TARGET_PC
+/**
+ * Byte-swap one misc asset that is an array of f32, exactly once.
+ *
+ * The misc *table* is swapped in obj_init(), but the section it points into is
+ * mixed-format, so each consumer owns the endianness of its own piece — and the
+ * f32 ones never did. Read big-endian on a little-endian host, a racer stat of
+ * 8.0 (0x41000000) becomes 0x00000041: a denormal, i.e. zero. Every weight,
+ * handling value, acceleration curve and wheel offset was reading as zero.
+ *
+ * Size comes from the table (this entry to the next), so nothing is guessed.
+ * Callers may re-fetch these pointers every frame, hence swap-once: a blind swap
+ * would flip the bytes back and forth.
+ */
+void pc_swap_misc_f32_once(s32 index) {
+    extern void pc_swap32_buf(void *buf, u32 numBytes);
+    static u8 sSwapped[256];
+    u8 *start;
+    u8 *end;
+
+    if (index <= 0 || index >= gAssetsMiscTableLength || index >= (s32) ARRAY_COUNT(sSwapped)) {
+        return;
+    }
+    if (sSwapped[index]) {
+        return;
+    }
+    sSwapped[index] = TRUE;
+
+    start = (u8 *) get_misc_asset(index);
+    end = (u8 *) get_misc_asset(index + 1);
+    if (end <= start) {
+        return;
+    }
+    pc_swap32_buf(start, (u32) (end - start) & ~3u);
+}
+#endif
 
 /**
  * If the bridge is raised, decrement its timer and return the remaining time.

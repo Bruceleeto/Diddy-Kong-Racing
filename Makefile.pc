@@ -97,6 +97,7 @@ LIBS := -lm -lSDL2 -lGL $(SAN_FLAGS)
 SRC_FILES := \
 	linux/main.c \
 	linux/gfx.c \
+	linux/input.c \
 	linux/reimpl.c \
 	src/asset_loading.c \
 	src/audio.c \

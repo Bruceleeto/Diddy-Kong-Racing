@@ -55,8 +55,17 @@ void bgload_tick(void) {
     if (gThread30NeedToLoadLevel && gThread30LoadDelay > 0) {
         gThread30LoadDelay--;
         if (gThread30LoadDelay == 0) {
+#ifdef TARGET_PC
+            // There is no thread 30 on PC — nothing would ever receive the
+            // message, and gThread30NeedToLoadLevel would stay set forever,
+            // which wedges every menu that waits on bgload_active(). Load here
+            // instead and clear the flag thread30_bgload() would have cleared.
+            load_level_for_menu(gThread30LevelIdToLoad, -1, gThread30CutsceneIdToLoad);
+            gThread30NeedToLoadLevel = FALSE;
+#else
             // Signal thread30 that the level needs to load.
             osSendMesg(&gThread30MesgQueue, (OSMesg *) OS_MESG_TYPE_LOOPBACK, OS_MESG_NOBLOCK);
+#endif
         }
     }
 }
