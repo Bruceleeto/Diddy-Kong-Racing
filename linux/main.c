@@ -188,6 +188,17 @@ static u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
 // RDP colour state. Only the 2D path reads these: the triangles get their colour
 // from the vertices, but a rectangle has no vertex colours, so its colour comes
 // entirely from the combiner and these registers.
+// G_SETGEOMETRYMODE / G_CLEARGEOMETRYMODE. This is the RSP half of the depth
+// state, and DKR drives it directly: material_set() toggles z-compare per material
+// with gSPSetGeometryMode(G_ZBUFFER), not through othermode. The RSP only emits
+// depth coordinates when G_ZBUFFER is set, so it gates the RDP's Z_CMP/Z_UPD — no
+// geometry mode, no depth, whatever the render mode says.
+//
+// Seeded with what rendermode_reset() (src/textures_sprites.c) sets, so a frame
+// that draws before its first geometry-mode command still gets a z-buffer.
+#define GFX_GEOMETRY_MODE_INIT (G_SHADE | G_SHADING_SMOOTH | G_ZBUFFER)
+static u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
+
 static u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
 static u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
 static u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
@@ -745,11 +756,15 @@ static void apply_texture_filter(void) {
 
 static void apply_render_mode(void) {
     u32 alphaCompare = sOtherModeL & (3 << G_MDSFT_ALPHACOMPARE);
+    s32 zEnabled = (sGeometryMode & G_ZBUFFER) != 0;
     f32 ref = 0.0f;
 
-    gfx_set_depth_test((sOtherModeL & Z_CMP) != 0);
-    gfx_set_depth_write((sOtherModeL & Z_UPD) != 0);
-    gfx_set_depth_offset((sOtherModeL & ZMODE_DEC) == ZMODE_DEC);
+    // Depth needs both halves to agree: the RSP has to be emitting z (geometry
+    // mode) and the RDP has to be told to use it (render mode). Clearing G_ZBUFFER
+    // is how the game turns depth off for the sky, overlays and its 2D layer.
+    gfx_set_depth_test(zEnabled && (sOtherModeL & Z_CMP) != 0);
+    gfx_set_depth_write(zEnabled && (sOtherModeL & Z_UPD) != 0);
+    gfx_set_depth_offset(zEnabled && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC);
 
     // CVG_X_ALPHA is how the cutout materials (G_RM_*_TEX_EDGE) get their hard
     // edge: the RDP multiplies coverage by alpha, which on a non-antialiased
@@ -1336,6 +1351,12 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 apply_clip_rect();
                 break;
             }
+            case (u8) G_SETGEOMETRYMODE:
+                sGeometryMode |= w1;
+                break;
+            case (u8) G_CLEARGEOMETRYMODE:
+                sGeometryMode &= ~w1;
+                break;
             case (u8) G_SETCOMBINE:
                 sCombineW0 = w0;
                 sCombineW1 = w1;
@@ -1421,6 +1442,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTileUls = 0;
     sTileUlt = 0;
     sOtherModeL = 0;
+    sGeometryMode = GFX_GEOMETRY_MODE_INIT;
 
     // The list sets its own scissor and viewport before it draws anything
     // (src/rcp_dkr.c), but don't inherit last frame's rects until it does.
