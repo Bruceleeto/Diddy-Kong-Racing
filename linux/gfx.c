@@ -97,6 +97,40 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     return id;
 }
 
+/**
+ * Texel-weighted lerp between the vertex colour and `color` — GL's GL_BLEND
+ * texture env, which computes Cf*(1 - Ct) + Cc*Ct per channel (and Af*At for
+ * alpha, same as modulate).
+ *
+ * That is the exact shape of a combiner that blends the texel towards a constant.
+ * Hand it the combiner evaluated with no texel as the vertex colour and with a
+ * white texel as `color`, and the hardware reconstructs the real result. All GL
+ * 1.1 — no secondary colour, no GL_COMBINE.
+ */
+void gfx_set_texenv_blend(const unsigned char color[4]) {
+    GLfloat c[4];
+
+    if (sWindow == NULL) {
+        return;
+    }
+
+    c[0] = color[0] / 255.0f;
+    c[1] = color[1] / 255.0f;
+    c[2] = color[2] / 255.0f;
+    c[3] = color[3] / 255.0f;
+
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND);
+    glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c);
+}
+
+/** Plain texel * vertex colour, which is what the 3D path wants. */
+void gfx_set_texenv_modulate(void) {
+    if (sWindow == NULL) {
+        return;
+    }
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+}
+
 void gfx_set_texture_filter(int point) {
     GLint filter;
 

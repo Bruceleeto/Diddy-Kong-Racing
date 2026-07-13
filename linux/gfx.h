@@ -43,6 +43,13 @@ void gfx_bind_texture(unsigned int handle);
 // function GL the filter is state on the texture object rather than global.
 void gfx_set_texture_filter(int point);
 
+// How the texel and the vertex colour are combined. `modulate` is texel * colour,
+// which is what 3D geometry wants. `blend` lerps from the vertex colour to `color`
+// by the texel, which is the exact shape of a combiner that blends a texture
+// towards a constant — the menu's flashing text highlight, among others.
+void gfx_set_texenv_blend(const unsigned char color[4]);
+void gfx_set_texenv_modulate(void);
+
 // Releases a texture created by gfx_create_texture().
 void gfx_delete_texture(unsigned int handle);
 

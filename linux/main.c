@@ -583,7 +583,7 @@ static u32 texture_current(void) {
  * handing a vertex to the RDP. Only ever called on clipped vertices, so w is
  * guaranteed positive here.
  */
-static void combiner_eval(const f32 shade[4], u8 out[4]);
+static void combiner_eval(const f32 shade[4], u8 out[4], u8 sec[3]);
 
 static void project(const GfxVertex *v, GfxTriVert *out) {
     f32 invW = 1.0f / v->clip[3];
@@ -603,20 +603,25 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
     // texel in afterwards, so what comes out here is everything the RDP would
     // have computed *around* the texel: the environment blend, the prim colour,
     // and the prim/vertex alpha that drives every fade in the game.
+    // 3D geometry stays on a plain texel * colour modulate, so what it wants is
+    // the combiner with the texel taken as white. Shade varies per vertex here, so
+    // the texel-blend the 2D path uses is not available: its constant is per-draw
+    // state, not per-vertex.
     {
         f32 shade[4];
-        u8 col[4];
+        u8 lit[4];
+        u8 unlit[3];
 
         shade[0] = v->r / 255.0f;
         shade[1] = v->g / 255.0f;
         shade[2] = v->b / 255.0f;
         shade[3] = v->a / 255.0f;
-        combiner_eval(shade, col);
+        combiner_eval(shade, lit, unlit);
 
-        out->r = col[0];
-        out->g = col[1];
-        out->b = col[2];
-        out->a = col[3];
+        out->r = lit[0];
+        out->g = lit[1];
+        out->b = lit[2];
+        out->a = lit[3];
     }
 }
 
@@ -811,6 +816,7 @@ static void handle_polygon(u32 w0, u32 w1) {
     apply_render_mode();
     gfx_bind_texture(texture);
     apply_texture_filter();
+    gfx_set_texenv_modulate(); // the 2D path leaves the env in blend mode
     gfx_draw_tris(sTriVerts, sTriVertCount);
 }
 
@@ -843,6 +849,8 @@ static void handle_polygon(u32 w0, u32 w1) {
  * and zero at 7. Slot 7 of a 4-bit slot is NOISE/K4, neither of which DKR uses,
  * so it lands in the zero default.
  */
+static f32 sCcTexel = 1.0f; // the value TEXEL0/TEXEL1 take for this evaluation
+
 static void cc_rgb_in(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
     s32 i;
 
@@ -853,7 +861,9 @@ static void cc_rgb_in(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]
             }
             return;
         case G_CCMUX_TEXEL0:
-        case G_CCMUX_TEXEL1: // no TEXEL1 yet; white leaves it to the texture unit
+        case G_CCMUX_TEXEL1: // no TEXEL1 yet; it follows TEXEL0
+            out[0] = out[1] = out[2] = sCcTexel;
+            return;
         case G_CCMUX_1:
             out[0] = out[1] = out[2] = 1.0f;
             return;
@@ -892,7 +902,7 @@ static void cc_rgb_mul(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3
             break;
         case G_CCMUX_TEXEL0_ALPHA:
         case G_CCMUX_TEXEL1_ALPHA:
-            scalar = 1.0f;
+            scalar = sCcTexel;
             break;
         case G_CCMUX_PRIMITIVE_ALPHA:
             scalar = sPrimColor[3] / 255.0f;
@@ -919,6 +929,7 @@ static f32 cc_alpha_in(u32 mux, const f32 shade[4], const f32 comb[4]) {
             return comb[3];
         case G_ACMUX_TEXEL0:
         case G_ACMUX_TEXEL1:
+            return sCcTexel;
         case G_ACMUX_1:
             return 1.0f;
         case G_ACMUX_PRIMITIVE:
@@ -970,9 +981,8 @@ static void cc_cycle(u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA,
  * environment blend lives, so stopping after cycle 0 (as we used to) throws away
  * the half that matters.
  */
-static void combiner_eval(const f32 shade[4], u8 out[4]) {
+static void combiner_run(const f32 shade[4], f32 out[4]) {
     f32 cycle0[4];
-    f32 result[4];
     s32 i;
 
     cc_cycle((sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F, (sCombineW1 >> 15) & 0x7,
@@ -982,28 +992,62 @@ static void combiner_eval(const f32 shade[4], u8 out[4]) {
     if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) {
         cc_cycle((sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F, (sCombineW1 >> 6) & 0x7,
                  (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7, (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, shade,
-                 cycle0, result);
+                 cycle0, out);
     } else {
         for (i = 0; i < 4; i++) {
-            result[i] = cycle0[i];
+            out[i] = cycle0[i];
         }
-    }
-
-    for (i = 0; i < 4; i++) {
-        out[i] = clamp_u8(result[i]);
     }
 }
 
 /**
- * The colour a rectangle's vertices carry. A rectangle has no shade, so it goes
- * in as white and the combiner collapses to the constant the texture is modulated
- * by: MODULATEIA_PRIM yields the prim colour, ENVIRONMENT the env colour, and the
- * font's BLENDT_ENV_ALPHA_A_TxP the text colour it keeps in env.
+ * Split the combiner into the two halves the fixed-function pipeline can apply:
+ * the factor the texel is multiplied by, and the term added to it afterwards.
+ *
+ * Every combiner DKR uses is affine in TEXEL0 — result = TEXEL0 * K1 + K2 — so
+ * running it twice, once with the texel white and once with it black, recovers
+ * both halves: K2 is the result with no texel at all, and K1 is what the texel
+ * added on top. GL then reproduces it exactly: K1 goes in the vertex colour and
+ * modulates the texture, K2 in the secondary colour, which GL_COLOR_SUM adds
+ * after texturing.
+ *
+ * This is what makes the menu's flashing highlight work. The font combiner is
+ * G_CC_BLENDT_ENV_ALPHA_A_TxP — lerp(TEXEL0, ENV, ENV_ALPHA) — and font.c puts the
+ * highlight colour in ENV and its pulse in ENV's alpha. Folding everything into a
+ * single modulated colour, as we used to, computes texel * ENV: at full blend that
+ * is texel * white, i.e. the original texel, and the flash silently cancels out.
+ *
+ * Alpha stays a plain modulate (GL_COLOR_SUM is RGB-only), which is exact for the
+ * TEXEL0 * PRIM form DKR's 2D uses everywhere.
  */
-static void combiner_color(u8 out[4]) {
+static void combiner_eval(const f32 shade[4], u8 lit[4], u8 unlit[3]) {
+    f32 on[4];  // texel = white
+    f32 off[4]; // texel = black
+    s32 i;
+
+    sCcTexel = 1.0f;
+    combiner_run(shade, on);
+    sCcTexel = 0.0f;
+    combiner_run(shade, off);
+    sCcTexel = 1.0f;
+
+    for (i = 0; i < 3; i++) {
+        lit[i] = clamp_u8(on[i]);
+        unlit[i] = clamp_u8(off[i]);
+    }
+    lit[3] = clamp_u8(on[3]);
+}
+
+/**
+ * The two colours a rectangle's vertices carry. A rectangle has no shade, so it
+ * goes in as white and the combiner is constant across the quad — but it still has
+ * to be split into its modulate and add halves, because the font blends the glyph
+ * towards ENV and that add is the whole point (see combiner_eval).
+ */
+static void combiner_color(u8 lit[4], u8 unlit[3]) {
     static const f32 white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
 
-    combiner_eval(white, out);
+    combiner_eval(white, lit, unlit);
 }
 
 /**
@@ -1011,8 +1055,8 @@ static void combiner_color(u8 out[4]) {
  * of the picture. Depth testing is off: the game clears G_ZBUFFER for its 2D and
  * relies on display-list order, and so do we.
  */
-static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 color[4],
-                         u32 texture) {
+static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 lit[4],
+                         const u8 unlit[3], u32 texture) {
     GfxTriVert q[6];
     s32 i;
 
@@ -1026,10 +1070,20 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     for (i = 0; i < 6; i++) {
         q[i].z = 0.0f;
         q[i].w = 1.0f; // already in screen space — nothing to undo
-        q[i].r = color[0];
-        q[i].g = color[1];
-        q[i].b = color[2];
-        q[i].a = color[3];
+        // Textured: the vertex carries the no-texel end of the combiner and the
+        // texture env carries the full-texel end, and GL_BLEND lerps between them
+        // by the texel — reproducing the combiner exactly. Untextured: there is no
+        // texel to lerp with, so the vertex carries the whole result.
+        q[i].r = (texture != 0) ? unlit[0] : lit[0];
+        q[i].g = (texture != 0) ? unlit[1] : lit[1];
+        q[i].b = (texture != 0) ? unlit[2] : lit[2];
+        q[i].a = lit[3];
+    }
+
+    if (texture != 0) {
+        gfx_set_texenv_blend(lit);
+    } else {
+        gfx_set_texenv_modulate();
     }
 
     // The 2D layer is ordered by the display list, not by depth. Everything the
@@ -1061,7 +1115,8 @@ static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
     f32 dsdx = (f32) (s16) (w3 >> 16) / 1024.0f;
     f32 dtdy = (f32) (s16) (w3 & 0xFFFF) / 1024.0f;
     f32 s1, t1;
-    u8 color[4];
+    u8 lit[4];
+    u8 unlit[3];
     u32 texture = texture_current();
 
     if (texture == 0) {
@@ -1084,8 +1139,8 @@ static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
     t0 -= sTileUlt / 4.0f;
     t1 -= sTileUlt / 4.0f;
 
-    combiner_color(color);
-    draw_2d_quad(x0, y0, x1, y1, s0 / sTileWidth, t0 / sTileHeight, s1 / sTileWidth, t1 / sTileHeight, color,
+    combiner_color(lit, unlit);
+    draw_2d_quad(x0, y0, x1, y1, s0 / sTileWidth, t0 / sTileHeight, s1 / sTileWidth, t1 / sTileHeight, lit, unlit,
                  texture);
 }
 
@@ -1098,6 +1153,7 @@ static void handle_fillrect(u32 w0, u32 w1) {
     f32 x1 = ((w0 >> 12) & 0xFFF) / 4.0f;
     f32 y1 = (w0 & 0xFFF) / 4.0f;
     u8 color[4];
+    u8 unlit[3] = { 0, 0, 0 };
 
     if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
         // Fill mode paints the fill colour flat, and its lower-right corner is
@@ -1111,13 +1167,13 @@ static void handle_fillrect(u32 w0, u32 w1) {
         x1 += 1.0f;
         y1 += 1.0f;
     } else {
-        combiner_color(color);
+        combiner_color(color, unlit);
         if (color[3] == 0) {
             return; // fully transparent — the blender would discard it anyway
         }
     }
 
-    draw_2d_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.0f, color, 0);
+    draw_2d_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.0f, color, unlit, 0);
 }
 
 /**
