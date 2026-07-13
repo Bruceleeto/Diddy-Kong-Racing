@@ -2,6 +2,9 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+// glFogCoordf and GL_FOG_COORD are GL 1.4 (EXT_fog_coord, 1999). The system gl.h
+// only declares them when the extension prototypes are asked for.
+#define GL_GLEXT_PROTOTYPES 1
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 
@@ -63,6 +66,19 @@ void gfx_window_init(int width, int height, int scale) {
     glAlphaFunc(GL_GREATER, 0.0f);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 
+    // Fog comes from the vertex, not from eye-space z. It has to: our vertices
+    // reach GL already perspective-divided, so their eye z is ndc_z * depth, which
+    // is not a depth at all. The RSP computes the factor itself anyway, so we hand
+    // GL that number directly and it does the post-texture blend.
+    //
+    // GL_LINEAR over [0, 1] makes the blend weight (end - coord) / (end - start) =
+    // 1 - coord, and GL's fog is C = f*Cfrag + (1 - f)*Cfog — so a coordinate of 1
+    // is fully fogged, which is the sense the RSP's factor already has.
+    glFogi(GL_FOG_COORD_SRC, GL_FOG_COORD);
+    glFogi(GL_FOG_MODE, GL_LINEAR);
+    glFogf(GL_FOG_START, 0.0f);
+    glFogf(GL_FOG_END, 1.0f);
+
     // Nearer is smaller here, so a decal has to be pulled towards zero.
     glPolygonOffset(-1.0f, -1.0f);
 }
@@ -121,6 +137,27 @@ void gfx_set_texenv_blend(const unsigned char color[4]) {
 
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND);
     glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c);
+}
+
+void gfx_set_fog(int enable, const unsigned char color[4]) {
+    GLfloat c[4];
+
+    if (sWindow == NULL) {
+        return;
+    }
+
+    if (!enable) {
+        glDisable(GL_FOG);
+        return;
+    }
+
+    c[0] = color[0] / 255.0f;
+    c[1] = color[1] / 255.0f;
+    c[2] = color[2] / 255.0f;
+    c[3] = color[3] / 255.0f;
+
+    glFogfv(GL_FOG_COLOR, c);
+    glEnable(GL_FOG);
 }
 
 /** Plain texel * vertex colour, which is what the 3D path wants. */
@@ -224,6 +261,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         float w = verts[i].w;
 
         glColor4ub(verts[i].r, verts[i].g, verts[i].b, verts[i].a);
+        glFogCoordf(verts[i].fog);
         glTexCoord2f(verts[i].u, verts[i].v);
         glVertex4f(verts[i].x * w, verts[i].y * w, verts[i].z * w, w);
     }

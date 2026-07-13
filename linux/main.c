@@ -208,6 +208,14 @@ static u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
 static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
 
+// Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
+// FogData system its fog-changer objects drive. gSPFogPosition packs a multiplier
+// and an offset into one G_MOVEWORD, and the RSP turns them into a per-vertex fade
+// factor; gDPSetFogColor is the colour that factor fades towards.
+static u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
+static s16 sFogMul = 0;
+static s16 sFogOfs = 0;
+
 #define GFX_MAX_TEXTURES 1024
 #define GFX_MAX_TEX_TEXELS (512 * 512)
 
@@ -610,6 +618,24 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
     out->u = v->u;
     out->v = v->v;
 
+    // Fog: the RSP's own formula, ndc_z * mul + ofs, clamped to a byte. The
+    // geometry mode gates it — material_set() sets and clears G_FOG per material,
+    // and clears it whenever a material wants vertex alpha instead, because the
+    // RSP keeps the fog factor in the shade-alpha slot.
+    if (sGeometryMode & G_FOG) {
+        f32 fog = ((v->clip[2] * invW) * (f32) sFogMul) + (f32) sFogOfs;
+
+        if (fog < 0.0f) {
+            fog = 0.0f;
+        }
+        if (fog > 255.0f) {
+            fog = 255.0f;
+        }
+        out->fog = fog / 255.0f;
+    } else {
+        out->fog = 0.0f;
+    }
+
     // Run the combiner on this vertex's shade. The texture unit modulates the
     // texel in afterwards, so what comes out here is everything the RDP would
     // have computed *around* the texel: the environment blend, the prim colour,
@@ -829,6 +855,7 @@ static void handle_polygon(u32 w0, u32 w1) {
     }
 
     apply_render_mode();
+    gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
     gfx_bind_texture(texture);
     apply_texture_filter();
     gfx_set_texenv_modulate(); // the 2D path leaves the env in blend mode
@@ -1085,6 +1112,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     for (i = 0; i < 6; i++) {
         q[i].z = 0.0f;
         q[i].w = 1.0f; // already in screen space — nothing to undo
+        q[i].fog = 0.0f;
         // Textured: the vertex carries the no-texel end of the combiner and the
         // texture env carries the full-texel end, and GL_BLEND lerps between them
         // by the texel — reproducing the combiner exactly. Untextured: there is no
@@ -1108,6 +1136,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     gfx_set_depth_write(FALSE);
     gfx_set_depth_offset(FALSE);
     gfx_set_alpha_test(0.0f);
+    gfx_set_fog(FALSE, sFogColor); // the HUD does not sit in the world's haze
     gfx_bind_texture(texture);
     apply_texture_filter();
     gfx_draw_tris(q, 6);
@@ -1227,6 +1256,11 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     sCurMatrix = (w1 >> 6) & 3;
                 } else if (index == G_MW_BILLBOARD) {
                     sBillboard = (w1 != 0);
+                } else if (index == G_MW_FOG) {
+                    // gSPFogPosition packs the multiplier in the high half and the
+                    // offset in the low half; both are signed.
+                    sFogMul = (s16) (w1 >> 16);
+                    sFogOfs = (s16) (w1 & 0xFFFF);
                 }
                 break;
             }
@@ -1366,6 +1400,12 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 sPrimColor[1] = (w1 >> 16) & 0xFF;
                 sPrimColor[2] = (w1 >> 8) & 0xFF;
                 sPrimColor[3] = w1 & 0xFF;
+                break;
+            case (u8) G_SETFOGCOLOR:
+                sFogColor[0] = (w1 >> 24) & 0xFF;
+                sFogColor[1] = (w1 >> 16) & 0xFF;
+                sFogColor[2] = (w1 >> 8) & 0xFF;
+                sFogColor[3] = w1 & 0xFF;
                 break;
             case (u8) G_SETENVCOLOR:
                 sEnvColor[0] = (w1 >> 24) & 0xFF;

@@ -17,9 +17,14 @@
 // The position is already divided, but GL still needs w to interpolate the
 // texture coordinates perspective-correctly (see gfx_draw_tris). Screen-space
 // geometry that never went through a projection passes w = 1.
+// `fog` is how far this vertex is faded into the fog colour, 0..1 — the factor the
+// RSP computes and the RDP's blender applies *after* texturing. It rides in GL's
+// fog coordinate, which is the same stage: the Dreamcast port hands the identical
+// number to the PVR in the vertex's offset-colour alpha (PVR_FOG_VERTEX).
 typedef struct {
     float x, y, z, w;
     float u, v;
+    float fog;
     unsigned char r, g, b, a;
 } GfxTriVert;
 
@@ -42,6 +47,10 @@ void gfx_bind_texture(unsigned int handle);
 // vs. G_TF_BILERP. Must be called after gfx_bind_texture(), since in fixed-
 // function GL the filter is state on the texture object rather than global.
 void gfx_set_texture_filter(int point);
+
+// Fades fragments towards `color` by each vertex's fog coordinate. Off for the 2D
+// layer, and for any material the game did not set G_FOG on.
+void gfx_set_fog(int enable, const unsigned char color[4]);
 
 // How the texel and the vertex colour are combined. `modulate` is texel * colour,
 // which is what 3D geometry wants. `blend` lerps from the vertex colour to `color`
