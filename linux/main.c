@@ -160,11 +160,13 @@ static u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
 // from the vertices, but a rectangle has no vertex colours, so its colour comes
 // entirely from the combiner and these registers.
 static u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
+static u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
 static u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
 static u32 sCombineW1 = 0;
 static u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
+static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
 
 #define GFX_MAX_TEXTURES 1024
 #define GFX_MAX_TEX_TEXELS (512 * 512)
@@ -545,6 +547,45 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
 }
 
 /**
+ * Push the RDP's render mode — the low half of othermode — at the host.
+ *
+ * DKR never sets this inline: material_set() (src/textures_sprites.c) DMAs in a
+ * two-command display list per material, a gsDPSetCombineLERP and a
+ * gsDPSetOtherMode, and the render mode is the low word of the latter. So this
+ * runs once per G_TRIN, which is once per material batch.
+ *
+ * The render-mode bits sit at their final positions within othermode-low (the
+ * field starts at G_MDSFT_RENDERMODE, which is where AA_EN's 0x8 comes from), so
+ * they can be tested against sOtherModeL directly.
+ *
+ * The blender proper (the GBL_c1/c2 muxes) is still not modelled — everything
+ * goes through one fixed src-alpha blend. What is modelled is the part that was
+ * doing visible damage: depth compare, depth write, decal offset and alpha
+ * compare.
+ */
+static void apply_render_mode(void) {
+    u32 alphaCompare = sOtherModeL & (3 << G_MDSFT_ALPHACOMPARE);
+    f32 ref = 0.0f;
+
+    gfx_set_depth_test((sOtherModeL & Z_CMP) != 0);
+    gfx_set_depth_write((sOtherModeL & Z_UPD) != 0);
+    gfx_set_depth_offset((sOtherModeL & ZMODE_DEC) == ZMODE_DEC);
+
+    // CVG_X_ALPHA is how the cutout materials (G_RM_*_TEX_EDGE) get their hard
+    // edge: the RDP multiplies coverage by alpha, which on a non-antialiased
+    // host is a straight 50% cutout. Otherwise a threshold compare comes from
+    // the blend colour's alpha, and G_AC_DITHER — which DKR only uses where a
+    // dithered edge is cosmetic — degrades to the same "drop the invisible
+    // texels" default as G_AC_NONE.
+    if (sOtherModeL & CVG_X_ALPHA) {
+        ref = 0.5f;
+    } else if (alphaCompare == G_AC_THRESHOLD) {
+        ref = sBlendColor[3] / 255.0f;
+    }
+    gfx_set_alpha_test(ref);
+}
+
+/**
  * G_TRIN — DKR's polygon command. w1 points at an array of Triangles (vertex
  * indices plus UVs); shade each one from its vertex colours.
  */
@@ -592,6 +633,7 @@ static void handle_polygon(u32 w0, u32 w1) {
         emit_triangle(&v[0], &v[1], &v[2], !(tris[i].flags & BACKFACE_DRAW));
     }
 
+    apply_render_mode();
     gfx_bind_texture(texture);
     gfx_draw_tris(sTriVerts, sTriVertCount);
 }
@@ -711,10 +753,15 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
         q[i].a = color[3];
     }
 
+    // The 2D layer is ordered by the display list, not by depth. Everything the
+    // last material batch left set has to be undone; the next G_TRIN re-applies
+    // its own state through apply_render_mode(), so nothing needs restoring.
     gfx_set_depth_test(FALSE);
+    gfx_set_depth_write(FALSE);
+    gfx_set_depth_offset(FALSE);
+    gfx_set_alpha_test(0.0f);
     gfx_bind_texture(texture);
     gfx_draw_tris(q, 6);
-    gfx_set_depth_test(TRUE);
 }
 
 /**
@@ -940,17 +987,34 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 sFillColor[3] = (rgba >> 24) & 0xFF;
                 break;
             }
-            case (u8) G_SETOTHERMODE_H: {
+            case (u8) G_SETOTHERMODE_H:
+            case (u8) G_SETOTHERMODE_L: {
                 // F3D encodes the field as a shift and a bit count, with the
                 // data already sitting at its final position.
                 u32 shift = (w0 >> 8) & 0xFF;
                 u32 length = w0 & 0xFF;
                 u32 mask = (length >= 32) ? 0xFFFFFFFF : (((u32) 1 << length) - 1) << shift;
-                sOtherModeH = (sOtherModeH & ~mask) | (w1 & mask);
+
+                if (cmd == (u8) G_SETOTHERMODE_H) {
+                    sOtherModeH = (sOtherModeH & ~mask) | (w1 & mask);
+                } else {
+                    sOtherModeL = (sOtherModeL & ~mask) | (w1 & mask);
+                }
                 break;
             }
             case (u8) G_RDPSETOTHERMODE:
+                // Both halves at once: the high word is packed into w0, the low
+                // word — render mode, alpha compare, z mode — is all of w1. This
+                // is the form every DKR material arrives in (gsDPSetOtherMode).
                 sOtherModeH = w0 & 0x00FFFFFF;
+                sOtherModeL = w1;
+                break;
+            case (u8) G_SETBLENDCOLOR:
+                // The alpha is the reference value a G_AC_THRESHOLD compare uses.
+                sBlendColor[0] = (w1 >> 24) & 0xFF;
+                sBlendColor[1] = (w1 >> 16) & 0xFF;
+                sBlendColor[2] = (w1 >> 8) & 0xFF;
+                sBlendColor[3] = w1 & 0xFF;
                 break;
             case (u8) G_ENDDL:
                 return;
@@ -979,6 +1043,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTileHeight = 0;
     sTileUls = 0;
     sTileUlt = 0;
+    sOtherModeL = 0;
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
 
     gfx_frame_end();

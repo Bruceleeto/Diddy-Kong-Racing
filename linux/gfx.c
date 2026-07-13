@@ -43,13 +43,17 @@ void gfx_window_init(int width, int height, int scale) {
     glShadeModel(GL_SMOOTH);
 
     // Texture alpha is how the N64 cuts out sprites and foliage, so it has to
-    // blend. The alpha test drops fully transparent texels so they don't write
-    // depth and punch holes in whatever is drawn behind them later.
+    // blend. Depth test, depth write and the alpha-compare threshold are all
+    // driven per material now (see apply_render_mode in main.c); these are just
+    // the startup defaults.
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glEnable(GL_ALPHA_TEST);
-    glAlphaFunc(GL_GREATER, 0.05f);
+    glAlphaFunc(GL_GREATER, 0.0f);
     glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+
+    // Nearer is smaller here, so a decal has to be pulled towards zero.
+    glPolygonOffset(-1.0f, -1.0f);
 }
 
 unsigned int gfx_create_texture(const void *rgba, int width, int height, int clampS, int clampT) {
@@ -87,6 +91,9 @@ void gfx_frame_begin(void) {
     if (sWindow == NULL) {
         return;
     }
+    // glClear honours the depth mask, so the last material of the previous frame
+    // must not be left able to suppress the depth clear.
+    glDepthMask(GL_TRUE);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
@@ -139,6 +146,32 @@ void gfx_set_depth_test(int enable) {
     } else {
         glDisable(GL_DEPTH_TEST);
     }
+}
+
+void gfx_set_depth_write(int enable) {
+    if (sWindow == NULL) {
+        return;
+    }
+    glDepthMask(enable ? GL_TRUE : GL_FALSE);
+}
+
+void gfx_set_depth_offset(int enable) {
+    if (sWindow == NULL) {
+        return;
+    }
+
+    if (enable) {
+        glEnable(GL_POLYGON_OFFSET_FILL);
+    } else {
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    }
+}
+
+void gfx_set_alpha_test(float ref) {
+    if (sWindow == NULL) {
+        return;
+    }
+    glAlphaFunc(GL_GREATER, ref);
 }
 
 void gfx_frame_end(void) {

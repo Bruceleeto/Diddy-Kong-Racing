@@ -44,10 +44,27 @@ void gfx_delete_texture(unsigned int handle);
 // shaded from the vertex colours and modulated by the bound texture.
 void gfx_draw_tris(const GfxTriVert *verts, int count);
 
-// Turns depth testing on or off. The 2D overlay (text, HUD, fades) is drawn
-// with the z-buffer disabled and relies on display-list order instead, which is
-// what the game itself does: it clears G_ZBUFFER before every rectangle.
+// Turns depth testing on or off — the RDP's Z_CMP. The 2D overlay (text, HUD,
+// fades) is drawn with the z-buffer disabled and relies on display-list order
+// instead, which is what the game itself does: it clears G_ZBUFFER before every
+// rectangle.
 void gfx_set_depth_test(int enable);
+
+// Turns depth *writes* on or off — the RDP's Z_UPD. Translucent surfaces test
+// against the z-buffer without writing to it, so that what is behind them still
+// draws.
+void gfx_set_depth_write(int enable);
+
+// Nudges fragments towards the viewer — stands in for the RDP's ZMODE_DEC, which
+// is how a decal (tyre tracks, shadows, painted track markings) sits on the
+// surface underneath it without z-fighting.
+void gfx_set_depth_offset(int enable);
+
+// Discards fragments whose alpha is not greater than `ref` (0..1) — the RDP's
+// alpha compare. A ref of 0 still drops fully transparent texels, which matters
+// because otherwise they would write depth and punch holes in the geometry
+// behind them.
+void gfx_set_alpha_test(float ref);
 
 // Presents the frame and pumps the event queue (exits the process on quit).
 void gfx_frame_end(void);
