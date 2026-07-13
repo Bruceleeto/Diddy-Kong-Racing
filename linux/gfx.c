@@ -56,7 +56,19 @@ void gfx_window_init(int width, int height, int scale) {
     glPolygonOffset(-1.0f, -1.0f);
 }
 
-unsigned int gfx_create_texture(const void *rgba, int width, int height, int clampS, int clampT) {
+// The RDP's cms/cmt are a 2-bit field, not a flag: bit 0 is mirror, bit 1 is
+// clamp (G_TX_MIRROR = 1, G_TX_CLAMP = 2, plain wrap = 0). Clamp wins if both.
+static GLint wrap_mode(int cm) {
+    if (cm & 0x2) {
+        return GL_CLAMP_TO_EDGE;
+    }
+    if (cm & 0x1) {
+        return GL_MIRRORED_REPEAT;
+    }
+    return GL_REPEAT;
+}
+
+unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS, int cmT) {
     GLuint id = 0;
 
     if (sWindow == NULL) {
@@ -68,10 +80,22 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cla
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, clampS ? GL_CLAMP_TO_EDGE : GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, clampT ? GL_CLAMP_TO_EDGE : GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(cmS));
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode(cmT));
 
     return id;
+}
+
+void gfx_set_texture_filter(int point) {
+    GLint filter;
+
+    if (sWindow == NULL) {
+        return;
+    }
+
+    filter = point ? GL_NEAREST : GL_LINEAR;
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
 }
 
 void gfx_bind_texture(unsigned int handle) {

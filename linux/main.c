@@ -145,11 +145,12 @@ static s32 sTriVertCount = 0;
 
 static u32 sTimgAddr = 0;  // G_SETTIMG — wherever the DL last pointed
 static u32 sTexAddr = 0;   // the image a G_LOADBLOCK/G_LOADTILE actually loaded
+static s32 sTexSwapped = 0; // that load had dxt == 0 — see decode_texture()
 static u8 sTileFmt = 0;    // G_SETTILE — G_IM_FMT_*
 static u8 sTileSiz = 0;    //             G_IM_SIZ_*
 static u8 sTilePalette = 0;
-static u8 sTileClampS = 0;
-static u8 sTileClampT = 0;
+static u8 sTileCmS = 0; // the raw 2-bit clamp/mirror fields, not booleans
+static u8 sTileCmT = 0;
 static u16 sTileWidth = 0; // G_SETTILESIZE
 static u16 sTileHeight = 0;
 static u16 sTileUls = 0;   //               the tile's origin within the image
@@ -174,7 +175,8 @@ static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
 typedef struct {
     u32 timg;
     u32 tlut;
-    u8 fmt, siz, clampS, clampT;
+    u8 fmt, siz, cmS, cmT;
+    u8 swapped;
     u16 width, height;
     u32 handle;
 } GfxTexture;
@@ -182,6 +184,7 @@ typedef struct {
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
 static s32 sTexCacheCount = 0;
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
+static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
 /**
  * Drop every cached texture that was decoded out of `addr`.
@@ -312,6 +315,58 @@ static u32 ia_to_rgba32(u32 intensity, u32 alpha) {
 }
 
 /**
+ * Undo the N64's odd-row word swizzle.
+ *
+ * TMEM stores odd rows of a texture with the two 32-bit halves of each 64-bit
+ * word exchanged. A normal gDPLoadTextureBlock passes a nonzero dxt, which makes
+ * the RDP apply that swizzle as it streams the block in, and the texture fetch
+ * unit undoes it on the way out — so the bytes in RAM are plain linear and we can
+ * read them as-is.
+ *
+ * DKR's RENDER_LINE_SWAP textures ("Texture has swapped lines, for speed") do not
+ * work that way. They go through gDPLoadTextureBlockS, whose only difference is
+ * that it passes dxt = 0 (include/PR/gbi.h:2639) — so the RDP does no swizzle on
+ * load, and the asset is instead stored *pre-swizzled* in ROM, letting the fetch
+ * unit's unswizzle produce the correct image for free. Reading those bytes
+ * linearly, as we did, leaves every odd row with its 4-byte groups exchanged in
+ * pairs: the sprite stays entirely recognisable but its odd scanlines are
+ * displaced in short runs, which is the serrated comb along the edges of the HUD
+ * text.
+ *
+ * So: when the load had dxt == 0, walk the rows back through the same swap before
+ * decoding. `b ^ 4` is the swizzle; it is its own inverse. Rows narrower than 8
+ * bytes have nothing to exchange, and the bounds check covers a trailing partial
+ * group.
+ */
+static void unswizzle_rows(const u8 *src, u8 *dst, s32 rowBytes, s32 height) {
+    s32 y, b;
+
+    for (y = 0; y < height; y++) {
+        const u8 *srcRow = src + (y * rowBytes);
+        u8 *dstRow = dst + (y * rowBytes);
+
+        for (b = 0; b < rowBytes; b++) {
+            s32 from = ((y & 1) && ((b ^ 4) < rowBytes)) ? (b ^ 4) : b;
+            dstRow[b] = srcRow[from];
+        }
+    }
+}
+
+/** How many bytes one row of a `width`-texel image of this size occupies. */
+static s32 row_bytes(u8 siz, s32 width) {
+    switch (siz) {
+        case G_IM_SIZ_4b:
+            return (width + 1) / 2;
+        case G_IM_SIZ_8b:
+            return width;
+        case G_IM_SIZ_16b:
+            return width * 2;
+        default:
+            return width * 4;
+    }
+}
+
+/**
  * Decode one of the N64 texture formats into RGBA8888. Everything is read a
  * byte at a time, so the assets staying big-endian doesn't matter here.
  */
@@ -409,8 +464,8 @@ static u32 texture_current(void) {
     for (i = 0; i < sTexCacheCount; i++) {
         GfxTexture *t = &sTexCache[i];
         if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
-            t->width == sTileWidth && t->height == sTileHeight && t->clampS == sTileClampS &&
-            t->clampT == sTileClampT) {
+            t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
+            t->swapped == (u8) sTexSwapped) {
             return t->handle;
         }
     }
@@ -419,7 +474,19 @@ static u32 texture_current(void) {
         return 0;
     }
 
-    decode_texture((const u8 *) sTexAddr, sTileFmt, sTileSiz, sTileWidth, sTileHeight, tlut, sTexDecodeBuf);
+    {
+        const u8 *texels = (const u8 *) sTexAddr;
+        s32 rowBytes = row_bytes(sTileSiz, sTileWidth);
+
+        // A dxt of 0 means the asset is stored pre-swizzled; put it back before
+        // decoding. Guarded on the scratch buffer, which a sane texture never
+        // exceeds — decoding the raw bytes is better than reading past it.
+        if (sTexSwapped && (rowBytes * sTileHeight) <= (s32) sizeof(sTexSwizzleBuf)) {
+            unswizzle_rows(texels, sTexSwizzleBuf, rowBytes, sTileHeight);
+            texels = sTexSwizzleBuf;
+        }
+        decode_texture(texels, sTileFmt, sTileSiz, sTileWidth, sTileHeight, tlut, sTexDecodeBuf);
+    }
 
     {
         GfxTexture *t = &sTexCache[sTexCacheCount++];
@@ -427,11 +494,12 @@ static u32 texture_current(void) {
         t->tlut = (u32) tlut;
         t->fmt = sTileFmt;
         t->siz = sTileSiz;
+        t->swapped = (u8) sTexSwapped;
         t->width = sTileWidth;
         t->height = sTileHeight;
-        t->clampS = sTileClampS;
-        t->clampT = sTileClampT;
-        t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileClampS, sTileClampT);
+        t->cmS = sTileCmS;
+        t->cmT = sTileCmT;
+        t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileCmS, sTileCmT);
         return t->handle;
     }
 }
@@ -563,6 +631,20 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
  * doing visible damage: depth compare, depth write, decal offset and alpha
  * compare.
  */
+/**
+ * G_TF_POINT vs. G_TF_BILERP, from othermode-H. The game point-samples its font
+ * and most of its UI art and bilerps the world; filtering everything, as we used
+ * to, blurs the text and — because the filter taps reach outside the glyph —
+ * drags colour in from whatever the wrap mode puts there.
+ *
+ * Applies to whatever texture is currently bound, so call this after binding.
+ */
+static void apply_texture_filter(void) {
+    u32 filt = sOtherModeH & (3 << G_MDSFT_TEXTFILT);
+
+    gfx_set_texture_filter(filt == G_TF_POINT);
+}
+
 static void apply_render_mode(void) {
     u32 alphaCompare = sOtherModeL & (3 << G_MDSFT_ALPHACOMPARE);
     f32 ref = 0.0f;
@@ -635,6 +717,7 @@ static void handle_polygon(u32 w0, u32 w1) {
 
     apply_render_mode();
     gfx_bind_texture(texture);
+    apply_texture_filter();
     gfx_draw_tris(sTriVerts, sTriVertCount);
 }
 
@@ -761,6 +844,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     gfx_set_depth_offset(FALSE);
     gfx_set_alpha_test(0.0f);
     gfx_bind_texture(texture);
+    apply_texture_filter();
     gfx_draw_tris(q, 6);
 }
 
@@ -914,8 +998,11 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     sTileFmt = (w0 >> 21) & 0x7;
                     sTileSiz = (w0 >> 19) & 0x3;
                     sTilePalette = (w1 >> 20) & 0xF;
-                    sTileClampT = (w1 >> 18) & 0x1;
-                    sTileClampS = (w1 >> 8) & 0x1;
+                    // cmt/cms are 2-bit fields (bit 0 mirror, bit 1 clamp), not
+                    // flags. Reading only the low bit picked up mirror and
+                    // dropped clamp entirely, so every clamped texture wrapped.
+                    sTileCmT = (w1 >> 18) & 0x3;
+                    sTileCmS = (w1 >> 8) & 0x3;
                 }
                 break;
             }
@@ -935,11 +1022,17 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 break;
             }
             case (u8) G_LOADBLOCK:
-            case (u8) G_LOADTILE:
                 // Latch the image being loaded: gDPLoadTLUT_pal16 issues its own
                 // G_SETTIMG for the palette afterwards, which would otherwise
                 // overwrite the texture address before the triangles draw.
                 sTexAddr = sTimgAddr;
+                // dxt is the low 12 bits. Zero means the RDP applied no odd-row
+                // swizzle on the way in, i.e. the asset is already swizzled.
+                sTexSwapped = ((w1 & 0xFFF) == 0);
+                break;
+            case (u8) G_LOADTILE:
+                sTexAddr = sTimgAddr;
+                sTexSwapped = FALSE; // a tile load is row-by-row, never swizzled
                 break;
             case (u8) G_LOADTLUT:
                 // The palette is whatever G_SETTIMG last pointed at.
@@ -1038,6 +1131,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTriVertCount = 0;
     sTimgAddr = 0;
     sTexAddr = 0;
+    sTexSwapped = 0;
     sTlutAddr = 0;
     sTileWidth = 0;
     sTileHeight = 0;

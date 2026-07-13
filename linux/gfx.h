@@ -30,12 +30,18 @@ void gfx_window_init(int width, int height, int scale);
 void gfx_frame_begin(void);
 
 // Uploads an RGBA8888 image and returns a handle for gfx_bind_texture().
-// `clampS`/`clampT` pick clamp vs. repeat wrapping on each axis.
-unsigned int gfx_create_texture(const void *rgba, int width, int height, int clampS, int clampT);
+// `cmS`/`cmT` are the RDP's raw 2-bit clamp/mirror fields for each axis
+// (G_TX_WRAP / G_TX_MIRROR / G_TX_CLAMP).
+unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS, int cmT);
 
 // Binds a texture for subsequent draws. Handle 0 means untextured (the
 // triangles are then shaded from vertex colours alone).
 void gfx_bind_texture(unsigned int handle);
+
+// Point- or bilinear-samples the currently bound texture — the RDP's G_TF_POINT
+// vs. G_TF_BILERP. Must be called after gfx_bind_texture(), since in fixed-
+// function GL the filter is state on the texture object rather than global.
+void gfx_set_texture_filter(int point);
 
 // Releases a texture created by gfx_create_texture().
 void gfx_delete_texture(unsigned int handle);
