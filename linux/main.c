@@ -179,6 +179,7 @@ typedef struct {
     u8 swapped;
     u16 width, height;
     u32 handle;
+    u32 lastUsed; // frame number, for eviction when the cache is full
 } GfxTexture;
 
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
@@ -187,28 +188,37 @@ static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
 /**
- * Drop every cached texture that was decoded out of `addr`.
+ * Drop every cached texture decoded out of the memory being freed.
  *
- * The cache is keyed on the RAM address the texture was loaded to, and the game
+ * The cache is keyed on the RAM address a texture was decoded from, and the game
  * recycles those addresses: the textures of a level it has unloaded are handed
  * straight back out to the next one. Without this, a new texture landing on an
- * old address with the same format and size would hit the stale entry and draw
- * the previous level's pixels — and the cache, never evicting, would fill up and
- * start refusing to decode anything at all.
+ * old address with the same format and size hits the stale entry and draws the
+ * previous level's pixels — and the cache, never evicting, fills up and starts
+ * refusing to decode anything at all.
+ *
+ * This takes the freed slot's whole *range*, not just its base address, and that
+ * matters: an earlier version compared against the base and therefore matched
+ * nothing, ever. A texture's pixels begin at `tex + 1` — past its TextureHeader —
+ * and its palette sits at another offset again (`tex_palette_id`), so no cache
+ * entry is ever keyed on an allocation's base. The invalidation silently did
+ * nothing, which is exactly the two symptoms you would predict: stale textures
+ * after a level change, then everything untextured once the cache hit its cap.
  *
  * Called from mempool_free_addr() (src/memory.c), the choke point every free in
  * the game passes through, so a texture's GL object dies exactly when the memory
  * behind it does. The palette is checked too: a CI texture decoded against a
  * freed TLUT is just as stale.
  */
-void pc_gfx_invalidate_texture(const void *addr) {
-    u32 target = (u32) addr;
+void pc_gfx_invalidate_range(const void *addr, s32 size) {
+    u32 lo = (u32) addr;
+    u32 hi = lo + (u32) size;
     s32 i;
 
     for (i = 0; i < sTexCacheCount;) {
         GfxTexture *t = &sTexCache[i];
 
-        if (t->timg == target || t->tlut == target) {
+        if ((t->timg >= lo && t->timg < hi) || (t->tlut >= lo && t->tlut < hi)) {
             gfx_delete_texture(t->handle);
             sTexCache[i] = sTexCache[--sTexCacheCount];
         } else {
@@ -482,12 +492,26 @@ static u32 texture_current(void) {
         if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
             t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
             t->swapped == (u8) sTexSwapped) {
+            t->lastUsed = sGfxFrameCount;
             return t->handle;
         }
     }
 
+    // A full cache used to mean "draw untextured, forever". Evict the entry that
+    // has gone unused the longest instead — a texture the game still wants will
+    // simply be decoded again next time it asks for it. With invalidation working
+    // this should not trigger, but degrading into a slow frame beats degrading
+    // into a permanently untextured world.
     if (sTexCacheCount >= GFX_MAX_TEXTURES) {
-        return 0;
+        s32 oldest = 0;
+
+        for (i = 1; i < sTexCacheCount; i++) {
+            if (sTexCache[i].lastUsed < sTexCache[oldest].lastUsed) {
+                oldest = i;
+            }
+        }
+        gfx_delete_texture(sTexCache[oldest].handle);
+        sTexCache[oldest] = sTexCache[--sTexCacheCount];
     }
 
     {
@@ -515,6 +539,7 @@ static u32 texture_current(void) {
         t->height = sTileHeight;
         t->cmS = sTileCmS;
         t->cmT = sTileCmT;
+        t->lastUsed = sGfxFrameCount;
         t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileCmS, sTileCmT);
         return t->handle;
     }

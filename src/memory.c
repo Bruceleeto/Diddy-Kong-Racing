@@ -324,11 +324,16 @@ void mempool_free_addr(u8 *address) {
 #ifdef TARGET_PC
                 {
                     // The renderer caches decoded textures by the RAM address
-                    // they were loaded to, and this memory is about to be handed
+                    // they were loaded from, and this memory is about to be handed
                     // to something else. Drop anything it decoded out of here
                     // before the address is reused.
-                    extern void pc_gfx_invalidate_texture(const void *addr);
-                    pc_gfx_invalidate_texture(address);
+                    //
+                    // It has to be the whole slot, not just its base: a texture's
+                    // pixels start at `tex + 1` (past the TextureHeader) and its
+                    // palette is at another offset again, so nothing the renderer
+                    // holds is ever keyed on the base address itself.
+                    extern void pc_gfx_invalidate_range(const void *addr, s32 size);
+                    pc_gfx_invalidate_range(address, slot->size);
                 }
 #endif
                 mempool_slot_clear(poolIndex, slotIndex);
