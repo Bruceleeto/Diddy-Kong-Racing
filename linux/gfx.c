@@ -122,6 +122,8 @@ void gfx_bind_texture(unsigned int handle) {
     }
 }
 
+// `x1`/`y1` are exclusive — the caller has already turned the RDP's inclusive
+// lower-right corner into one past the end.
 void gfx_set_scissor(float x0, float y0, float x1, float y1) {
     int w, h, gx, gy;
 
@@ -129,15 +131,13 @@ void gfx_set_scissor(float x0, float y0, float x1, float y1) {
         return;
     }
 
-    // The RDP's lower-right corner is inclusive, so a full-screen scissor arrives
-    // as (0, 0, 319, 239) and a top-half one as (0, 0, 319, 119) — hence the +1.
     // GL measures from the bottom-left, so y flips.
-    w = (int) (x1 - x0 + 1.0f) * sScale;
-    h = (int) (y1 - y0 + 1.0f) * sScale;
-    gx = (int) x0 * sScale;
-    gy = (int) (sFbHeight - (y1 + 1.0f)) * sScale;
+    gx = (int) (x0 * sScale);
+    gy = (int) ((sFbHeight - y1) * sScale);
+    w = (int) ((x1 - x0) * sScale);
+    h = (int) ((y1 - y0) * sScale);
 
-    if (w <= 0 || h <= 0) {
+    if (w < 0 || h < 0) {
         // An empty rect means draw nothing, which is not the same as "no clip".
         w = 0;
         h = 0;

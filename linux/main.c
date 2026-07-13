@@ -140,6 +140,34 @@ static f32 sVpScaleY = N64_SCREEN_H / 2.0f;
 static f32 sVpTransX = N64_SCREEN_W / 2.0f;
 static f32 sVpTransY = N64_SCREEN_H / 2.0f;
 
+// ---------------------------------------------------------------------------
+// What gets clipped away, in screen pixels, x1/y1 exclusive.
+//
+// Two rectangles, and the drawing is confined to the intersection:
+//
+//   sScis*  — the RDP scissor (G_SETSCISSOR). Split-screen, text boxes.
+//   sVpClip* — the viewport's own bounds. The RSP clips geometry to the view
+//       volume, and the viewport maps NDC +-1 onto exactly this rectangle, so on
+//       hardware nothing can be drawn outside it. We only clip against the near
+//       plane, so without this a small viewport — the track-preview window in the
+//       level-select menu — lets its geometry spill out across the whole screen.
+// ---------------------------------------------------------------------------
+static f32 sScisX0, sScisY0, sScisX1, sScisY1;
+static f32 sVpClipX0, sVpClipY0, sVpClipX1, sVpClipY1;
+
+static f32 max_f(f32 a, f32 b) {
+    return (a > b) ? a : b;
+}
+
+static f32 min_f(f32 a, f32 b) {
+    return (a < b) ? a : b;
+}
+
+static void apply_clip_rect(void) {
+    gfx_set_scissor(max_f(sScisX0, sVpClipX0), max_f(sScisY0, sVpClipY0), min_f(sScisX1, sVpClipX1),
+                    min_f(sScisY1, sVpClipY1));
+}
+
 static GfxTriVert sTriVerts[GFX_MAX_TRI_VERTS];
 static s32 sTriVertCount = 0;
 
@@ -1132,12 +1160,31 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 break;
             }
             case G_MOVEMEM: {
-                if ((w0 & 0xFF) == G_MV_VIEWPORT && w1 != 0) {
+                // gSPViewport goes through gDma1p, which packs the parameter at
+                // bits 16-23 and the *length* at 0-15 (include/PR/gbi.h). Reading
+                // the low byte matched the length, never the parameter, so the
+                // viewport was silently ignored: everything rendered at the
+                // 320x240 default, which looks right full-screen and falls apart
+                // the moment the game asks for a smaller one.
+                if (((w0 >> 16) & 0xFF) == G_MV_VIEWPORT && w1 != 0) {
                     const Vp *vp = (const Vp *) w1;
+                    f32 halfW, halfH;
+
                     sVpScaleX = vp->vp.vscale[0] / 4.0f;
                     sVpScaleY = vp->vp.vscale[1] / 4.0f;
                     sVpTransX = vp->vp.vtrans[0] / 4.0f;
                     sVpTransY = vp->vp.vtrans[1] / 4.0f;
+
+                    // The rectangle NDC +-1 maps onto. The scale carries a sign
+                    // (y is commonly negative, since screen y runs the other way
+                    // from clip y), so take it off before using it as a half-size.
+                    halfW = (sVpScaleX < 0.0f) ? -sVpScaleX : sVpScaleX;
+                    halfH = (sVpScaleY < 0.0f) ? -sVpScaleY : sVpScaleY;
+                    sVpClipX0 = sVpTransX - halfW;
+                    sVpClipX1 = sVpTransX + halfW;
+                    sVpClipY0 = sVpTransY - halfH;
+                    sVpClipY1 = sVpTransY + halfH;
+                    apply_clip_rect();
                 }
                 break;
             }
@@ -1222,16 +1269,15 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 handle_fillrect(w0, w1);
                 break;
             case (u8) G_SETSCISSOR: {
-                // 10.2 fixed point, lower-right inclusive. This is what confines
-                // each player to their own half in split-screen — the viewport
-                // only scales and offsets, it does not clip — and what clips the
-                // dialogue box's scrolling text reveal (src/font.c).
-                f32 x0 = ((w0 >> 12) & 0xFFF) / 4.0f;
-                f32 y0 = (w0 & 0xFFF) / 4.0f;
-                f32 x1 = ((w1 >> 12) & 0xFFF) / 4.0f;
-                f32 y1 = (w1 & 0xFFF) / 4.0f;
-
-                gfx_set_scissor(x0, y0, x1, y1);
+                // 10.2 fixed point, lower-right inclusive — a full-screen scissor
+                // arrives as (0, 0, 319, 239), hence the +1 to make it exclusive.
+                // This is what clips the dialogue box's scrolling text reveal
+                // (src/font.c) and, with the viewport, each player's half.
+                sScisX0 = ((w0 >> 12) & 0xFFF) / 4.0f;
+                sScisY0 = (w0 & 0xFFF) / 4.0f;
+                sScisX1 = (((w1 >> 12) & 0xFFF) / 4.0f) + 1.0f;
+                sScisY1 = ((w1 & 0xFFF) / 4.0f) + 1.0f;
+                apply_clip_rect();
                 break;
             }
             case (u8) G_SETCOMBINE:
@@ -1319,9 +1365,15 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTileUls = 0;
     sTileUlt = 0;
     sOtherModeL = 0;
-    // The task's own display list sets a full-screen scissor before it draws
-    // anything (src/rcp_dkr.c), but don't inherit last frame's rect until it does.
+
+    // The list sets its own scissor and viewport before it draws anything
+    // (src/rcp_dkr.c), but don't inherit last frame's rects until it does.
+    sScisX0 = sVpClipX0 = 0.0f;
+    sScisY0 = sVpClipY0 = 0.0f;
+    sScisX1 = sVpClipX1 = (f32) N64_SCREEN_W;
+    sScisY1 = sVpClipY1 = (f32) N64_SCREEN_H;
     gfx_disable_scissor();
+
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
 
     gfx_frame_end();
