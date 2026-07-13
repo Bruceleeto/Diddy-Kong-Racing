@@ -72,6 +72,15 @@ void gfx_set_depth_offset(int enable);
 // behind them.
 void gfx_set_alpha_test(float ref);
 
+// Clips all drawing to a rectangle, in N64 screen pixels (origin top-left, y
+// down), with the lower-right corner inclusive — the RDP's G_SETSCISSOR. This is
+// what confines each player's world to their own half of the screen in
+// split-screen, and what clips scrolling text to its box.
+void gfx_set_scissor(float x0, float y0, float x1, float y1);
+
+// Drops back to drawing over the whole framebuffer.
+void gfx_disable_scissor(void);
+
 // Presents the frame and pumps the event queue (exits the process on quit).
 void gfx_frame_end(void);
 

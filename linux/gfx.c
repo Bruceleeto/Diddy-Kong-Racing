@@ -8,7 +8,18 @@
 static SDL_Window *sWindow;
 static SDL_GLContext sContext;
 
+// The N64 framebuffer size we draw in, and how many host pixels one of ours is.
+// gfx_set_scissor() needs both: GL's scissor is in window pixels, measured from
+// the bottom-left, while the game speaks 320x240 from the top-left.
+static int sFbWidth = 320;
+static int sFbHeight = 240;
+static int sScale = 1;
+
 void gfx_window_init(int width, int height, int scale) {
+    sFbWidth = width;
+    sFbHeight = height;
+    sScale = scale;
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return;
@@ -111,13 +122,47 @@ void gfx_bind_texture(unsigned int handle) {
     }
 }
 
+void gfx_set_scissor(float x0, float y0, float x1, float y1) {
+    int w, h, gx, gy;
+
+    if (sWindow == NULL) {
+        return;
+    }
+
+    // The RDP's lower-right corner is inclusive, so a full-screen scissor arrives
+    // as (0, 0, 319, 239) and a top-half one as (0, 0, 319, 119) — hence the +1.
+    // GL measures from the bottom-left, so y flips.
+    w = (int) (x1 - x0 + 1.0f) * sScale;
+    h = (int) (y1 - y0 + 1.0f) * sScale;
+    gx = (int) x0 * sScale;
+    gy = (int) (sFbHeight - (y1 + 1.0f)) * sScale;
+
+    if (w <= 0 || h <= 0) {
+        // An empty rect means draw nothing, which is not the same as "no clip".
+        w = 0;
+        h = 0;
+    }
+
+    glEnable(GL_SCISSOR_TEST);
+    glScissor(gx, gy, w, h);
+}
+
+void gfx_disable_scissor(void) {
+    if (sWindow == NULL) {
+        return;
+    }
+    glDisable(GL_SCISSOR_TEST);
+}
+
 void gfx_frame_begin(void) {
     if (sWindow == NULL) {
         return;
     }
-    // glClear honours the depth mask, so the last material of the previous frame
-    // must not be left able to suppress the depth clear.
+    // glClear honours both the depth mask and the scissor, so neither may be left
+    // where the previous frame's last command put it, or the clear silently does
+    // nothing (or only part of the screen).
     glDepthMask(GL_TRUE);
+    glDisable(GL_SCISSOR_TEST);
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }

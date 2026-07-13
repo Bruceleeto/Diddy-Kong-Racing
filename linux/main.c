@@ -1069,6 +1069,19 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             case (u8) G_FILLRECT:
                 handle_fillrect(w0, w1);
                 break;
+            case (u8) G_SETSCISSOR: {
+                // 10.2 fixed point, lower-right inclusive. This is what confines
+                // each player to their own half in split-screen — the viewport
+                // only scales and offsets, it does not clip — and what clips the
+                // dialogue box's scrolling text reveal (src/font.c).
+                f32 x0 = ((w0 >> 12) & 0xFFF) / 4.0f;
+                f32 y0 = (w0 & 0xFFF) / 4.0f;
+                f32 x1 = ((w1 >> 12) & 0xFFF) / 4.0f;
+                f32 y1 = (w1 & 0xFFF) / 4.0f;
+
+                gfx_set_scissor(x0, y0, x1, y1);
+                break;
+            }
             case (u8) G_SETCOMBINE:
                 sCombineW0 = w0;
                 sCombineW1 = w1;
@@ -1154,6 +1167,9 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTileUls = 0;
     sTileUlt = 0;
     sOtherModeL = 0;
+    // The task's own display list sets a full-screen scissor before it draws
+    // anything (src/rcp_dkr.c), but don't inherit last frame's rect until it does.
+    gfx_disable_scissor();
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
 
     gfx_frame_end();
