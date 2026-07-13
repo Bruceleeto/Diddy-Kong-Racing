@@ -12,8 +12,13 @@
 // A triangle corner, in N64 screen pixels (origin top-left, y down). `z` is the
 // perspective-divided depth, negated so that nearer is smaller (GL_LESS).
 // `u`/`v` are normalised texture coordinates.
+//
+// `w` is the clip-space w the vertex was divided by — the camera-space depth.
+// The position is already divided, but GL still needs w to interpolate the
+// texture coordinates perspective-correctly (see gfx_draw_tris). Screen-space
+// geometry that never went through a projection passes w = 1.
 typedef struct {
-    float x, y, z;
+    float x, y, z, w;
     float u, v;
     unsigned char r, g, b, a;
 } GfxTriVert;

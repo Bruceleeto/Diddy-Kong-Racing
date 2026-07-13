@@ -446,6 +446,10 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
     out->y = sVpTransY - (v->clip[1] * invW * sVpScaleY);
     // Negated so nearer geometry gets the smaller depth under GL_LESS.
     out->z = -(v->clip[2] * invW);
+    // Kept so the host layer can restore the homogeneous position and get
+    // perspective-correct texturing out of the fixed-function pipeline. The near
+    // clip guarantees this is >= GFX_NEAR_W, so it is safe to multiply back by.
+    out->w = v->clip[3];
     out->u = v->u;
     out->v = v->v;
     out->r = v->r;
@@ -700,6 +704,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
 
     for (i = 0; i < 6; i++) {
         q[i].z = 0.0f;
+        q[i].w = 1.0f; // already in screen space — nothing to undo
         q[i].r = color[0];
         q[i].g = color[1];
         q[i].b = color[2];

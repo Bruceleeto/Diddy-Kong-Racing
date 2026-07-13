@@ -98,11 +98,24 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         return;
     }
 
+    // The vertices arrive already divided by w, but handing GL a position with
+    // an implicit w of 1 would make it interpolate the texture coordinates
+    // linearly in screen space — affine mapping, which visibly swims and shears
+    // on a polygon whose corners are at very different depths (a wall up close).
+    // The N64 does not do that: G_TP_PERSP is set in every DKR othermode, and
+    // the RDP interpolates against 1/w per pixel.
+    //
+    // So multiply the position back up by w and hand GL the real w. The
+    // projection is a plain ortho, so the divide GL does reproduces exactly the
+    // screen position computed in project() — but now w is on the wire, and the
+    // fixed-function rasteriser interpolates the texture perspective-correctly.
     glBegin(GL_TRIANGLES);
     for (i = 0; i < count; i++) {
+        float w = verts[i].w;
+
         glColor4ub(verts[i].r, verts[i].g, verts[i].b, verts[i].a);
         glTexCoord2f(verts[i].u, verts[i].v);
-        glVertex3f(verts[i].x, verts[i].y, verts[i].z);
+        glVertex4f(verts[i].x * w, verts[i].y * w, verts[i].z * w, w);
     }
     glEnd();
 }
