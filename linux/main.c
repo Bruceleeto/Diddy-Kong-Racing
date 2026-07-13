@@ -338,16 +338,32 @@ static u32 ia_to_rgba32(u32 intensity, u32 alpha) {
  * bytes have nothing to exchange, and the bounds check covers a trailing partial
  * group.
  */
-static void unswizzle_rows(const u8 *src, u8 *dst, s32 rowBytes, s32 height) {
+static void unswizzle_rows(const u8 *src, u8 *dst, u8 siz, s32 rowBytes, s32 height) {
+    // The swizzle exchanges the 32-bit halves of each 64-bit TMEM word, so it is
+    // a ^4 on the byte address *within TMEM*. For 4/8/16-bit texels, TMEM holds
+    // the image exactly as RAM does and the ^4 carries straight over.
+    //
+    // 32-bit texels do not: the RDP splits them across two TMEM banks, red/green
+    // in the low one and blue/alpha in the high (which is why the GBI computes
+    // their line with G_IM_SIZ_32b_LINE_BYTES = 2, not 4). Each bank therefore
+    // holds 2 bytes per texel, so a ^4 in bank-local address space exchanges
+    // *pairs* of texels — texel ^ 2 — which in the linear 4-byte-per-texel RAM
+    // image we decode from is a ^8. Using ^4 here instead scrambles the texels
+    // singly rather than in pairs: still recognisable, subtly wrong. That was the
+    // static banana.
+    s32 unit = (siz == G_IM_SIZ_32b) ? 8 : 4;
+    s32 total = rowBytes * height;
     s32 y, b;
 
     for (y = 0; y < height; y++) {
-        const u8 *srcRow = src + (y * rowBytes);
-        u8 *dstRow = dst + (y * rowBytes);
-
         for (b = 0; b < rowBytes; b++) {
-            s32 from = ((y & 1) && ((b ^ 4) < rowBytes)) ? (b ^ 4) : b;
-            dstRow[b] = srcRow[from];
+            // The ^ is against the offset into the whole image, not into the row:
+            // a block load fills TMEM contiguously, and the two only coincide
+            // when a row is a whole number of 64-bit words.
+            s32 at = (y * rowBytes) + b;
+            s32 from = (y & 1) ? (at ^ unit) : at;
+
+            dst[at] = src[(from < total) ? from : at];
         }
     }
 }
@@ -482,7 +498,7 @@ static u32 texture_current(void) {
         // decoding. Guarded on the scratch buffer, which a sane texture never
         // exceeds — decoding the raw bytes is better than reading past it.
         if (sTexSwapped && (rowBytes * sTileHeight) <= (s32) sizeof(sTexSwizzleBuf)) {
-            unswizzle_rows(texels, sTexSwizzleBuf, rowBytes, sTileHeight);
+            unswizzle_rows(texels, sTexSwizzleBuf, sTileSiz, rowBytes, sTileHeight);
             texels = sTexSwizzleBuf;
         }
         decode_texture(texels, sTileFmt, sTileSiz, sTileWidth, sTileHeight, tlut, sTexDecodeBuf);
