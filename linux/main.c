@@ -105,7 +105,7 @@ s32 pc_retrace_wait(void) {
 typedef struct {
     f32 clip[4];
     f32 u, v; // texel coords, filled in per-triangle from the Triangle's UVs
-    u8 r, g, b;
+    u8 r, g, b, a;
 } GfxVertex;
 
 // ---------------------------------------------------------------------------
@@ -275,6 +275,11 @@ static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
     dst->r = v->r;
     dst->g = v->g;
     dst->b = v->b;
+    // Shade alpha. The combiner uses it as a blend weight (SHADE_ALPHA), and the
+    // RENDER_VTX_ALPHA materials use it as real translucency — which is why it is
+    // mutually exclusive with fog in material_set(): the RSP keeps vertex alpha in
+    // the fog slot.
+    dst->a = v->a;
 }
 
 static void handle_vertex(u32 w0, u32 w1) {
@@ -550,6 +555,8 @@ static u32 texture_current(void) {
  * handing a vertex to the RDP. Only ever called on clipped vertices, so w is
  * guaranteed positive here.
  */
+static void combiner_eval(const f32 shade[4], u8 out[4]);
+
 static void project(const GfxVertex *v, GfxTriVert *out) {
     f32 invW = 1.0f / v->clip[3];
 
@@ -563,10 +570,26 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
     out->w = v->clip[3];
     out->u = v->u;
     out->v = v->v;
-    out->r = v->r;
-    out->g = v->g;
-    out->b = v->b;
-    out->a = 0xFF;
+
+    // Run the combiner on this vertex's shade. The texture unit modulates the
+    // texel in afterwards, so what comes out here is everything the RDP would
+    // have computed *around* the texel: the environment blend, the prim colour,
+    // and the prim/vertex alpha that drives every fade in the game.
+    {
+        f32 shade[4];
+        u8 col[4];
+
+        shade[0] = v->r / 255.0f;
+        shade[1] = v->g / 255.0f;
+        shade[2] = v->b / 255.0f;
+        shade[3] = v->a / 255.0f;
+        combiner_eval(shade, col);
+
+        out->r = col[0];
+        out->g = col[1];
+        out->b = col[2];
+        out->a = col[3];
+    }
 }
 
 /**
@@ -615,6 +638,7 @@ static void clip_edge(const GfxVertex *a, const GfxVertex *b, GfxVertex *out) {
     out->r = (u8) (a->r + ((f32) (b->r - a->r) * t));
     out->g = (u8) (a->g + ((f32) (b->g - a->g) * t));
     out->b = (u8) (a->b + ((f32) (b->b - a->b) * t));
+    out->a = (u8) (a->a + ((f32) (b->a - a->a) * t));
 }
 
 /**
@@ -762,93 +786,196 @@ static void handle_polygon(u32 w0, u32 w1) {
     gfx_draw_tris(sTriVerts, sTriVertCount);
 }
 
+// ---------------------------------------------------------------------------
+// The colour combiner.
+//
+// Evaluated on the CPU, per vertex, with TEXEL0/TEXEL1 taken as white — the GL
+// texture unit then modulates the real texel in afterwards. That is an
+// approximation (the RDP would multiply the texel only into the terms that
+// actually name it, where we multiply it into the whole result), but it is exact
+// for every combiner that reduces to "texel times a constant", and close for the
+// rest. It also needs no shader, no GL_COMBINE and no multitexture, which is the
+// same trade the OoT Dreamcast port makes.
+//
+// The important part is that SHADE is a *real input* now. DKR's directionally-lit
+// materials (dRenderSettingsDirectionalLighting, used by objects.c whenever
+// directional_lighting_on() is in effect — the intro cutscene, for one) are
+//
+//     cycle 1: G_CC_BLEND_SHADEALPHA  ->  lerp(PRIM, TEXEL0, SHADE_ALPHA)
+//     cycle 2: G_CC_BLENDI_SHADE      ->  lerp(COMBINED, ENV, SHADE)
+//
+// where the vertex colour is a blend *weight* and the lit colour comes from PRIM
+// and ENV. Shading those as texel x vertex-colour, as we did, collapses the model
+// towards black — which is exactly what Diddy's plane looked like.
+// ---------------------------------------------------------------------------
+
 /**
- * The colour combiner's RGB inputs, evaluated for a rectangle. A rectangle has
- * no shade and its texel is applied afterwards by the GL texture unit, so both
- * TEXEL and SHADE are taken as white here and the result is the constant colour
- * the texture gets modulated by. That collapses the combiners DKR actually uses
- * for 2D to exactly the right thing: MODULATEIA_PRIM yields the prim colour,
- * ENVIRONMENT the env colour, and the font's BLENDT_ENV_ALPHA_A_TxP the text
- * colour it keeps in env.
+ * A colour input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
+ * encode 0..7 and treat anything from 8 up as zero; the 3-bit d slot puts 1 at 6
+ * and zero at 7. Slot 7 of a 4-bit slot is NOISE/K4, neither of which DKR uses,
+ * so it lands in the zero default.
  */
-static f32 cc_rgb(u32 mux, s32 isMultiplier, s32 channel) {
+static void cc_rgb_in(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
+    s32 i;
+
     switch (mux) {
-        case G_CCMUX_PRIMITIVE:
-            return sPrimColor[channel] / 255.0f;
-        case G_CCMUX_ENVIRONMENT:
-            return sEnvColor[channel] / 255.0f;
+        case G_CCMUX_COMBINED:
+            for (i = 0; i < 3; i++) {
+                out[i] = comb[i];
+            }
+            return;
         case G_CCMUX_TEXEL0:
-        case G_CCMUX_TEXEL1:
-        case G_CCMUX_SHADE:
+        case G_CCMUX_TEXEL1: // no TEXEL1 yet; white leaves it to the texture unit
         case G_CCMUX_1:
-            return 1.0f;
+            out[0] = out[1] = out[2] = 1.0f;
+            return;
+        case G_CCMUX_PRIMITIVE:
+            for (i = 0; i < 3; i++) {
+                out[i] = sPrimColor[i] / 255.0f;
+            }
+            return;
+        case G_CCMUX_SHADE:
+            for (i = 0; i < 3; i++) {
+                out[i] = shade[i];
+            }
+            return;
+        case G_CCMUX_ENVIRONMENT:
+            for (i = 0; i < 3; i++) {
+                out[i] = sEnvColor[i] / 255.0f;
+            }
+            return;
         default:
-            break;
+            out[0] = out[1] = out[2] = 0.0f;
+            return;
     }
-    // The multiplier slot is 5 bits wide, and past 6 it addresses the alpha
-    // registers rather than the colour ones.
-    if (isMultiplier) {
-        switch (mux) {
-            case G_CCMUX_PRIMITIVE_ALPHA:
-                return sPrimColor[3] / 255.0f;
-            case G_CCMUX_ENV_ALPHA:
-                return sEnvColor[3] / 255.0f;
-            case G_CCMUX_TEXEL0_ALPHA:
-            case G_CCMUX_TEXEL1_ALPHA:
-            case G_CCMUX_SHADE_ALPHA:
-                return 1.0f;
-            default:
-                break;
-        }
-    }
-    return 0.0f; // COMBINED, NOISE, K4/K5, LOD_FRAC and the reserved slots
 }
 
-static f32 cc_alpha(u32 mux) {
+/**
+ * A colour input from the 5-bit multiplier (c) slot, which additionally reaches
+ * the alpha registers — that is where ENV_ALPHA and SHADE_ALPHA come from, and
+ * both are load-bearing for DKR's lighting.
+ */
+static void cc_rgb_mul(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
+    f32 scalar;
+
     switch (mux) {
-        case G_ACMUX_PRIMITIVE:
-            return sPrimColor[3] / 255.0f;
-        case G_ACMUX_ENVIRONMENT:
-            return sEnvColor[3] / 255.0f;
+        case G_CCMUX_COMBINED_ALPHA:
+            scalar = comb[3];
+            break;
+        case G_CCMUX_TEXEL0_ALPHA:
+        case G_CCMUX_TEXEL1_ALPHA:
+            scalar = 1.0f;
+            break;
+        case G_CCMUX_PRIMITIVE_ALPHA:
+            scalar = sPrimColor[3] / 255.0f;
+            break;
+        case G_CCMUX_SHADE_ALPHA:
+            scalar = shade[3];
+            break;
+        case G_CCMUX_ENV_ALPHA:
+            scalar = sEnvColor[3] / 255.0f;
+            break;
+        default:
+            // Everything below 7 is a plain colour input; LOD_FRAC and K5 are not
+            // used by DKR and fall through cc_rgb_in()'s zero default.
+            cc_rgb_in(mux, shade, comb, out);
+            return;
+    }
+    out[0] = out[1] = out[2] = scalar;
+}
+
+/** Every alpha slot is 3 bits and they all share one encoding. */
+static f32 cc_alpha_in(u32 mux, const f32 shade[4], const f32 comb[4]) {
+    switch (mux) {
+        case G_ACMUX_COMBINED:
+            return comb[3];
         case G_ACMUX_TEXEL0:
         case G_ACMUX_TEXEL1:
-        case G_ACMUX_SHADE:
         case G_ACMUX_1:
             return 1.0f;
+        case G_ACMUX_PRIMITIVE:
+            return sPrimColor[3] / 255.0f;
+        case G_ACMUX_SHADE:
+            return shade[3];
+        case G_ACMUX_ENVIRONMENT:
+            return sEnvColor[3] / 255.0f;
         default:
-            return 0.0f; // COMBINED, LOD_FRAC, PRIM_LOD_FRAC, 0
+            return 0.0f; // G_ACMUX_0
     }
+}
+
+static f32 cc_clamp(f32 v) {
+    if (v <= 0.0f) {
+        return 0.0f;
+    }
+    if (v >= 1.0f) {
+        return 1.0f;
+    }
+    return v;
 }
 
 static u8 clamp_u8(f32 v) {
-    if (v <= 0.0f) {
-        return 0;
+    return (u8) (cc_clamp(v) * 255.0f);
+}
+
+/** One cycle of (a - b) * c + d, colour and alpha on their own muxes. */
+static void cc_cycle(u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA, const f32 shade[4], const f32 in[4],
+                     f32 out[4]) {
+    f32 va[3], vb[3], vc[3], vd[3];
+    s32 i;
+
+    cc_rgb_in(a, shade, in, va);
+    cc_rgb_in(b, shade, in, vb);
+    cc_rgb_mul(c, shade, in, vc);
+    cc_rgb_in(d, shade, in, vd);
+
+    for (i = 0; i < 3; i++) {
+        out[i] = cc_clamp(((va[i] - vb[i]) * vc[i]) + vd[i]);
     }
-    if (v >= 1.0f) {
-        return 0xFF;
-    }
-    return (u8) (v * 255.0f);
+    out[3] = cc_clamp(((cc_alpha_in(aA, shade, in) - cc_alpha_in(bA, shade, in)) * cc_alpha_in(cA, shade, in)) +
+                      cc_alpha_in(dA, shade, in));
 }
 
 /**
- * Evaluate cycle 0 of the combiner — (a - b) * c + d — into the colour a
- * rectangle's vertices carry.
+ * Run the combiner for one shade value. Both cycles, if othermode says so — the
+ * directional-lighting materials are two-cycle and the second cycle is where the
+ * environment blend lives, so stopping after cycle 0 (as we used to) throws away
+ * the half that matters.
  */
-static void combiner_color(u8 out[4]) {
-    u32 a = (sCombineW0 >> 20) & 0xF;
-    u32 c = (sCombineW0 >> 15) & 0x1F;
-    u32 aA = (sCombineW0 >> 12) & 0x7;
-    u32 cA = (sCombineW0 >> 9) & 0x7;
-    u32 b = (sCombineW1 >> 28) & 0xF;
-    u32 d = (sCombineW1 >> 15) & 0x7;
-    u32 bA = (sCombineW1 >> 12) & 0x7;
-    u32 dA = (sCombineW1 >> 9) & 0x7;
+static void combiner_eval(const f32 shade[4], u8 out[4]) {
+    f32 cycle0[4];
+    f32 result[4];
     s32 i;
 
-    for (i = 0; i < 3; i++) {
-        out[i] = clamp_u8(((cc_rgb(a, FALSE, i) - cc_rgb(b, FALSE, i)) * cc_rgb(c, TRUE, i)) + cc_rgb(d, FALSE, i));
+    cc_cycle((sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F, (sCombineW1 >> 15) & 0x7,
+             (sCombineW0 >> 12) & 0x7, (sCombineW1 >> 12) & 0x7, (sCombineW0 >> 9) & 0x7, (sCombineW1 >> 9) & 0x7,
+             shade, shade, cycle0);
+
+    if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) {
+        cc_cycle((sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F, (sCombineW1 >> 6) & 0x7,
+                 (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7, (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, shade,
+                 cycle0, result);
+    } else {
+        for (i = 0; i < 4; i++) {
+            result[i] = cycle0[i];
+        }
     }
-    out[3] = clamp_u8(((cc_alpha(aA) - cc_alpha(bA)) * cc_alpha(cA)) + cc_alpha(dA));
+
+    for (i = 0; i < 4; i++) {
+        out[i] = clamp_u8(result[i]);
+    }
+}
+
+/**
+ * The colour a rectangle's vertices carry. A rectangle has no shade, so it goes
+ * in as white and the combiner collapses to the constant the texture is modulated
+ * by: MODULATEIA_PRIM yields the prim colour, ENVIRONMENT the env colour, and the
+ * font's BLENDT_ENV_ALPHA_A_TxP the text colour it keeps in env.
+ */
+static void combiner_color(u8 out[4]) {
+    static const f32 white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+    combiner_eval(white, out);
 }
 
 /**
