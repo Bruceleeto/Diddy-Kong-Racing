@@ -1464,6 +1464,10 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
     }
 }
 
+// linux/audio.c
+extern void pc_audio_frame(void);
+extern void pc_audio_report(void);
+
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sGfxFrameCount++;
 
@@ -1495,6 +1499,12 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
 
     gfx_frame_end();
+
+    // Tick the audio manager once per frame. On N64 this is the scheduler posting
+    // OS_SC_RETRACE_MSG to the audio thread; there is no thread and no scheduler
+    // here, so the frame boundary drives it directly. (linux/audio.c)
+    pc_audio_frame();
+    pc_audio_report();
 }
 
 int main(int argc, char **argv) {

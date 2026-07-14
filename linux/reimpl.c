@@ -138,6 +138,28 @@ void pc_swap16_buf(void *buf, u32 numBytes) {
     }
 }
 
+// Byteswap a region of the loaded asset image in place, addressed the way the
+// game addresses ROM. Audio's RAW16 sample data is big-endian s16 and is DMA'd
+// straight out of this image on demand by __amDMA — which has no idea what type
+// of wave it is serving — so the swap has to happen once, here, at the source.
+// (ADPCM waves are a byte stream and must NOT come through this. See bnkf.c.)
+void pc_asset_swap16_region(u32 romOffset, u32 numBytes) {
+    u32 offset;
+
+    pc_assets_init();
+
+    if (romOffset < (u32) (uintptr_t) __ASSETS_LUT_END) {
+        fprintf(stderr, "AUDIO: raw16 swap outside the asset image (0x%X) — skipped\n", romOffset);
+        return;
+    }
+    offset = romOffset - (u32) (uintptr_t) __ASSETS_LUT_END;
+    if (offset + numBytes > sAssetsBinSize) {
+        fprintf(stderr, "AUDIO: raw16 swap past end of assets (0x%X + 0x%X) — skipped\n", offset, numBytes);
+        return;
+    }
+    pc_swap16_buf(sAssetsBin + offset, numBytes);
+}
+
 void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
     pc_assets_init();
 
@@ -323,6 +345,9 @@ void isv_printf(const char *fmt, ...) {
     va_start(args, fmt);
     vprintf(fmt, args);
     va_end(args);
+    // Flush every line: this is the port's only debug channel, and on a crash or
+    // an ASan abort a buffered stdout swallows exactly the lines that say why.
+    fflush(stdout);
 }
 
 // ---------------------------------------------------------------------------

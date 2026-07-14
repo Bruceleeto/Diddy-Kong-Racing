@@ -96,6 +96,8 @@ LIBS := -lm -lSDL2 -lGL $(SAN_FLAGS)
 # Every game-code source file, individually.
 SRC_FILES := \
 	linux/main.c \
+	linux/audio.c \
+	linux/audio_hle.c \
 	linux/gfx.c \
 	linux/input.c \
 	linux/reimpl.c \
@@ -152,6 +154,9 @@ SRC_FILES := \
 
 # libultra C sources, individually. The .s files (exceptasm, cache/CP0 ops,
 # bcopy/bzero/bcmp, sqrtf, libm_vals) are NOT here — those become host shims.
+# io/ai*.c are also NOT here: osAiSetFrequency/osAiSetNextBuffer/osAiGetLength are
+# nothing but MMIO register pokes, and linux/audio.c reimplements the three the
+# game calls on top of an SDL ring buffer.
 LIBULTRA_FILES := \
 	libultra/src/audio/bnkf.c \
 	libultra/src/audio/cents2ratio.c \
@@ -206,10 +211,6 @@ LIBULTRA_FILES := \
 	libultra/src/debug/kdebugserver.c \
 	libultra/src/gu/mtxutil.c \
 	libultra/src/gu/perspective.c \
-	libultra/src/io/ai.c \
-	libultra/src/io/aigetlen.c \
-	libultra/src/io/aisetfreq.c \
-	libultra/src/io/aisetnextbuf.c \
 	libultra/src/io/crc.c \
 	libultra/src/io/devmgr.c \
 	libultra/src/io/dp.c \
