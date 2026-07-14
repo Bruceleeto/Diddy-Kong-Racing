@@ -7627,7 +7627,9 @@ void fileselect_render(UNUSED s32 updateRate) {
     u32 colour;
     s32 i;
     UNUSED s32 pad[3];
-    char trimmedFilename[4];
+    // Also receives the untrimmed menu-text names ("GAME A" etc.) for unstarted
+    // slots, which are longer than SavefileInfo.name.
+    char trimmedFilename[16];
 
     if (osTvType == OS_TV_TYPE_PAL) {
         yPos = 12;
