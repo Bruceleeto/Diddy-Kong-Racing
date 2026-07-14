@@ -316,7 +316,10 @@ s32 gInitAINodes;
 s32 D_8011AF14;
 f32 gElevationHeights[5];
 s32 D_8011AF2C;
-ShadeProperties *gWorldShading; // Effectively unused.
+// Effectively unused. Retail declared 4 bytes (a pointer) but
+// set_world_shading fills it as a whole ShadeProperties, overrunning into the
+// neighbouring globals — harmless only under retail's layout. Real storage now.
+ShadeProperties gWorldShading;
 s32 D_8011AF34;
 s32 D_8011AF38[10];
 Object_MidiFade *D_8011AF60;
@@ -731,12 +734,25 @@ void allocate_object_pools(void) {
     gDrawbridgeTimers = mempool_alloc_safe(8, COLOUR_TAG_BLUE);
     D_8011AFF4 = mempool_alloc_safe(sizeof(unk800179D0) * 16, COLOUR_TAG_BLUE);
     gAssetsLvlObjTranslationTable = (s16 *) asset_table_load(ASSET_LEVEL_OBJECT_TRANSLATION_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian asset offset tables (helpers in linux/reimpl.c).
+        extern void pc_swap16_buf(void *buf, u32 numBytes);
+        pc_swap16_buf(gAssetsLvlObjTranslationTable, asset_table_size(ASSET_LEVEL_OBJECT_TRANSLATION_TABLE));
+    }
+#endif
     gAssetsLvlObjTranslationTableLength = (asset_table_size(ASSET_LEVEL_OBJECT_TRANSLATION_TABLE) >> 1) - 1;
     while (gAssetsLvlObjTranslationTable[gAssetsLvlObjTranslationTableLength] == 0) {
         gAssetsLvlObjTranslationTableLength--;
     }
     gSpawnObjectHeap = mempool_alloc_safe(OBJECT_BLUEPRINT_SIZE, COLOUR_TAG_BLUE);
     gAssetsObjectHeadersTable = (s32 *) asset_table_load(ASSET_OBJECT_HEADERS_TABLE);
+#ifdef TARGET_PC
+    {
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gAssetsObjectHeadersTable, asset_table_size(ASSET_OBJECT_HEADERS_TABLE));
+    }
+#endif
     gAssetsObjectHeadersTableLength = 0;
     while (-1 != gAssetsObjectHeadersTable[gAssetsObjectHeadersTableLength]) {
         gAssetsObjectHeadersTableLength++;
@@ -751,10 +767,57 @@ void allocate_object_pools(void) {
 
     gAssetsMiscSection = (s32 *) asset_table_load(ASSET_MISC);
     gAssetsMiscTable = (s32 *) asset_table_load(ASSET_MISC_TABLE);
+#ifdef TARGET_PC
+    {
+        // Table only — the misc *section* is mixed-format data; each
+        // get_misc_asset consumer owns the endianness of its own piece.
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        extern void pc_swap16_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gAssetsMiscTable, asset_table_size(ASSET_MISC_TABLE));
+
+        // ASSET_MISC_20: the 10 Object_Boost racer-FX entries read by
+        // racerfx_alloc — 27 f32s of boost data plus sprite/texture ids per
+        // entry. The trailing fields (unk70..tex) are runtime state.
+        {
+            Object_Boost *boost = (Object_Boost *) &gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_20]];
+            s32 n;
+            _Static_assert(sizeof(Object_Boost) == 0x80, "Object_Boost layout drifted from N64");
+            _Static_assert(__builtin_offsetof(Object_Boost, spriteId) == 0x6C,
+                           "Object_Boost layout drifted from N64");
+            for (n = 0; n < NUMBER_OF_CHARACTERS; n++) {
+                pc_swap32_buf(&boost[n], 0x6C);        // car/hovercraft/flying boost data, 27 x f32
+                pc_swap16_buf(&boost[n].spriteId, 4);  // spriteId, textureId
+            }
+        }
+    }
+#endif
     gAssetsMiscTableLength = 0;
     while (-1 != gAssetsMiscTable[gAssetsMiscTableLength]) {
         gAssetsMiscTableLength++;
     }
+#ifdef TARGET_PC
+    {
+        // The f32 misc assets. Left big-endian, every one of these reads as a
+        // denormal (~0): racers ended up weightless, with no handling and a flat
+        // acceleration curve, so the player could not move. The per-vehicle
+        // tables reached through ObjectHeader (unk5C acceleration, unk5D wheel
+        // offsets) are swapped where they are fetched, in racer.c — their index
+        // is not a constant. ASSET_MISC_20 is handled above as Object_Boost.
+        static const s32 sMiscF32Assets[] = {
+            ASSET_MISC_4,           ASSET_MISC_8,
+            ASSET_MISC_RACER_WEIGHT, ASSET_MISC_RACER_HANDLING,
+            ASSET_MISC_RACER_UNUSED_11, ASSET_MISC_17,
+            ASSET_MISC_18,          ASSET_MISC_MAGNET_DATA,
+            ASSET_MISC_32,          ASSET_MISC_RACERACCELERATION_UNKNOWN0,
+            ASSET_MISC_RACER_HITBOX_SIZE,
+        };
+        s32 n;
+
+        for (n = 0; n < (s32) ARRAY_COUNT(sMiscF32Assets); n++) {
+            pc_swap_misc_f32_once(sMiscF32Assets[n]);
+        }
+    }
+#endif
 
     decrypt_magic_codes(
         &gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_MAGIC_CODES]],
@@ -883,6 +946,47 @@ void free_all_objects(void) {
     mempool_free((void *) gObjectMap[1]);
 }
 
+#ifdef TARGET_PC
+// ObjectHeader is a big-endian asset overlay: header fields swapped before the
+// offset->pointer fixups below, then the pointed-to arrays. The ObjectHeader24
+// union at 0x08 stays byte order (its u32 reading in lights.c has a PC-side
+// byte read instead). Helpers in linux/reimpl.c.
+extern void pc_swap16_buf(void *buf, u32 numBytes);
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+
+_Static_assert(sizeof(ObjectHeader) == 0x78, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, modelIds) == 0x10, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, unk24) == 0x24, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, flags) == 0x30, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, shadeAngleY) == 0x3E, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, unk52) == 0x52, "ObjectHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader, internalName) == 0x60, "ObjectHeader layout drifted from N64");
+_Static_assert(sizeof(ObjectHeader24) == 0x18, "ObjectHeader24 layout drifted from N64");
+_Static_assert(__builtin_offsetof(ObjectHeader24, homeX) == 0x0C, "ObjectHeader24 layout drifted from N64");
+
+static void pc_swap_loaded_object_header(ObjectHeader *header) {
+    s32 i;
+
+    pc_swap32_buf(header, 0x10);            // unk0, shadowScale, unk8, scale
+    pc_swap32_buf(&header->modelIds, 0x10); // 4 offset words (modelIds..objectParticles)
+    pc_swap32_buf(&header->unk24, 4);       // unk24 offset (pad20 skipped)
+    pc_swap32_buf(&header->shadeAmbient, 8);
+    pc_swap16_buf(&header->flags, 10);       // flags..unk38
+    pc_swap16_buf(&header->shadeAngleY, 20); // shadeAngleY..unk50
+
+    // Pointed-to arrays, still offsets here — swap via the header base.
+    pc_swap32_buf((u8 *) header + (uintptr_t) header->modelIds, header->numberOfModelIds * 4);
+    pc_swap32_buf((u8 *) header + (uintptr_t) header->vehiclePartIds, header->attachPointCount * 4);
+    pc_swap32_buf((u8 *) header + (uintptr_t) header->objectParticles,
+                  header->particleCount * sizeof(ObjHeaderParticleEntry));
+    for (i = 0; i < header->numLightSources; i++) {
+        ObjectHeader24 *light = &((ObjectHeader24 *) ((u8 *) header + (uintptr_t) header->unk24))[i];
+        pc_swap16_buf(&light->unk6, 2);
+        pc_swap16_buf(&light->homeX, 12); // homeX/Y/Z, radius, unk14, unk16
+    }
+}
+#endif
+
 /**
  * Set the object's header.
  * Search if the intended header is already loaded and use that.
@@ -902,6 +1006,9 @@ ObjectHeader *load_object_header(s32 index) {
     address = mempool_alloc_pool((MemoryPoolSlot *) gObjectMemoryPool, size);
     if (address != NULL) {
         asset_load(ASSET_OBJECTS, (u32) address, assetOffset, size);
+#ifdef TARGET_PC
+        pc_swap_loaded_object_header(address);
+#endif
         address->unk24 = (ObjectHeader24 *) ((uintptr_t) address + (uintptr_t) address->unk24);
         address->objectParticles =
             (ObjHeaderParticleEntry *) ((uintptr_t) address + (uintptr_t) address->objectParticles);
@@ -943,6 +1050,98 @@ s32 normalise_time(s32 timer) {
     }
 }
 
+#ifdef TARGET_PC
+// Object-map spawn entries are big-endian; the layout past the common header
+// is per-behavior, mirroring run_object_init_func's dispatch (plus
+// BHV_WAVE_POWER, whose entry obj_loop_wavepower reads). Entry types with only
+// u8/s8 fields need no swap. Runtime-built entries (NEW_OBJECT_ENTRY) never
+// pass through here and stay host-order.
+static void pc_swap_spawn_entry_fields(u8 *entryBytes) {
+    LevelObjectEntry *entry = (LevelObjectEntry *) entryBytes;
+    s32 objType = entryBytes[0] | ((entryBytes[1] & 0x80) << 1);
+    s16 headerType = gAssetsLvlObjTranslationTable[objType];
+    ObjectHeader tmpHeader;
+    s8 behavior;
+
+    if (headerType >= gAssetsObjectHeadersTableLength) {
+        headerType = 0;
+    }
+    // Peek behaviorId (an s8, endianness-free) straight from the asset into a
+    // stack buffer: going through load_object_header/try_free_object_header
+    // here would push a mempool free per entry onto the deferred-free queue,
+    // which never drains during level load and overflows on dense maps.
+    asset_load(ASSET_OBJECTS, (u32) &tmpHeader, gAssetsObjectHeadersTable[headerType], sizeof(ObjectHeader));
+    behavior = tmpHeader.behaviorId;
+
+    switch (behavior) {
+        case BHV_RACER:
+            pc_swap16_buf(&entry->racer.angleZ, 8); // angleZ/X/Y, playerIndex
+            break;
+        case BHV_FISH:
+            pc_swap16_buf(&entry->fish.unk8, 2);
+            break;
+        case BHV_AUDIO:
+            pc_swap16_buf(&entry->audio.soundId, 4); // soundId, range
+            break;
+        case BHV_AUDIO_LINE:
+        case BHV_AUDIO_LINE_2:
+            pc_swap16_buf(&entry->audioLine.soundID, 2);
+            pc_swap16_buf(&entry->audioLine.unkE, 2);
+            break;
+        case BHV_FOG_CHANGER:
+            pc_swap16_buf(&entry->fogChanger.near, 6); // near, far, switchTimer
+            break;
+        case BHV_TEXTURE_SCROLL:
+            pc_swap16_buf(&entry->texScroll.textureIndex, 2);
+            break;
+        case BHV_LIGHT_RGBA:
+            pc_swap16_buf(&entry->rgbaLighting.radius, 14); // radius..unk1A
+            break;
+        case BHV_WEATHER:
+            pc_swap16_buf(&entry->weather.radius, 8); // radius..unkE
+            pc_swap16_buf(&entry->weather.unk12, 2);
+            break;
+        case BHV_LENS_FLARE:
+            pc_swap16_buf(&entry->lensFlare.angleX, 4); // angleX, angleY
+            break;
+        case BHV_LENS_FLARE_SWITCH:
+            pc_swap16_buf(&entry->lensFlareSwitch.radius, 2);
+            break;
+        case BHV_CHARACTER_FLAG:
+            pc_swap16_buf(&entry->characterFlag.angleZ, 8); // angleZ, radius, angleY, playerIndex
+            break;
+        case BHV_ANIMATION:
+            pc_swap16_buf(&entry->animation.objectIdToSpawn, 4); // objectIdToSpawn, animationStartDelay
+            pc_swap16_buf(&entry->animation.pauseFrameCount, 2);
+            break;
+        case BHV_WAVE_GENERATOR:
+            pc_swap16_buf(&entry->waveGenerator.waveSize, 6); // waveSize, unkC, unkE
+            break;
+        case BHV_WAVE_POWER:
+            pc_swap16_buf(&entry->wavePower.radius, 6); // radius, power, divisor
+            break;
+        case BHV_BUTTERFLY:
+            pc_swap16_buf(&entry->butterfly.unk8, 2);
+            break;
+        case BHV_MIDI_FADE_POINT:
+            pc_swap16_buf(&entry->midiFadePoint.unk8, 4); // unk8, unkA
+            break;
+        case BHV_MIDI_CHANNEL_SET:
+            pc_swap16_buf(&entry->midichset.unk8, 2);
+            break;
+        case BHV_BUBBLER:
+            pc_swap16_buf(&entry->bubbler.particleDensity, 2);
+            break;
+        case BHV_RANGE_TRIGGER:
+            pc_swap16_buf(&entry->rangeTrigger.radius, 4); // radius, particleFlags
+            break;
+        case BHV_FROG:
+            pc_swap16_buf(&entry->frog.homeRadius, 2);
+            break;
+    }
+}
+#endif
+
 /**
  * Load the object map into RAM, then start spawning objects into the world.
  * Also decides whether this race type should be for silver coins or not.
@@ -981,6 +1180,13 @@ void track_spawn_objects(s32 mapID, s32 index) {
     gObjectMapSize[index] = NULL;
     gObjectMapID[index] = mapID;
     objMapTable = (u32 *) asset_table_load(ASSET_LEVEL_OBJECT_MAPS_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian asset offset table (helper in linux/reimpl.c).
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(objMapTable, asset_table_size(ASSET_LEVEL_OBJECT_MAPS_TABLE));
+    }
+#endif
     for (i = 0; objMapTable[i] != 0xFFFFFFFF; i++) {}
     i--;
     if (mapID >= i) {
@@ -995,6 +1201,28 @@ void track_spawn_objects(s32 mapID, s32 index) {
             ((compressedAsset + gzip_size_uncompressed(ASSET_LEVEL_OBJECT_MAPS, assetOffset)) - (0, assetSize)) + 0x20;
         asset_load(ASSET_LEVEL_OBJECT_MAPS, (u32) compressedAsset, assetOffset, assetSize);
         gzip_inflate(compressedAsset, (u8 *) mem);
+#ifdef TARGET_PC
+        {
+            // Inflated object map is big-endian: a u32 spawn-list byte length,
+            // then variable-size entries whose common header holds three s16
+            // coords. Type-specific fields past the common header are NOT
+            // swapped here yet — spawn handlers reading s16s from entries get
+            // byte-swapped values until each entry type is handled.
+            extern void pc_swap16_buf(void *buf, u32 numBytes);
+            extern void pc_swap32_buf(void *buf, u32 numBytes);
+            _Static_assert(sizeof(LevelObjectEntryCommon) == 8, "LevelObjectEntryCommon layout drifted from N64");
+            u8 *entry = (u8 *) (gObjectMap[index] + sizeof(uintptr_t));
+            s32 entryOffset;
+            s32 entrySize;
+            pc_swap32_buf(mem, 4);
+            for (entryOffset = 0; entryOffset < *mem; entryOffset += entrySize) {
+                pc_swap16_buf(entry + 2, 6); // LevelObjectEntryCommon x, y, z
+                pc_swap_spawn_entry_fields(entry);
+                entrySize = entry[1] & 0x3F;
+                entry += entrySize;
+            }
+        }
+#endif
         mempool_free(objMapTable);
         gObjectMapSpawnList[index] = (u8 *) (gObjectMap[index] + sizeof(uintptr_t));
         gObjectMapSize[index] = *mem;
@@ -5399,7 +5627,9 @@ u32 func_800179D0(void) {
 }
 
 // https://decomp.me/scratch/xNAlf
-// Note: This function is ~70% matching and may contain logic discrepancies (e.g., A2/C2 calculations) compared to the original assembly.
+// 2026-07-11: verified against baserom asm (ROM 0x18618). The B>0.707 branch originally
+// solved the plane equation at (x1,z1) — the new position — not (x2,z2); using A2/C2
+// (A*x2/C*z2) here caused the map-specific "caught on the track lip" collision bug.
 s32 func_80017A18(ObjectModel *arg0, s32 arg1, s32 *arg2, f32 *arg3, f32 *arg4, f32 *arg5, f32 *arg6, f32 *arg7,
                   f32 *arg8, f32 *arg9, s8 *argA, f32 argB) {
     f32 *planes;
@@ -5496,7 +5726,7 @@ s32 func_80017A18(ObjectModel *arg0, s32 arg1, s32 *arg2, f32 *arg3, f32 *arg4, 
                     if (var_a2) {
                         redoLoop = TRUE;
                         if (B > 0.707) {
-                            y1 = (spC0 - (A2 + C2 + D)) / B;
+                            y1 = (spC0 - ((A * x1) + (C * z1) + D)) / B;
                         } else {
                             x1 -= sum2 * A;
                             y1 -= sum2 * B;
@@ -6880,6 +7110,16 @@ s32 timetrial_load_staff_ghost(s32 mapId) {
 
     gMapDefaultVehicle = leveltable_vehicle_default(mapId);
     ghostTable = (TTGhostTable *) asset_table_load(ASSET_TTGHOSTS_TABLE);
+#ifdef TARGET_PC
+    {
+        // Big-endian entries: mapId/defaultVehicleId are u8, ghostOffset is s32.
+        s32 n;
+        _Static_assert(sizeof(TTGhostTable) == 8, "TTGhostTable layout drifted from N64");
+        for (n = 0; n < (s32) (asset_table_size(ASSET_TTGHOSTS_TABLE) / sizeof(TTGhostTable)); n++) {
+            pc_swap32_buf(&ghostTable[n].ghostOffset, 4);
+        }
+    }
+#endif
 
     nextGhostTable = ghostTable;
     do {
@@ -7856,7 +8096,7 @@ UNUSED void func_8001D248(UNUSED s32 arg0, UNUSED s32 arg1, UNUSED s32 arg2) {
  * Presumably intended for level geometry, which supports shading, but never uses it.
  */
 void set_world_shading(f32 ambient, f32 diffuse, s16 angleX, s16 angleY, s16 angleZ) {
-    set_shading_properties((ShadeProperties *) &gWorldShading, ambient, diffuse, angleX, angleY, angleZ);
+    set_shading_properties(&gWorldShading, ambient, diffuse, angleX, angleY, angleZ);
 }
 
 /**
@@ -8218,6 +8458,43 @@ s32 *get_misc_asset(s32 index) {
     }
     return (s32 *) &gAssetsMiscSection[gAssetsMiscTable[index]];
 }
+
+#ifdef TARGET_PC
+/**
+ * Byte-swap one misc asset that is an array of f32, exactly once.
+ *
+ * The misc *table* is swapped in obj_init(), but the section it points into is
+ * mixed-format, so each consumer owns the endianness of its own piece — and the
+ * f32 ones never did. Read big-endian on a little-endian host, a racer stat of
+ * 8.0 (0x41000000) becomes 0x00000041: a denormal, i.e. zero. Every weight,
+ * handling value, acceleration curve and wheel offset was reading as zero.
+ *
+ * Size comes from the table (this entry to the next), so nothing is guessed.
+ * Callers may re-fetch these pointers every frame, hence swap-once: a blind swap
+ * would flip the bytes back and forth.
+ */
+void pc_swap_misc_f32_once(s32 index) {
+    extern void pc_swap32_buf(void *buf, u32 numBytes);
+    static u8 sSwapped[256];
+    u8 *start;
+    u8 *end;
+
+    if (index <= 0 || index >= gAssetsMiscTableLength || index >= (s32) ARRAY_COUNT(sSwapped)) {
+        return;
+    }
+    if (sSwapped[index]) {
+        return;
+    }
+    sSwapped[index] = TRUE;
+
+    start = (u8 *) get_misc_asset(index);
+    end = (u8 *) get_misc_asset(index + 1);
+    if (end <= start) {
+        return;
+    }
+    pc_swap32_buf(start, (u32) (end - start) & ~3u);
+}
+#endif
 
 /**
  * If the bridge is raised, decrement its timer and return the remaining time.
@@ -9779,7 +10056,7 @@ void mode_init_taj_race(void) {
         lvlSeg =
             get_level_segment_index_from_position(newRacerEntry.common.x, checkpointNode->y, newRacerEntry.common.z);
         newRacerEntry.common.y =
-            collision_get_y(lvlSeg, newRacerEntry.common.x, newRacerEntry.common.z, yOut) ? yOut[0] : checkpointNode->y;
+            collision_get_y(lvlSeg, newRacerEntry.common.x, newRacerEntry.common.z, yOut, 8) ? yOut[0] : checkpointNode->y;
         newRacerEntry.common.size = 16;
         newRacerEntry.angleY = racer->steerVisualRotation;
         newRacerEntry.angleX = 0;
@@ -9948,7 +10225,7 @@ CheckpointNode *func_800230D0(Object *obj, Object_Racer *racer) {
         obj->segmentID =
             get_level_segment_index_from_position(obj->trans.x_position, obj->trans.y_position, obj->trans.z_position);
     }
-    yOutCount = collision_get_y(obj->segmentID, obj->trans.x_position, obj->trans.z_position, yOut);
+    yOutCount = collision_get_y(obj->segmentID, obj->trans.x_position, obj->trans.z_position, yOut, 9);
     if (yOutCount != 0) {
         obj->trans.y_position = yOut[yOutCount - 1];
     }

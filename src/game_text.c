@@ -321,6 +321,14 @@ void set_current_text(s32 textID) {
         }
 
         asset_load(ASSET_GAME_TEXT_TABLE, (u32) (*gGameTextTable)->entries, (textID & (~1)) << 2, 16);
+#ifdef TARGET_PC
+        {
+            // Each entry packs a flag in the top byte and a 24-bit offset below it,
+            // so the words have to be host-order before any of the masking below.
+            extern void pc_swap32_buf(void *buf, u32 numBytes);
+            pc_swap32_buf((*gGameTextTable)->entries, 16);
+        }
+#endif
 
         entries = (*gGameTextTable)->entries;
         temp = ((s32) entries[textID & 1]) & 0xFF000000;

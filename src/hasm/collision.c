@@ -119,8 +119,8 @@ void generate_collision_candidates(s32 numPoints, Vec3f *origins, Vec3f *targets
     for (i = 0; i < counter; i++) {
         LevelModelSegment *seg = segments[i];
 
-        // Insert the segment pointer encoded with MSB = 0 to differentiate from collision facets
-        gCollisionCandidates[j] = (s32) K0_TO_PHYS(seg);
+        // Insert the segment pointer tagged to differentiate from collision facets
+        gCollisionCandidates[j] = COLLISION_SEGMENT_ENTRY(seg);
         j++;
 
         for (batchIndex = 0; batchIndex < seg->numberOfBatches; batchIndex++) {
@@ -251,7 +251,7 @@ s32 compute_grid_overlap_mask(LevelModelSegmentBoundingBox *bbox, s32 x1, s32 z1
     cell_z = bbox_z1;
 
     for (i = 0; i < 8; i++) {
-        if (cell_z + cell_height >= z1 && z2 >= bbox_z1) {
+        if (cell_z + cell_height >= z1 && z2 >= cell_z) {
             mask |= v1;
         }
 
@@ -301,8 +301,8 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
             continueSearch = FALSE;
 
             for (i = 0; i < gNumCollisionCandidates; i++) {
-                if (gCollisionCandidates[i] >= 0) {
-                    collisionPlanes = ((LevelModelSegment *) (PHYS_TO_K0(gCollisionCandidates[i])))->collisionPlanes;
+                if (COLLISION_ENTRY_IS_SEGMENT(gCollisionCandidates[i])) {
+                    collisionPlanes = COLLISION_ENTRY_SEGMENT(gCollisionCandidates[i])->collisionPlanes;
                 } else {
                     facet = (CollisionFacetPlanes *) gCollisionCandidates[i];
                     A = collisionPlanes[facet->basePlaneIndex * 4 + 0];
@@ -421,8 +421,8 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
             continueSearch = FALSE;
 
             for (i = 0; i < gNumCollisionCandidates; i++) {
-                if (gCollisionCandidates[i] >= 0) {
-                    collisionPlanes = ((LevelModelSegment *) (PHYS_TO_K0(gCollisionCandidates[i])))->collisionPlanes;
+                if (COLLISION_ENTRY_IS_SEGMENT(gCollisionCandidates[i])) {
+                    collisionPlanes = COLLISION_ENTRY_SEGMENT(gCollisionCandidates[i])->collisionPlanes;
                 } else {
                     facet = (CollisionFacetPlanes *) gCollisionCandidates[i];
                     A = collisionPlanes[facet->basePlaneIndex * 4 + 0];

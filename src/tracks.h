@@ -178,7 +178,7 @@ void func_8002EEEC(s32 arg0);
 void func_8002F2AC(void);
 void func_8002F440(void);
 f32 func_8002FA64(void);
-s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut);
+s32 collision_get_y(s32 levelSegmentIndex, f32 xIn, f32 zIn, f32 *yOut, s32 maxYOut);
 void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, u32 entranceId, u32 collectables,
                 u32 arg6);
 void waves_init(LevelModel *, LevelHeader *, s32);

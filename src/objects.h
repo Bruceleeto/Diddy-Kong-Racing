@@ -368,6 +368,9 @@ void set_world_shading(f32 ambient, f32 diffuse, s16 angleX, s16 angleY, s16 ang
 void set_shading_properties(ShadeProperties *arg0, f32 ambient, f32 diffuse, s16 angleX, s16 angleY, s16 angleZ);
 void obj_shade_fancy(ObjectModel *model, Object *object, s32 arg2, f32 intensity);
 s32 *get_misc_asset(s32 index);
+#ifdef TARGET_PC
+void pc_swap_misc_f32_once(s32 index);
+#endif
 s32 is_bridge_raised(s32 index);
 void start_bridge_timer(s32 index);
 void obj_bridge_pos(s32 timing, f32 *x, f32 *y, f32 *z);

@@ -48,7 +48,25 @@
 /*
  * Address conversion macros
  */
-#ifdef _LANGUAGE_ASSEMBLY
+#ifdef TARGET_PC
+
+/* On PC there are no CPU segments — pass pointers through unchanged. */
+#define K0_TO_K1(x) ((u32) (x))
+#define K1_TO_K0(x) ((u32) (x))
+#define K0_TO_PHYS(x) ((u32) (x))
+#define K1_TO_PHYS(x) ((u32) (x))
+#define KDM_TO_PHYS(x) ((u32) (x))
+#define PHYS_TO_K0(x) ((u32) (x))
+#define PHYS_TO_K1(x) ((u32) (x))
+
+#define IS_KSEG0(x) (0)
+#define IS_KSEG1(x) (0)
+#define IS_KSEGDM(x) (0)
+#define IS_KSEG2(x) (0)
+#define IS_KPTESEG(x) (0)
+#define IS_KUSEG(x) (1)
+
+#elif defined(_LANGUAGE_ASSEMBLY)
 
 #define	K0_TO_K1(x)	((x)|0xA0000000)	/* kseg0 to kseg1 */
 #define	K1_TO_K0(x)	((x)&0x9FFFFFFF)	/* kseg1 to kseg0 */
@@ -73,12 +91,14 @@
 /*
  * Address predicates
  */
+#ifndef TARGET_PC
 #define	IS_KSEG0(x)	((u32)(x) >= K0BASE && (u32)(x) < K1BASE)
 #define	IS_KSEG1(x)	((u32)(x) >= K1BASE && (u32)(x) < K2BASE)
 #define	IS_KSEGDM(x)	((u32)(x) >= K0BASE && (u32)(x) < K2BASE)
 #define	IS_KSEG2(x)	((u32)(x) >= K2BASE && (u32)(x) < KPTE_SHDUBASE)
 #define	IS_KPTESEG(x)	((u32)(x) >= KPTE_SHDUBASE)
 #define	IS_KUSEG(x)	((u32)(x) < K0BASE)
+#endif
 
 /*
  * TLB size constants

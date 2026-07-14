@@ -826,6 +826,7 @@ UNUSED void set_game_mode(s32 changeTo) {
  * Used for every kind of menu that's not ingame.
  */
 void load_menu_with_level_background(s32 menuId, s32 levelId, s32 cutsceneId) {
+    stubbed_printf("LMWLB enter menu=%d lvl=%d\n", menuId, levelId);
     alloc_displaylist_heap(PLAYER_ONE);
     gGameMode = GAMEMODE_MENU;
     gRenderMenu = TRUE;
@@ -847,6 +848,7 @@ void load_menu_with_level_background(s32 menuId, s32 levelId, s32 cutsceneId) {
     }
     menu_init(menuId);
     gGameCurrentEntrance = 0;
+    stubbed_printf("LMWLB exit menu=%d\n", menuId);
 }
 
 /**
@@ -879,7 +881,9 @@ void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle v
     mempool_free_timer(0);
     cam_init();
     load_game_text_table();
+    stubbed_printf("level_load enter id=%d\n", levelId);
     level_load(levelId, numberOfPlayers, entranceId, vehicleId, cutsceneId);
+    stubbed_printf("level_load exit id=%d\n", levelId);
     hud_init(cam_get_viewport_layout());
     init_particle_buffers(4, 4, 110, 48, 32, 0);
     ainode_update();
@@ -931,7 +935,12 @@ void mode_menu(s32 updateRate) {
     s32 temp;
     s32 playerVehicle;
     s32 temp5;
+    static s32 sFirstMenuFrame = TRUE;
 
+    if (sFirstMenuFrame) {
+        sFirstMenuFrame = FALSE;
+        stubbed_printf("mode_menu first frame\n");
+    }
     gIsPaused = FALSE;
     gPostRaceViewPort = NULL;
     if (!gIsLoading && gRenderMenu) {

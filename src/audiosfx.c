@@ -30,12 +30,25 @@ const char D_800E4B5C[] = "Don't worry - game should cope OK\n";
 const char D_800E4B80[] = "WARNING: Attempt to stop NULL sound aborted\n";
 
 static void sndp_remove_events(ALEventQueue *, ALSoundState *, u16);
+
+#ifdef TARGET_PC
+// Audio is not initialized on PC (audio_init early-returns), so every public
+// entry point no-ops. gSoundGroupVolume is allocated by sndp_init_player, so
+// it doubles as the "sound player initialized" flag.
+#define SNDP_PC_GUARD(retval) \
+    if (gSoundGroupVolume == NULL) \
+    return retval
+#else
+#define SNDP_PC_GUARD(retval)
+#endif
+
 void func_80065A80(ALSynth *arg0, struct PVoice_s *arg1, s16 arg2);
 
 /**
  * Sets the global volume level for all sounds.
  */
 void sndp_set_global_volume(u32 volume) {
+    SNDP_PC_GUARD();
     if (volume > 256) {
         volume = 256;
     }
@@ -48,6 +61,7 @@ void sndp_set_global_volume(u32 volume) {
  * Official Name: gsSndpGetGlobalVolume
  */
 s32 sndp_get_global_volume(void) {
+    SNDP_PC_GUARD(0);
     return gSoundGlobalVolume;
 }
 
@@ -56,6 +70,7 @@ s32 sndp_get_global_volume(void) {
  * Official Name: gsSndpLimitVoices
  */
 void sndp_set_active_sound_limit(s32 numSounds) {
+    SNDP_PC_GUARD();
     if (gSoundPlayerPtr->maxSystemSoundChannels >= numSounds) {
         gSoundPlayerPtr->maxActiveSounds = numSounds;
     } else {
@@ -517,6 +532,17 @@ static void sndp_remove_events(ALEventQueue *evtq, ALSoundState *state, u16 even
  * Official Name: getSoundStateCounts
  */
 u16 sndp_get_state_counts(u16 *numFree, u16 *numAllocated) {
+#ifdef TARGET_PC
+    if (gSoundGroupVolume == NULL) {
+        if (numFree != NULL) {
+            *numFree = 0;
+        }
+        if (numAllocated != NULL) {
+            *numAllocated = 0;
+        }
+        return 0;
+    }
+#endif
     OSIntMask mask;
     u16 allocatedCounter;
     u16 freeCounter;
@@ -556,6 +582,7 @@ u16 sndp_get_state_counts(u16 *numFree, u16 *numAllocated) {
  * Returns NULL if there are no free sound states available.
  */
 ALSoundState *sndp_allocate(UNUSED ALBank *bank, ALSound *sound) {
+    SNDP_PC_GUARD(NULL);
     s32 isLooping;
     ALKeyMap *keyMap;
     ALSoundState *state;
@@ -612,6 +639,7 @@ ALSoundState *sndp_allocate(UNUSED ALBank *bank, ALSound *sound) {
  * If the sound state has a user handle, it sets it to NULL, to notify the user that the sound has stopped.
  */
 void sndp_deallocate(ALSoundState *state) {
+    SNDP_PC_GUARD();
     if (state == gSoundStateLists.allocHead) {
         gSoundStateLists.allocHead = state->next;
     }
@@ -646,6 +674,7 @@ void sndp_deallocate(ALSoundState *state) {
  * Official Name: gsSndpSetPriority
  */
 void sndp_set_priority(ALSoundState *sndp, u8 priority) {
+    SNDP_PC_GUARD();
     if (sndp != NULL) {
         sndp->priority = priority;
     }
@@ -656,6 +685,7 @@ void sndp_set_priority(ALSoundState *sndp, u8 priority) {
  * Official Name: gsSndpGetState
  */
 UNUSED u8 sndp_get_state(ALSoundState *sndp) {
+    SNDP_PC_GUARD(0);
     if (sndp != NULL) {
         return sndp->state;
     } else {
@@ -667,6 +697,7 @@ UNUSED u8 sndp_get_state(ALSoundState *sndp) {
  * Plays the sound with the default priority, store the handle in the provided pointer.
  */
 ALSoundState *sndp_play(ALBank *bnk, s16 sndIndx, ALSoundState **handlePtr) {
+    SNDP_PC_GUARD(NULL);
     return sndp_play_with_priority(bnk, sndIndx, 0, handlePtr);
 }
 
@@ -677,6 +708,7 @@ ALSoundState *sndp_play(ALBank *bnk, s16 sndIndx, ALSoundState **handlePtr) {
  * Also, for retriggered sounds, schedules an event to restart them.
  */
 ALSoundState *sndp_play_with_priority(ALBank *bank, s16 sndIndx, u8 priority, ALSoundState **handlePtr) {
+    SNDP_PC_GUARD(NULL);
     ALSound *sound;
     ALSoundState *lastSoundState;
     ALSoundState *soundState;
@@ -773,6 +805,7 @@ ALSoundState *sndp_play_with_priority(ALBank *bank, s16 sndIndx, u8 priority, AL
  * Official Name: gsSndpStop
  */
 void sndp_stop(ALSoundState *state) {
+    SNDP_PC_GUARD();
     ALSndpEvent alEvent;
 
     alEvent.common.type = AL_SNDP_STOP_EVT;
@@ -790,6 +823,7 @@ void sndp_stop(ALSoundState *state) {
  * Schedules a stop event for all sound states that have the specified flags set.
  */
 void sndp_stop_with_flags(u8 flags) {
+    SNDP_PC_GUARD();
     OSIntMask mask;
     ALSndpEvent evt;
     ALSoundState *soundState;
@@ -813,6 +847,7 @@ void sndp_stop_with_flags(u8 flags) {
  * Official Name: gsSndpStopAll
  */
 UNUSED void sndp_stop_all(void) {
+    SNDP_PC_GUARD();
     sndp_stop_with_flags(SOUND_FLAG_FINAL_IN_SEQUENCE);
 }
 
@@ -821,6 +856,7 @@ UNUSED void sndp_stop_all(void) {
  * Official Name: gsSndpStopAllRetrigger
  */
 UNUSED void sndp_stop_all_retrigger(void) {
+    SNDP_PC_GUARD();
     sndp_stop_with_flags(SOUND_FLAG_FINAL_IN_SEQUENCE | SOUND_FLAG_RETRIGGER);
 }
 
@@ -829,6 +865,7 @@ UNUSED void sndp_stop_all_retrigger(void) {
  * Official Name: gsSndpStopAllLooped
  */
 void sndp_stop_all_looped(void) {
+    SNDP_PC_GUARD();
     sndp_stop_with_flags(SOUND_FLAG_FINAL_IN_SEQUENCE | SOUND_FLAG_LOOPED);
 }
 
@@ -837,6 +874,7 @@ void sndp_stop_all_looped(void) {
  * Official Name: gsSndpSetParam
  */
 void sndp_set_param(SoundHandle soundMask, s16 type, u32 paramValue) {
+    SNDP_PC_GUARD();
     ALSndpEvent evt;
     evt.common.type = type;
     evt.common.state = soundMask;
@@ -854,6 +892,7 @@ void sndp_set_param(SoundHandle soundMask, s16 type, u32 paramValue) {
  * Official Name: gsSndpGetMasterVolume
  */
 u16 sndp_get_group_volume(u8 groupID) {
+    SNDP_PC_GUARD(0);
     return gSoundGroupVolume[groupID];
 }
 
@@ -867,6 +906,7 @@ u16 sndp_get_group_volume(u8 groupID) {
  * Official Name: gsSndpSetMasterVolume
  */
 void sndp_set_group_volume(u8 groupID, u16 volume) {
+    SNDP_PC_GUARD();
     OSIntMask mask;
     ALSoundState *state;
     UNUSED s32 pad;

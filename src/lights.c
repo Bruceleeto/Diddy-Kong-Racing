@@ -156,7 +156,12 @@ ObjectLight *light_add_from_object_header(Object *obj, ObjectHeader24 *arg1) {
     light = NULL;
     if (gNumActiveLights < gMaxLights) {
         light = gActiveLights[gNumActiveLights++];
+#ifdef TARGET_PC
+        // Big-endian u32 read: top nibble of the union's first byte (unk8A).
+        light->unk0 = arg1->unk8A >> 4;
+#else
         light->unk0 = arg1->unk8 >> 0x1C;
+#endif
         light->unk1 = arg1->unk9;
         light->unk2 = arg1->unkB;
         light->type = arg1->unkA;

@@ -183,7 +183,16 @@ unk80126878 D_80126878[8];
 f32 D_801268D8;
 UNUSED s32 D_801268DC; // Set to 0 during the title screen, never read.
 s32 gOpeningNameID;
-s16 gTrackSelectIDs[4][6]; // Track Select values?
+//!@bug: menu_track_select_init() fills this with a `for (i = 0; i < 5; i++)`
+// loop, so it writes five rows into a four-row array. Retail really is 48 bytes
+// (gTrackSelectIDs = 0x801268E8, gFFLUnlocked = 0x80126918), so the console
+// scribbles 12 bytes over gFFLUnlocked and D_8012691C every time the track
+// select opens, and evidently survives it. The PC build lays its globals out
+// differently, so those 12 bytes land on something else entirely — which is
+// real, drifting corruption. The fifth row is never read back (every read
+// indexes by gTrackSelectCursorY, which stops at 3), so giving the write a row
+// of its own is behaviour-neutral and keeps the stray store in bounds.
+s16 gTrackSelectIDs[5][6]; // Track Select values?
 s16 gFFLUnlocked;
 UNUSED s32 D_80128464;
 UNUSED s32 D_80128468;
@@ -397,7 +406,16 @@ f32 D_801268D8;
 UNUSED s32 D_801268DC; // Set to 0 during the title screen, never read.
 s32 gOpeningNameID;
 UNUSED s32 D_801268E4;
-s16 gTrackSelectIDs[4][6]; // Track Select values?
+//!@bug: menu_track_select_init() fills this with a `for (i = 0; i < 5; i++)`
+// loop, so it writes five rows into a four-row array. Retail really is 48 bytes
+// (gTrackSelectIDs = 0x801268E8, gFFLUnlocked = 0x80126918), so the console
+// scribbles 12 bytes over gFFLUnlocked and D_8012691C every time the track
+// select opens, and evidently survives it. The PC build lays its globals out
+// differently, so those 12 bytes land on something else entirely — which is
+// real, drifting corruption. The fifth row is never read back (every read
+// indexes by gTrackSelectCursorY, which stops at 3), so giving the write a row
+// of its own is behaviour-neutral and keeps the stray store in bounds.
+s16 gTrackSelectIDs[5][6]; // Track Select values?
 s16 gFFLUnlocked;
 UNUSED s32 D_8012691C;
 UNUSED s32 D_80126920;
@@ -1948,6 +1966,13 @@ void load_menu_text(s32 language) {
 
     if (gMenuTextLangTable == NULL) {
         gMenuTextLangTable = (s32 *) asset_table_load(ASSET_MENU_TEXT_TABLE);
+#ifdef TARGET_PC
+        {
+            // Big-endian table: [0] string count, [1..4] per-language offsets.
+            extern void pc_swap32_buf(void *buf, u32 numBytes);
+            pc_swap32_buf(gMenuTextLangTable, asset_table_size(ASSET_MENU_TEXT_TABLE));
+        }
+#endif
     }
 
     switch (language) {
@@ -1975,6 +2000,14 @@ void load_menu_text(s32 language) {
     }
 
     asset_load(ASSET_MENU_TEXT, (u32) temp, langIndex, size);
+#ifdef TARGET_PC
+    {
+        // The blob leads with a big-endian string-offset table; the loop below
+        // converts it to pointers. The strings after it are plain chars.
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        pc_swap32_buf(gMenuText, gMenuTextLangTable[0] * 4);
+    }
+#endif
 
     // TODO: Find a way to clean up the ugly hacks.
     // Fill up the lookup table with proper RAM addresses
@@ -7594,7 +7627,9 @@ void fileselect_render(UNUSED s32 updateRate) {
     u32 colour;
     s32 i;
     UNUSED s32 pad[3];
-    char trimmedFilename[4];
+    // Also receives the untrimmed menu-text names ("GAME A" etc.) for unstarted
+    // slots, which are longer than SavefileInfo.name.
+    char trimmedFilename[16];
 
     if (osTvType == OS_TV_TYPE_PAL) {
         yPos = 12;
@@ -13792,6 +13827,13 @@ void menu_asset_load(s32 assetID) {
 
     if (*gAssetsMenuElementIds == NULL) {
         *gAssetsMenuElementIds = (s16 *) asset_table_load(ASSET_MENU_ELEMENT_IDS);
+#ifdef TARGET_PC
+        {
+            // Big-endian s16 id table (helper in linux/reimpl.c).
+            extern void pc_swap16_buf(void *buf, u32 numBytes);
+            pc_swap16_buf(*gAssetsMenuElementIds, asset_table_size(ASSET_MENU_ELEMENT_IDS));
+        }
+#endif
         for (gMenuElementIdCount = 0; (*gAssetsMenuElementIds)[gMenuElementIdCount] != -1; gMenuElementIdCount++) {}
         gMenuObjectsCount = 0;
         for (i = 0; i < gMenuElementIdCount; i++) {

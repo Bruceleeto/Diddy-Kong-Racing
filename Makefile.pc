@@ -1,0 +1,307 @@
+# Makefile.pc — native Linux build of the DKR game code (the port).
+#
+# Usage:
+#   make -f Makefile.pc -j8            # build ./dkracing
+#   make -f Makefile.pc clean
+#
+# Notes:
+# - BITS=32 by default: the decomp assumes 4-byte pointers everywhere (structs
+#   overlaying ROM data, pointers stashed in u32). 64-bit comes later, on purpose.
+# - libultra C files ARE built (only the hand-written .s files — CP0/cache/
+#   exception/boot — get replaced by host shims). Files that poke MMIO registers
+#   (io/, timers) will need #ifdef TARGET_PC surgery or shim replacements, but
+#   they start out in the build so the worklist is visible as compile errors.
+# - src/hasm/softfloat_conv.c and llmuldiv_gcc.s excluded: host libgcc provides those.
+# - libultra/src/gu/{sinf,cosf}.c excluded: they build their polynomial constants as
+#   big-endian {hi,lo} word pairs of a double (the du union in guint.h), so on a
+#   little-endian host every coefficient is byte-swapped garbage. They are #pragma weak,
+#   so leaving them out hands sinf/cosf to the host libm (-lm). The OoT DC port omits
+#   them the same way. Symptom when they were in: guPerspectiveF's cot went NaN, which
+#   NaN'd columns 0 and 1 of every MVP.
+# - -DTARGET_PC replaces -DTARGET_N64; use it to #ifdef the platform split.
+
+CC      := gcc
+BITS    ?= 32
+BUILD   := build/pc
+
+DEFINES := \
+	-DTARGET_PC \
+	-D_LANGUAGE_C \
+	-D_FINALROM \
+	-DNDEBUG \
+	-DF3DDKR_GBI \
+	-DVERSION_US_V77 \
+	-DAVOID_UB \
+	-DNON_MATCHING \
+	-DBUILD_VERSION=VERSION_G \
+	-DBUILD_VERSION_STRING=\"2.0G\" \
+	-D_MIPS_SZLONG=32
+
+# linux/ (platform code) compiles WITHOUT -I include/libc: those headers are N64
+# stubs that shadow the real system libc (their stdio.h only declares sprintf).
+# Game code keeps the shadow; platform code gets the host's actual headers.
+INCLUDES_REIMPL := \
+	-I . \
+	-I include \
+	-I include/PR \
+	-I include/sys \
+	-I assets \
+	-I src \
+	-I src/hasm \
+	-I libultra \
+	-I libultra/src/gu \
+	-I libultra/src/libc \
+	-I libultra/src/io \
+	-I libultra/src/sc \
+	-I libultra/src/audio \
+	-I libultra/src/os
+
+INCLUDES := -I include/libc $(INCLUDES_REIMPL)
+
+OPT      ?= -O1
+
+# SANITIZE=1 builds with AddressSanitizer + UBSan. This is the port's single
+# best debugging tool: the decomp is full of out-of-bounds writes that retail's
+# exact stack/data layout absorbed harmlessly (see the three failure classes in
+# docs/linux_port.md), and on N64 each one cost a multi-day bisect to find. ASan
+# reports them with a file and a line, the first time they happen.
+#
+#   make -f Makefile.pc SANITIZE=1 -j8   # then just run ./dkracing
+#
+# Build it into its own object dir so a sanitized build doesn't get mixed with a
+# normal one. -fno-omit-frame-pointer keeps the reported stack traces readable;
+# -fno-common and -g are already on.
+SANITIZE ?= 0
+ifeq ($(SANITIZE),1)
+BUILD    := build/pc-asan
+SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
+else
+SAN_FLAGS :=
+endif
+
+BASE_CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) $(SAN_FLAGS) \
+	-fno-builtin \
+	-fno-common \
+	-fno-strict-aliasing \
+	-funsigned-char \
+	-fwrapv \
+	-MMD -MP
+CFLAGS        := $(BASE_CFLAGS) $(INCLUDES)
+CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
+
+# The renderer (linux/main.c) is SDL2 + OpenGL. On the default 32-bit build this
+# needs the i386 SDL2/GL runtime, not the host's 64-bit one.
+LIBS := -lm -lSDL2 -lGL $(SAN_FLAGS)
+
+# Every game-code source file, individually.
+SRC_FILES := \
+	linux/main.c \
+	linux/gfx.c \
+	linux/input.c \
+	linux/reimpl.c \
+	src/asset_loading.c \
+	src/audio.c \
+	src/audiomgr.c \
+	src/audiosfx.c \
+	src/audio_spatial.c \
+	src/audio_vehicle.c \
+	src/borders.c \
+	src/camera.c \
+	src/fade_transition.c \
+	src/font.c \
+	src/game.c \
+	src/game_text.c \
+	src/game_ui.c \
+	src/get_stack_pointer.c \
+	src/gzip.c \
+	src/joypad.c \
+	src/lights.c \
+	src/main.c \
+	src/memory.c \
+	src/menu.c \
+	src/object_functions.c \
+	src/object_models.c \
+	src/objects.c \
+	src/os_yield_data.c \
+	src/particles.c \
+	src/printf.c \
+	src/racer.c \
+	src/rcp_dkr.c \
+	src/save_data.c \
+	src/screen_asset.c \
+	src/set_rsp_segment.c \
+	src/textures_sprites.c \
+	src/thread0_epc.c \
+	src/thread30_bgload.c \
+	src/thread3_main.c \
+	src/tracks.c \
+	src/unused_string.c \
+	src/vehicle_bluey.c \
+	src/vehicle_bubbler.c \
+	src/vehicle_rocket.c \
+	src/vehicle_smokey.c \
+	src/vehicle_tricky.c \
+	src/vehicle_wizpig.c \
+	src/video.c \
+	src/waves.c \
+	src/weather.c \
+	src/hasm/collision.c \
+	src/hasm/math_util.c \
+	src/hasm/obj_animate.c \
+	src/hasm/obj_shade_fast.c
+
+# libultra C sources, individually. The .s files (exceptasm, cache/CP0 ops,
+# bcopy/bzero/bcmp, sqrtf, libm_vals) are NOT here — those become host shims.
+LIBULTRA_FILES := \
+	libultra/src/audio/bnkf.c \
+	libultra/src/audio/cents2ratio.c \
+	libultra/src/audio/copy.c \
+	libultra/src/audio/cseq.c \
+	libultra/src/audio/cspgetchlvol.c \
+	libultra/src/audio/cspgetstate.c \
+	libultra/src/audio/cspgettempo.c \
+	libultra/src/audio/cspplay.c \
+	libultra/src/audio/cspsetbank.c \
+	libultra/src/audio/cspsetchlvol.c \
+	libultra/src/audio/cspsetpan.c \
+	libultra/src/audio/cspsetseq.c \
+	libultra/src/audio/cspsettempo.c \
+	libultra/src/audio/cspsetvol.c \
+	libultra/src/audio/cspstop.c \
+	libultra/src/audio/env.c \
+	libultra/src/audio/event.c \
+	libultra/src/audio/filter.c \
+	libultra/src/audio/heapalloc.c \
+	libultra/src/audio/heapinit.c \
+	libultra/src/audio/load.c \
+	libultra/src/audio/mainbus.c \
+	libultra/src/audio/mips1/auxbus.c \
+	libultra/src/audio/mips1/cspgetfadein.c \
+	libultra/src/audio/mips1/csplayer.c \
+	libultra/src/audio/mips1/cspsetfadein.c \
+	libultra/src/audio/mips1/drvrnew.c \
+	libultra/src/audio/mips1/reverb.c \
+	libultra/src/audio/mips1/seqchannel.c \
+	libultra/src/audio/mips1/seqplayer.c \
+	libultra/src/audio/mips1/synallocfx.c \
+	libultra/src/audio/mips1/synsetpan.c \
+	libultra/src/audio/mips1/synstartvoiceparam.c \
+	libultra/src/audio/mips1/synthesizer.c \
+	libultra/src/audio/mips1/unknown_064690.c \
+	libultra/src/audio/resample.c \
+	libultra/src/audio/save.c \
+	libultra/src/audio/seqpgetfxmix.c \
+	libultra/src/audio/sl.c \
+	libultra/src/audio/synaddplayer.c \
+	libultra/src/audio/synallocvoice.c \
+	libultra/src/audio/syndelete.c \
+	libultra/src/audio/synfreevoice.c \
+	libultra/src/audio/synsetfxmix.c \
+	libultra/src/audio/synsetpitch.c \
+	libultra/src/audio/synsetpriority.c \
+	libultra/src/audio/synsetvol.c \
+	libultra/src/audio/synstartvoice.c \
+	libultra/src/audio/synstopvoice.c \
+	libultra/src/debug/assert.c \
+	libultra/src/debug/kdebugserver.c \
+	libultra/src/gu/mtxutil.c \
+	libultra/src/gu/perspective.c \
+	libultra/src/io/ai.c \
+	libultra/src/io/aigetlen.c \
+	libultra/src/io/aisetfreq.c \
+	libultra/src/io/aisetnextbuf.c \
+	libultra/src/io/crc.c \
+	libultra/src/io/devmgr.c \
+	libultra/src/io/dp.c \
+	libultra/src/io/dpgetstat.c \
+	libultra/src/io/dpsetnextbuf.c \
+	libultra/src/io/dpsetstat.c \
+	libultra/src/io/epirawdma.c \
+	libultra/src/io/epirawwrite.c \
+	libultra/src/io/leointerrupt.c \
+	libultra/src/io/piacs.c \
+	libultra/src/io/pidma.c \
+	libultra/src/io/pigetcmdq.c \
+	libultra/src/io/pimgr.c \
+	libultra/src/io/pirawdma.c \
+	libultra/src/io/pirawread.c \
+	libultra/src/io/si.c \
+	libultra/src/io/siacs.c \
+	libultra/src/io/sirawread.c \
+	libultra/src/io/sirawwrite.c \
+	libultra/src/io/sp.c \
+	libultra/src/io/spgetstat.c \
+	libultra/src/io/sprawdma.c \
+	libultra/src/io/spsetpc.c \
+	libultra/src/io/spsetstat.c \
+	libultra/src/io/sptask.c \
+	libultra/src/io/sptaskyield.c \
+	libultra/src/io/sptaskyielded.c \
+	libultra/src/io/vi.c \
+	libultra/src/io/viblack.c \
+	libultra/src/io/vigetcurrcontext.c \
+	libultra/src/io/vigetcurrframebuf.c \
+	libultra/src/io/vigetnextframebuf.c \
+	libultra/src/io/vimgr.c \
+	libultra/src/io/visetevent.c \
+	libultra/src/io/visetmode.c \
+	libultra/src/io/visetspecial.c \
+	libultra/src/io/viswapbuf.c \
+	libultra/src/io/viswapcontext.c \
+	libultra/src/io/vitbl.c \
+	libultra/src/libc/ldiv.c \
+	libultra/src/libc/ll.c \
+	libultra/src/libc/llcvt.c \
+	libultra/src/libc/rmonPrintf.c \
+	libultra/src/libc/string.c \
+	libultra/src/libc/xldtob.c \
+	libultra/src/libc/xlitob.c \
+	libultra/src/libc/xprintf.c \
+	libultra/src/os/createmesgqueue.c \
+	libultra/src/os/createthread.c \
+	libultra/src/os/destroythread.c \
+	libultra/src/os/getactivequeue.c \
+	libultra/src/os/getthreadpri.c \
+	libultra/src/os/gettime.c \
+	libultra/src/os/initialize.c \
+	libultra/src/os/jammesg.c \
+	libultra/src/os/recvmesg.c \
+	libultra/src/os/resetglobalintmask.c \
+	libultra/src/os/sendmesg.c \
+	libultra/src/os/seteventmesg.c \
+	libultra/src/os/sethwinterrupt.c \
+	libultra/src/os/setthreadpri.c \
+	libultra/src/os/settime.c \
+	libultra/src/os/settimer.c \
+	libultra/src/os/startthread.c \
+	libultra/src/os/stopthread.c \
+	libultra/src/os/thread.c \
+	libultra/src/os/timerintr.c \
+	libultra/src/os/virtualtophysical.c \
+	libultra/src/os/yieldthread.c \
+	libultra/src/sc/sched.c
+
+O_FILES := $(addprefix $(BUILD)/,$(SRC_FILES:.c=.o) $(LIBULTRA_FILES:.c=.o))
+D_FILES := $(O_FILES:.o=.d)
+
+TARGET := dkracing
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(O_FILES)
+	$(CC) -m$(BITS) $(O_FILES) -o $(TARGET) $(LIBS)
+
+$(BUILD)/linux/%.o: linux/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS_REIMPL) -c -o $@ $<
+
+$(BUILD)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -rf $(BUILD) $(TARGET)
+
+-include $(D_FILES)

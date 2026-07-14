@@ -145,7 +145,11 @@ void cam_init(void) {
     gAdjustViewportHeight = FALSE;
     gAntiPiracyViewport = FALSE;
 
+#ifndef TARGET_PC
+    // PI status poll before the raw cart read below — no PI hardware on PC
+    // (linux/reimpl.c's D_B0000578 already answers the read with the magic).
     WAIT_ON_IOBUSY(stat);
+#endif
 
     // 0xB0000578 is a direct read from the ROM as opposed to RAM
     if (((D_B0000578 & 0xFFFF) & 0xFFFF) != 0x8965) {
@@ -1112,7 +1116,9 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         tiltAngle = (tiltAngle * tanX) >> 8;
         frameID = (tanY >> 7) & 0xFF;
         if (frameID > 127) {
-            stubbed_printf("CamDo2DSprite FrameNo Overflow !!!\n");
+            // Fires for every back-facing billboard, every frame — pure noise
+            // now that stubbed_printf is real. The mirror below handles it.
+            // stubbed_printf("CamDo2DSprite FrameNo Overflow !!!\n");
             frameID = 255 - frameID;
             tiltAngle += 0x8000;
             result = FALSE;

@@ -34,6 +34,14 @@ Object_Racer *gSoundRacerObj;
  * Sets the initial pitch and volume values for the engine sound.
  */
 VehicleSoundData *racer_sound_init(s32 characterId, s32 vehicleId) {
+#ifdef TARGET_PC
+    // Audio is deferred on PC (see audio_init in audio.c). This function reads
+    // ASSET_AUDIO_TABLE, whose u32 offsets are big-endian and unswapped, so the
+    // asset_load below would fetch from a garbage ROM offset. Every consumer
+    // NULL-checks racer->vehicleSound, so returning NULL just leaves racers
+    // silent. Unstub when the audio milestone byteswaps the audio tables.
+    return NULL;
+#else
     s32 unused[2];
     s32 i;
     u8 *ptr;
@@ -135,6 +143,7 @@ VehicleSoundData *racer_sound_init(s32 characterId, s32 vehicleId) {
     mempool_free(asset);
 
     return soundData;
+#endif
 }
 
 /**

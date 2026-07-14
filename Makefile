@@ -59,13 +59,13 @@ BUILD_DIR = build
 SRC_DIR   = src
 LIBULTRA_DIR = libultra
 ASM_DIRS  = asm asm/data asm/assets asm/nonmatchings
-HASM_DIRS = $(SRC_DIR)/hasm $(SRC_DIR)/hasm/ido $(LIBULTRA_DIR)/src/os $(LIBULTRA_DIR)/src/gu $(LIBULTRA_DIR)/src/libc
+HASM_DIRS = $(SRC_DIR)/hasm $(LIBULTRA_DIR)/src/os $(LIBULTRA_DIR)/src/gu $(LIBULTRA_DIR)/src/libc
 LIBULTRA_SRC_DIRS  = $(LIBULTRA_DIR) $(LIBULTRA_DIR)/src $(LIBULTRA_DIR)/src/audio $(LIBULTRA_DIR)/src/audio/mips1
 LIBULTRA_SRC_DIRS += $(LIBULTRA_DIR)/src/debug $(LIBULTRA_DIR)/src/gu $(LIBULTRA_DIR)/src/io
 LIBULTRA_SRC_DIRS += $(LIBULTRA_DIR)/src/libc $(LIBULTRA_DIR)/src/os $(LIBULTRA_DIR)/src/sc
 
 
-SRC_DIRS = $(SRC_DIR) $(LIBULTRA_SRC_DIRS)
+SRC_DIRS = $(SRC_DIR) $(SRC_DIR)/hasm $(LIBULTRA_SRC_DIRS)
 SYMBOLS_DIR = ver/symbols
 
 TOOLS_DIR = tools
@@ -185,7 +185,7 @@ C_DEFINES += -DCIC_ID=$(BOOT_CIC)
 INCLUDE_CFLAGS  = -I . -I include -I include/libc  -I include/PR -I include/sys -I $(BIN_DIRS) -I $(SRC_DIR) -I $(LIBULTRA_DIR)
 INCLUDE_CFLAGS += -I $(LIBULTRA_DIR)/src/gu -I $(LIBULTRA_DIR)/src/libc -I $(LIBULTRA_DIR)/src/io  -I $(LIBULTRA_DIR)/src/sc
 INCLUDE_CFLAGS += -I $(LIBULTRA_DIR)/src/audio -I $(LIBULTRA_DIR)/src/os
-INCLUDE_CFLAGS += -I $(SRC_DIR)/hasm -I $(SRC_DIR)/hasm/ido
+INCLUDE_CFLAGS += -I $(SRC_DIR)/hasm
 
 ASFLAGS        = -march=vr4300 -32 -G0 -mabi=32 $(ASM_DEFINES) $(INCLUDE_CFLAGS)
 OBJCOPYFLAGS   = -O binary
@@ -206,14 +206,12 @@ CFLAGS += $(C_DEFINES)
 CFLAGS += $(INCLUDE_CFLAGS)
 
 CHECK_WARNINGS := -Wall -Wextra -Wno-unknown-pragmas -Wno-unused-parameter -Wno-switch -Werror-implicit-function-declaration
+# Unused-variable/value warnings are noise in a decomp (leftover temps are everywhere)
+CHECK_WARNINGS += -Wno-unused-variable -Wno-unused-value -Wno-unused-but-set-variable
 ifeq ($(DETECTED_OS), macos)
 	ifeq ($(NON_MATCHING),0)
-		CHECK_WARNINGS += -Wno-unused-value -Wno-deprecated-non-prototype -Wno-array-bounds -Wno-self-assign -Wno-uninitialized -Wno-unused-but-set-variable -Wno-unused-variable
+		CHECK_WARNINGS += -Wno-deprecated-non-prototype -Wno-array-bounds -Wno-self-assign -Wno-uninitialized
 		CHECK_WARNINGS += -Wno-pointer-to-int-cast -Wno-constant-conversion -Wno-int-to-pointer-cast
-	endif
-else
-	ifeq ($(NON_MATCHING),0)
-		CHECK_WARNINGS += -Wno-unused-variable -Wno-unused-value -Wno-unused-but-set-variable
 	endif
 endif
 CC_CHECK := $(GCC) -fsyntax-only -fno-builtin -funsigned-char $(C_STANDARD) -DAVOID_UB -DCC_CHECK -D_LANGUAGE_C -DNON_MATCHING -DNON_EQUIVALENT $(CHECK_WARNINGS) $(INCLUDE_CFLAGS) $(C_DEFINES) $(GCC_COLOR)
@@ -271,9 +269,6 @@ $(BUILD_DIR)/$(LIBULTRA_DIR)/%.s.o: MIPSISET := -mips2
 $(BUILD_DIR)/$(LIBULTRA_DIR)/src/libc/%.s.o: OPT_FLAGS := -O2
 $(BUILD_DIR)/$(LIBULTRA_DIR)/src/os/exceptasm.s.o: MIPSISET := -mips3 -32
 
-$(BUILD_DIR)/$(SRC_DIR)/hasm/ido/math_util.s.o: OPT_FLAGS := -O2
-$(BUILD_DIR)/$(SRC_DIR)/hasm/ido/math_util.s.o: MIPSISET := -mips3 -32
-
 # Allow dollar sign to be used in var names for this file alone
 # It allows us to return the current stack pointer
 $(BUILD_DIR)/$(SRC_DIR)/get_stack_pointer.c.o: OPT_FLAGS += -dollar
@@ -286,15 +281,12 @@ $(BUILD_DIR)/$(LIBULTRA_DIR)/%.c.o: CC_CHECK := :
 ### Targets
 
 ifeq ($(COMPILER),gcc)
-	DUMMY != $(PYTHON) $(TOOLS_DIR)/python/gcc_generate.py gcc_safe_files.mk
-	include gcc_safe_files.mk
-endif
-
-$(GCC_SAFE_FILES): CC := $(CROSS)gcc
-$(GCC_SAFE_FILES): CC_WARNINGS :=
-$(GCC_SAFE_FILES): MIPSISET := -mips3
-$(GCC_SAFE_FILES): OPT_FLAGS := -Os
-$(GCC_SAFE_FILES): CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS) $(C_DEFINES) \
+$(BUILD_DIR)/%.c.o: CC := $(CROSS)gcc
+$(BUILD_DIR)/%.c.o: CC_WARNINGS :=
+$(BUILD_DIR)/%.c.o: MIPSISET := -mips3
+$(BUILD_DIR)/%.c.o: OPT_FLAGS := -O1
+# Should be Os
+$(BUILD_DIR)/%.c.o: CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS) $(C_DEFINES) \
 	-EB \
 	-march=vr4300 \
 	-mabi=32 \
@@ -306,17 +298,16 @@ $(GCC_SAFE_FILES): CFLAGS := -DNDEBUG -DAVOID_UB -DNON_MATCHING $(INCLUDE_CFLAGS
 	-ffreestanding \
 	-fno-builtin \
 	-fno-common \
+	-fno-toplevel-reorder \
 	-mno-long-calls \
-	-ffast-math \
-	-funsafe-math-optimizations \
 	-fno-merge-constants \
 	-fno-strict-aliasing \
 	-fno-zero-initialized-in-bss \
-	-fsingle-precision-constant \
 	-funsigned-char \
 	-fwrapv \
 	-falign-functions=16 \
 	-G 0
+endif
 
 default: all
 
@@ -454,13 +445,6 @@ ifeq ($(COMPILER),ido)
 # libultra asm files - Compile with the ido compiler
 $(BUILD_DIR)/$(LIBULTRA_DIR)/%.s.o: $(LIBULTRA_DIR)/%.s | build_assets
 	$(call print,Assembling Libultra:,$<,$@)
-	$(V)$(CC) -c $(CFLAGS) $(CC_WARNINGS) $(OPT_FLAGS) $(MIPSISET) -o $@ $<
-	$(V)$(STRIP) --strip-unneeded $@
-	@if [ "$(MIPSISET)" = "-mips3 -32" ]; then \
-		$(PYTHON) $(TOOLS_DIR)/python/patchmips3.py $@ || rm $@; \
-	fi
-$(BUILD_DIR)/$(SRC_DIR)/hasm/ido/%.s.o: $(SRC_DIR)/hasm/ido/%.s | build_assets
-	$(call print,Assembling IDO:,$<,$@)
 	$(V)$(CC) -c $(CFLAGS) $(CC_WARNINGS) $(OPT_FLAGS) $(MIPSISET) -o $@ $<
 	$(V)$(STRIP) --strip-unneeded $@
 	@if [ "$(MIPSISET)" = "-mips3 -32" ]; then \

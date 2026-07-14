@@ -142,6 +142,30 @@ void load_fonts(void) {
 
     fontAssetData = asset_table_load(ASSET_FONTS);
 
+#ifdef TARGET_PC
+    {
+        // Font asset is big-endian: leading u32 count, then FontData entries
+        // (u16 metrics + s16 textureID[32]; everything else u8/char, and
+        // texturePointers are filled at runtime).
+        // Host struct layout must match the N64's (see docs/linux_port.md):
+        _Static_assert(sizeof(FontData) == 0x400, "FontData layout drifted from N64");
+        _Static_assert(__builtin_offsetof(FontData, x) == 0x20, "FontData layout drifted from N64");
+        _Static_assert(__builtin_offsetof(FontData, textureID) == 0x40, "FontData layout drifted from N64");
+        _Static_assert(__builtin_offsetof(FontData, letter) == 0x100, "FontData layout drifted from N64");
+        _Static_assert(sizeof(FontCharData) == 0x8, "FontCharData layout drifted from N64");
+        extern void pc_swap16_buf(void *buf, u32 numBytes);
+        extern void pc_swap32_buf(void *buf, u32 numBytes);
+        FontData *fonts;
+
+        pc_swap32_buf(fontAssetData, 4);
+        fonts = (FontData *) (fontAssetData + 1);
+        for (i = 0; i < (s32) *fontAssetData; i++) {
+            pc_swap16_buf(&fonts[i].x, 8); // x, y, charWidth, charHeight
+            pc_swap16_buf(fonts[i].textureID, sizeof(fonts[i].textureID));
+        }
+    }
+#endif
+
     gFonts = (FontData *) (fontAssetData); // ???
     gNumberOfFonts = *(fontAssetData);
     gFonts = (FontData *) (fontAssetData + 1);

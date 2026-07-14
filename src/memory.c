@@ -33,7 +33,17 @@ void mempool_init_main(void) {
     } else {
         ramEnd = RAM_END;
     }
+#ifdef TARGET_PC
+    {
+        // gMainMemoryPool is a static array (linux/reimpl.c), not "the rest
+        // of RAM" — the N64 ramEnd arithmetic is meaningless against a host
+        // address.
+        extern u32 gMainMemoryPoolSize;
+        mempool_init(&gMainMemoryPool, gMainMemoryPoolSize, MAIN_POOL_SLOT_COUNT);
+    }
+#else
     mempool_init(&gMainMemoryPool, ramEnd - (s32) (&gMainMemoryPool), MAIN_POOL_SLOT_COUNT);
+#endif
     mempool_free_timer(2);
     gFreeQueueCount = 0;
 }
@@ -280,7 +290,11 @@ void mempool_free_queue_clear(void) {
             gFreeQueue[i].freeTimer = gFreeQueue[gFreeQueueCount - 1].freeTimer;
             gFreeQueueCount--;
         } else {
-            stubbed_printf("\n*** mm Error *** ---> Can't free ram at this location: %x\n", gFreeQueue[i].dataAddress);
+            // Fires for every queued free whose timer hasn't expired yet (they
+            // free fine on a later pass) — pure noise now that stubbed_printf
+            // is real.
+            // stubbed_printf("\n*** mm Error *** ---> Can't free ram at this location: %x\n",
+            //                gFreeQueue[i].dataAddress);
             i++;
         }
     }
@@ -307,9 +321,24 @@ void mempool_free_addr(u8 *address) {
 
         if (address == (u8 *) slot->data) {
             if (slot->flags == SLOT_USED || slot->flags == SLOT_SAFEGUARD) {
+#ifdef TARGET_PC
+                {
+                    // The renderer caches decoded textures by the RAM address
+                    // they were loaded from, and this memory is about to be handed
+                    // to something else. Drop anything it decoded out of here
+                    // before the address is reused.
+                    //
+                    // It has to be the whole slot, not just its base: a texture's
+                    // pixels start at `tex + 1` (past the TextureHeader) and its
+                    // palette is at another offset again, so nothing the renderer
+                    // holds is ever keyed on the base address itself.
+                    extern void pc_gfx_invalidate_range(const void *addr, s32 size);
+                    pc_gfx_invalidate_range(address, slot->size);
+                }
+#endif
                 mempool_slot_clear(poolIndex, slotIndex);
             }
-            break;
+            return;
         }
         slot = &slots[slotIndex];
     }

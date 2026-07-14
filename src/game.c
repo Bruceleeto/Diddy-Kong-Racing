@@ -25,6 +25,40 @@
 #include "video.h"
 #include "weather.h"
 
+#ifdef TARGET_PC
+// Big-endian asset offset tables (helper in linux/reimpl.c).
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+extern void pc_swap16_buf(void *buf, u32 numBytes);
+
+// LevelHeader is a big-endian asset overlay. AILevelTable (0x20) is read as
+// inline s8 data by aitable_init, and 0x70 holds two u8s (the union's pointer
+// half is only ever indexed from 1, landing in unk74) — neither gets swapped.
+// unk74/unkA4/pulseLightData hold asset-index words converted after load.
+_Static_assert(sizeof(LevelHeader) == 0xC4, "LevelHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(LevelHeader, geometry) == 0x34, "LevelHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(LevelHeader, waveSineHeight1) == 0x5E, "LevelHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(LevelHeader, unk74) == 0x74, "LevelHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(LevelHeader, weatherEnable) == 0x90, "LevelHeader layout drifted from N64");
+_Static_assert(__builtin_offsetof(LevelHeader, unkBA) == 0xBA, "LevelHeader layout drifted from N64");
+
+static void pc_swap_level_header(LevelHeader *header) {
+    pc_swap32_buf(&header->course_height, 4);
+    pc_swap16_buf(&header->geometry, 16);         // geometry..fogB, 8 x s16
+    pc_swap16_buf(&header->instruments, 2);
+    pc_swap16_buf(&header->waveSineHeight0, 2);
+    pc_swap16_buf(&header->waveSineHeight1, 12);  // waveSineHeight1..waveTexID, 6 x s16
+    pc_swap16_buf(&header->waveViewDist, 2);
+    pc_swap32_buf(header->unk74, 0x1C);           // 7 misc-asset indices
+    pc_swap16_buf(&header->weatherEnable, 4);     // weatherEnable, weatherType
+    pc_swap16_buf(&header->weatherVelX, 6);       // weatherVelX/Y/Z
+    pc_swap32_buf(&header->unkA4, 4);             // texture id
+    pc_swap16_buf(&header->unkA8, 4);             // unkA8, unkAA
+    pc_swap32_buf(&header->pulseLightData, 4);    // misc-asset index
+    pc_swap16_buf(&header->unkB0, 2);
+    pc_swap16_buf(&header->unkBA, 2);
+}
+#endif
+
 /************ .data ************/
 
 char *gTempLevelNames = NULL;
@@ -72,6 +106,9 @@ void level_global_init(void) {
     s32 j;
     header = mempool_alloc_safe(sizeof(LevelHeader), COLOUR_TAG_YELLOW);
     gTempAssetTable = (s32 *) asset_table_load(ASSET_LEVEL_HEADERS_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_LEVEL_HEADERS_TABLE));
+#endif
     i = 0;
     while (i < 16) {
         gRaceTypeCountTable[i++] = 0;
@@ -86,6 +123,9 @@ void level_global_init(void) {
     gNumberOfWorlds = -1;
     for (i = 0; i < gNumberOfLevelHeaders; i++) {
         asset_load(ASSET_LEVEL_HEADERS, (u32) gCurrentLevelHeader, gTempAssetTable[i], sizeof(LevelHeader));
+#ifdef TARGET_PC
+        pc_swap_level_header(gCurrentLevelHeader);
+#endif
         if (gNumberOfWorlds < gCurrentLevelHeader->world) {
             gNumberOfWorlds = gCurrentLevelHeader->world;
         }
@@ -112,6 +152,9 @@ void level_global_init(void) {
     mempool_free(gTempAssetTable);
     mempool_free(header);
     gTempAssetTable = (s32 *) asset_table_load(ASSET_LEVEL_NAMES_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_LEVEL_NAMES_TABLE));
+#endif
     for (i = 0; gTempAssetTable[i] != (-1); i++) {}
     i--;
     size = gTempAssetTable[i] - gTempAssetTable[0];
@@ -376,6 +419,9 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
     }
     settings = get_settings();
     gTempAssetTable = (s32 *) asset_table_load(ASSET_LEVEL_HEADERS_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_LEVEL_HEADERS_TABLE));
+#endif
 
     for (i = 0; gTempAssetTable[i] != -1; i++) {}
     i--;
@@ -388,6 +434,9 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
     size = gTempAssetTable[levelId + 1] - offset;
     gCurrentLevelHeader = (LevelHeader *) mempool_alloc_safe(size, COLOUR_TAG_YELLOW);
     asset_load(ASSET_LEVEL_HEADERS, (u32) gCurrentLevelHeader, offset, size);
+#ifdef TARGET_PC
+    pc_swap_level_header(gCurrentLevelHeader);
+#endif
     D_800DD330 = 0;
     prevLevelID = levelId;
     if (gCurrentLevelHeader->race_type == RACETYPE_DEFAULT) {
@@ -455,6 +504,9 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         size = gTempAssetTable[levelId + 1] - offset;
         gCurrentLevelHeader = mempool_alloc_safe(size, COLOUR_TAG_YELLOW);
         asset_load(ASSET_LEVEL_HEADERS, (u32) gCurrentLevelHeader, offset, size);
+#ifdef TARGET_PC
+        pc_swap_level_header(gCurrentLevelHeader);
+#endif
     }
     mempool_free(gTempAssetTable);
     aitable_init((s8 *) &gCurrentLevelHeader->AILevelTable);
@@ -507,6 +559,7 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         vehicleId = gCurrentDefaultVehicle;
     }
     set_vehicle_id_for_menu(vehicleId);
+    stubbed_printf("post vehicle swap\n");
     if (gCurrentLevelHeader->race_type == RACETYPE_HUBWORLD) {
         if (settings->worldId - 1 >= 0) {
             var_s0 = 8 << (settings->worldId + 31);
@@ -552,8 +605,10 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         cutsceneId = CUTSCENE_ID_UNK_64;
     }
     cutscene_id_set(cutsceneId);
+    stubbed_printf("pre init_track\n");
     init_track(gCurrentLevelHeader->geometry, gCurrentLevelHeader->skybox, numberOfPlayers, vehicleId, entranceId,
                gCurrentLevelHeader->collectables, gCurrentLevelHeader->unkBA);
+    stubbed_printf("post init_track\n");
     if (gCurrentLevelHeader->fogNear == 0 && gCurrentLevelHeader->fogFar == 0 && gCurrentLevelHeader->fogR == 0 &&
         gCurrentLevelHeader->fogG == 0 && gCurrentLevelHeader->fogB == 0) {
         for (var_s0 = 0; var_s0 < 4; var_s0++) {
@@ -592,6 +647,7 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
                       gCurrentLevelHeader->bgColorBlue);
     video_delta_reset();
     func_8007AB24(gCurrentLevelHeader->unk4[numberOfPlayers]);
+    stubbed_printf("level_load body end\n");
 }
 
 /**
@@ -736,6 +792,9 @@ void aitable_init(s8 *aiLevelTable) {
         aiLevel = 5;
     }
     gTempAssetTable = (s32 *) asset_table_load(ASSET_AI_BEHAVIOUR_TABLE);
+#ifdef TARGET_PC
+    pc_swap32_buf(gTempAssetTable, asset_table_size(ASSET_AI_BEHAVIOUR_TABLE));
+#endif
     tableIndexCount = 0;
     while (-1 != (s32) gTempAssetTable[tableIndexCount]) {
         tableIndexCount++;
