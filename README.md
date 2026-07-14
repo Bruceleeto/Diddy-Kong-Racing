@@ -12,6 +12,8 @@ tldr
 
 Linux port:
 
+`make build_assets`
+
 `make -f Makefile.pc -j8`
 
 
