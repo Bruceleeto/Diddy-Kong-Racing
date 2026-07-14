@@ -1,6 +1,5 @@
 #include "objects.h"
 #include "memory.h"
-
 #include "asset_enums.h"
 #include "asset_loading.h"
 #include "audio_spatial.h"
@@ -9448,13 +9447,18 @@ s32 func_8001F460(Object *arg0, s32 arg1, Object *arg2) {
                 // clang-format on
             }
             if (obj64->unk3F == 0) {
-                arg0->trans.rotation.s[0] = catmull_rom_interpolation(spE0, var_s2, var_f20);
-                arg0->trans.rotation.s[1] = catmull_rom_interpolation(spCC, var_s2, var_f20);
-                arg0->trans.rotation.s[2] = catmull_rom_interpolation(spB8, var_s2, var_f20);
+                // The angle unwrap above pushes control points past the s16 range on
+                // purpose, so this store relies on the conversion wrapping mod 65536.
+                // f32->s16 out of range is UB: MIPS wraps (correct), but x87 fistps
+                // writes the indefinite 0x8000 — freezing the angle at 180 degrees.
+                // Go through s32, which wraps on both.
+                arg0->trans.rotation.s[0] = (s16) (s32) catmull_rom_interpolation(spE0, var_s2, var_f20);
+                arg0->trans.rotation.s[1] = (s16) (s32) catmull_rom_interpolation(spCC, var_s2, var_f20);
+                arg0->trans.rotation.s[2] = (s16) (s32) catmull_rom_interpolation(spB8, var_s2, var_f20);
             } else {
-                arg0->trans.rotation.s[0] = lerp(spE0, var_s2, var_f20);
-                arg0->trans.rotation.s[1] = lerp(spCC, var_s2, var_f20);
-                arg0->trans.rotation.s[2] = lerp(spB8, var_s2, var_f20);
+                arg0->trans.rotation.s[0] = (s16) (s32) lerp(spE0, var_s2, var_f20);
+                arg0->trans.rotation.s[1] = (s16) (s32) lerp(spCC, var_s2, var_f20);
+                arg0->trans.rotation.s[2] = (s16) (s32) lerp(spB8, var_s2, var_f20);
             }
             break;
     }
@@ -9903,13 +9907,15 @@ s32 func_80021600(s32 arg0) {
             }
 
             if (objAnim->unk3F == 0) {
-                sp154->trans.rotation.y_rotation = catmull_rom_interpolation(yRotations, 0, spEC);
-                sp154->trans.rotation.x_rotation = catmull_rom_interpolation(xRotations, 0, spEC);
-                sp154->trans.rotation.z_rotation = catmull_rom_interpolation(zRotations, 0, spEC);
+                // Same wrap-dependent store as in func_8001F460: go through s32 so the
+                // out-of-range angles from the unwrap wrap mod 65536 on x86 too.
+                sp154->trans.rotation.y_rotation = (s16) (s32) catmull_rom_interpolation(yRotations, 0, spEC);
+                sp154->trans.rotation.x_rotation = (s16) (s32) catmull_rom_interpolation(xRotations, 0, spEC);
+                sp154->trans.rotation.z_rotation = (s16) (s32) catmull_rom_interpolation(zRotations, 0, spEC);
             } else {
-                sp154->trans.rotation.y_rotation = lerp(yRotations, 0, spEC);
-                sp154->trans.rotation.x_rotation = lerp(xRotations, 0, spEC);
-                sp154->trans.rotation.z_rotation = lerp(zRotations, 0, spEC);
+                sp154->trans.rotation.y_rotation = (s16) (s32) lerp(yRotations, 0, spEC);
+                sp154->trans.rotation.x_rotation = (s16) (s32) lerp(xRotations, 0, spEC);
+                sp154->trans.rotation.z_rotation = (s16) (s32) lerp(zRotations, 0, spEC);
             }
             break;
     }
