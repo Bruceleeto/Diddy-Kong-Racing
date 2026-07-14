@@ -207,7 +207,7 @@ u32 osAiGetLength(void) {
 // depth and stop. This is self-correcting and completely independent of host fps,
 // which is also what the Dreamcast port will want when this moves onto a
 // vblank-driven audio thread.
-#define PC_AUDIO_TARGET_FRAMES 2 // ~66ms of buffered audio
+#define PC_AUDIO_TARGET_FRAMES 3 // ~100ms of buffered audio
 #define PC_AUDIO_MAX_TICKS 4     // don't spin forever if something goes wrong
 
 void pc_audio_frame(void) {

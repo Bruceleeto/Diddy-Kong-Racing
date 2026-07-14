@@ -484,11 +484,7 @@ void sound_update_queue(u8 updateRate) {
     s32 i;
     s32 j;
 
-#ifdef TARGET_PC
-    // Audio subsystem is not initialized on PC (see audio_init) — the whole
-    // per-frame music/sfx pump would deref NULL players.
-    return;
-#endif
+    MUSIC_PC_GUARD();
     if (sMusicDelayLength > 0) {
         sMusicDelayTimer += updateRate;
         sMusicFadeVolume = ((f32) sMusicDelayTimer) / ((f32) sMusicDelayLength);

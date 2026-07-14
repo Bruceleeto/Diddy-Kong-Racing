@@ -367,6 +367,15 @@ static void op_adpcm(u32 w0, u32 w1) {
         memcpy(hist, state, sizeof(hist));
     }
 
+    // ABI contract (see alAdpcmPull): the OUTPUT buffer starts with the 16
+    // history samples, and decoded frames follow them. The SDK's delivered
+    // pointer is `outp + lastsam*2` (mid-frame: the leftover samples are
+    // re-delivered out of this block) or `outp + 32` (frame-aligned) — it is
+    // NEVER just `outp`. Omitting this block shears every voice's output by
+    // 16..32 bytes every frame, which is audible as constant broadband hash.
+    memcpy(dst, hist, sizeof(hist));
+    dst += 16;
+
     // The two most recently decoded samples carry the prediction across frames (and
     // across command lists, via `state`).
     {
@@ -414,9 +423,14 @@ static void op_adpcm(u32 w0, u32 w1) {
                 l1 = frame[half * 8 + 7];
             }
 
-            for (i = 0; i < 16 && produced < outSamples; i++, produced++) {
-                dst[produced] = frame[i];
+            // Whole frames, always — the emitter places buffers on 32-byte frame
+            // boundaries ((nframes+1)<<5 in alAdpcmPull) and consumes partial
+            // frames via the history block above, so writing past outSamples up
+            // to the frame edge is expected, not an overrun.
+            for (i = 0; i < 16; i++) {
+                dst[produced + i] = frame[i];
             }
+            produced += 16;
             memcpy(hist, frame, sizeof(hist));
         }
     }
@@ -428,7 +442,18 @@ static void op_adpcm(u32 w0, u32 w1) {
 // A_ENVMIXER — the volume/pan/envelope stage, and the only opcode with four
 // outputs: dry L/R (the main bus) and wet L/R (the reverb bus).
 //
-// State (40 s16, ours): [0..1] the two 16.16 volume accumulators.
+// State (40 bytes in RDRAM, layout ours): the ENTIRE parameter set, not just the
+// volume accumulators. alEnvmixerPull only emits the aSetVolume latches on a
+// voice's A_INIT frame (or after a param event resets e->first); every steady
+// frame is a bare aEnvMixer(A_CONTINUE) that expects targets, rates and dry/wet
+// to come back out of this state block. Reading the global latches on CONTINUE
+// instead means "whatever voice's SETVOLs ran last" — cross-voice envelope, pan
+// and reverb-send contamination on every continuing voice.
+//
+//   [0..1] volAccu L (16.16)   [2..3] volAccu R
+//   [4]    target L            [5]    target R
+//   [6..7] rate L (16.16)      [8..9] rate R
+//   [10]   dry                 [11]   wet
 // ---------------------------------------------------------------------------
 static void op_envmixer(u32 w0, u32 w1) {
     u8 flags = (w0 >> 16) & 0xFF;
@@ -440,14 +465,27 @@ static void op_envmixer(u32 w0, u32 w1) {
     s16 *wetR = dmem16(sWetRight);
     s32 n = sCount >> 1;
     s32 volAccu[2];
+    s32 target[2], rate[2], dry, wet;
     s32 k;
 
     if (flags & A_INIT) {
         volAccu[0] = (s32) sVol[0] << 16;
         volAccu[1] = (s32) sVol[1] << 16;
+        target[0] = sTarget[0];
+        target[1] = sTarget[1];
+        rate[0] = sRate[0];
+        rate[1] = sRate[1];
+        dry = sDry;
+        wet = sWet;
     } else {
         volAccu[0] = ((s32) (u16) state[0] << 16) | (u16) state[1];
         volAccu[1] = ((s32) (u16) state[2] << 16) | (u16) state[3];
+        target[0] = state[4];
+        target[1] = state[5];
+        rate[0] = (s32) (((u32) (u16) state[6] << 16) | (u16) state[7]);
+        rate[1] = (s32) (((u32) (u16) state[8] << 16) | (u16) state[9]);
+        dry = state[10];
+        wet = state[11];
     }
 
     for (k = 0; k < n; k++) {
@@ -457,11 +495,11 @@ static void op_envmixer(u32 w0, u32 w1) {
         s32 l = (s * vl) >> 15;
         s32 r = (s * vr) >> 15;
 
-        dryL[k] = clamp16(dryL[k] + ((l * sDry) >> 15));
-        dryR[k] = clamp16(dryR[k] + ((r * sDry) >> 15));
+        dryL[k] = clamp16(dryL[k] + ((l * dry) >> 15));
+        dryR[k] = clamp16(dryR[k] + ((r * dry) >> 15));
         if (flags & A_AUX) {
-            wetL[k] = clamp16(wetL[k] + ((l * sWet) >> 15));
-            wetR[k] = clamp16(wetR[k] + ((r * sWet) >> 15));
+            wetL[k] = clamp16(wetL[k] + ((l * wet) >> 15));
+            wetR[k] = clamp16(wetR[k] + ((r * wet) >> 15));
         }
 
         // Ramp toward the target — ONCE EVERY 8 SAMPLES, not every sample.
@@ -476,12 +514,12 @@ static void op_envmixer(u32 w0, u32 w1) {
             s32 i;
 
             for (i = 0; i < 2; i++) {
-                if (sRate[i] == 0) {
+                if (rate[i] == 0) {
                     continue; // steady volume: hold it, don't snap to the target
                 }
-                volAccu[i] += sRate[i];
-                if (sRate[i] > 0 ? (volAccu[i] >> 16) > sTarget[i] : (volAccu[i] >> 16) < sTarget[i]) {
-                    volAccu[i] = (s32) sTarget[i] << 16;
+                volAccu[i] += rate[i];
+                if (rate[i] > 0 ? (volAccu[i] >> 16) > target[i] : (volAccu[i] >> 16) < target[i]) {
+                    volAccu[i] = target[i] << 16;
                 }
             }
         }
@@ -491,39 +529,49 @@ static void op_envmixer(u32 w0, u32 w1) {
     state[1] = (s16) (u16) (volAccu[0] & 0xFFFF);
     state[2] = (s16) (u16) (volAccu[1] >> 16);
     state[3] = (s16) (u16) (volAccu[1] & 0xFFFF);
+    state[4] = (s16) target[0];
+    state[5] = (s16) target[1];
+    state[6] = (s16) (u16) ((u32) rate[0] >> 16);
+    state[7] = (s16) (u16) ((u32) rate[0] & 0xFFFF);
+    state[8] = (s16) (u16) ((u32) rate[1] >> 16);
+    state[9] = (s16) (u16) ((u32) rate[1] & 0xFFFF);
+    state[10] = (s16) dry;
+    state[11] = (s16) wet;
 }
 
-// A_POLEF — the reverb bus's one-pole lowpass. Coefficients come from the table
-// loaded by the LOADADPCM immediately before it (alFilterNew: aLoadADPCM(32, ...)).
+// A_POLEF — the reverb bus's lowpass. Coefficients come from the table loaded by
+// the LOADADPCM immediately before it (_filterBuffer: aLoadADPCM(32, fccoef)).
+//
+// The coefficient vector _init_lpfilter builds is fccoef[0..7] = 0, fccoef[8] = fc
+// and fccoef[9..15] = fc², fc³, … — the powers exist so the ucode can run its
+// 8-samples-at-a-time ADPCM predictor over the block, but the filter they encode
+// is exactly the one-pole recursion y[n] = gain·x[n] + fc·y[n-1]. Implement that
+// directly. Everything is Q14 (SCALE = 16384 in drvrnew.c; fgain = SCALE - fc, so
+// DC gain is unity).
 static void op_polef(u32 w0, u32 w1) {
     u8 flags = (w0 >> 16) & 0xFF;
     s16 gain = (s16) (w0 & 0xFFFF);
     s16 *state = rdram(w1);
     s16 *src = dmem16(sIn);
     s16 *dst = dmem16(sOut);
+    s32 fc = sTable[8];
     s32 n = sCount >> 1;
-    s32 y1, y2;
+    s32 y1;
     s32 k;
 
     if (flags & A_INIT) {
         y1 = 0;
-        y2 = 0;
     } else {
         y1 = state[0];
-        y2 = state[1];
     }
 
     for (k = 0; k < n; k++) {
-        s32 acc = ((s32) src[k] * (s32) gain) >> 14;
-
-        acc += ((s32) sTable[0] * y1 + (s32) sTable[8] * y2) >> 14;
-        y2 = y1;
-        y1 = clamp16(acc);
+        y1 = clamp16(((s32) src[k] * (s32) gain + fc * y1) >> 14);
         dst[k] = (s16) y1;
     }
 
     state[0] = (s16) y1;
-    state[1] = (s16) y2;
+    state[1] = 0;
 }
 
 // ---------------------------------------------------------------------------
