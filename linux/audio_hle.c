@@ -502,22 +502,25 @@ static void op_envmixer(u32 w0, u32 w1) {
             wetR[k] = clamp16(wetR[k] + ((r * wet) >> 15));
         }
 
-        // Ramp toward the target — ONCE EVERY 8 SAMPLES, not every sample.
+        // Ramp toward the target, PER SAMPLE, at rate/8.
         //
-        // The rate is a signed 16.16 step per 8-sample group, not per sample. See
-        // _getRate() in env.c: it computes (tgt - vol) / count and then multiplies
-        // by 8, and _getVol() reads it back as `ivol += r * samples / 8`. Stepping
-        // it every sample ramps every envelope 8x too fast: attacks snap, and
-        // decays/releases hit their target (usually zero) in an eighth of the time,
-        // so notes cut out early and the volume steps hard enough to crackle.
-        if ((k & 7) == 7) {
+        // The rate is a signed 16.16 step per 8-SAMPLE GROUP (see _getRate() in
+        // env.c: (tgt - vol) / count, times 8; _getVol() mirrors it as
+        // `ivol += r * samples / 8`). Two wrong ways to apply it, both audible:
+        // stepping the full rate every sample ramps 8x too fast (notes cut out
+        // early), and stepping it once per group turns every fast attack/release
+        // into a 2.75kHz staircase — a click every 8 samples, which en masse
+        // sounds like static. The ucode interpolates inside the group (sm64-port's
+        // envmixer computes all 8 per-sample volumes); rate>>3 per sample is the
+        // same slope, smooth, and clamped at the target either way.
+        {
             s32 i;
 
             for (i = 0; i < 2; i++) {
                 if (rate[i] == 0) {
                     continue; // steady volume: hold it, don't snap to the target
                 }
-                volAccu[i] += rate[i];
+                volAccu[i] += rate[i] >> 3;
                 if (rate[i] > 0 ? (volAccu[i] >> 16) > target[i] : (volAccu[i] >> 16) < target[i]) {
                     volAccu[i] = target[i] << 16;
                 }
