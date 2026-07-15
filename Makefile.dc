@@ -1,31 +1,34 @@
-# Makefile.pc — native Linux build of the DKR game code (the port).
+# Makefile.dc — Sega Dreamcast build of the DKR game code, via KallistiOS.
 #
 # Usage:
-#   make -f Makefile.pc -j8            # build ./dkracing
-#   make -f Makefile.pc clean
+#   source /opt/toolchains/dc/kos/environ.sh   # sets KOS_BASE, kos-cc, etc.
+#   make -f Makefile.dc -j8                     # build ./dkracing.elf
+#   make -f Makefile.dc clean
 #
 # Notes:
-# - BITS=32 by default: the decomp assumes 4-byte pointers everywhere (structs
-#   overlaying ROM data, pointers stashed in u32). 64-bit comes later, on purpose.
-# - libultra C files ARE built (only the hand-written .s files — CP0/cache/
-#   exception/boot — get replaced by host shims). Files that poke MMIO registers
-#   (io/, timers) will need #ifdef TARGET_PC surgery or shim replacements, but
-#   they start out in the build so the worklist is visible as compile errors.
-# - src/hasm/softfloat_conv.c and llmuldiv_gcc.s excluded: host libgcc provides those.
-# - libultra/src/gu/{sinf,cosf}.c excluded: they build their polynomial constants as
-#   big-endian {hi,lo} word pairs of a double (the du union in guint.h), so on a
-#   little-endian host every coefficient is byte-swapped garbage. They are #pragma weak,
-#   so leaving them out hands sinf/cosf to the host libm (-lm). The OoT DC port omits
-#   them the same way. Symptom when they were in: guPerspectiveF's cot went NaN, which
-#   NaN'd columns 0 and 1 of every MVP.
-# - -DTARGET_PC replaces -DTARGET_N64; use it to #ifdef the platform split.
+# - Built with kos-cc (KOS's sh-elf-gcc wrapper). The SH4 runs little-endian,
+#   the same byte order as the PC port, so every endianness fix the Linux build
+#   needed applies here unchanged. Pointers are 4 bytes (the decomp's BITS=32
+#   assumption holds), so no -m width flag is needed.
+# - This shares ALL the game code and the libultra C sources with Makefile.pc.
+#   The only platform-specific dir is dreamcast/ (a copy of linux/). Unlike the
+#   Linux port, the DC build does NOT use SDL or OpenGL: dreamcast/{gfx,audio,
+#   input}.c get rewritten against KOS's PVR / AICA / maple APIs. Until those are
+#   ported they will not compile — that's the visible worklist.
+# - Defines: -DTARGET_PC is kept so every existing non-N64 code path (the port's
+#   reimpl, byteswaps, host shims) compiles as-is; -DTARGET_DC is added on top so
+#   DC-specific branches can be split out from the generic PC path.
+# - libultra/src/gu/{sinf,cosf}.c are omitted the same way the PC build omits
+#   them (byte-swapped polynomial constants); KOS's libm provides sinf/cosf.
 
-CC      := gcc
-BITS    ?= 32
-BUILD   := build/pc
+include $(KOS_BASE)/Makefile.rules
+
+CC      := kos-cc
+BUILD   := build/dc
 
 DEFINES := \
 	-DTARGET_PC \
+	-DTARGET_DC \
 	-D_LANGUAGE_C \
 	-D_FINALROM \
 	-DNDEBUG \
@@ -37,9 +40,9 @@ DEFINES := \
 	-DBUILD_VERSION_STRING=\"2.0G\" \
 	-D_MIPS_SZLONG=32
 
-# linux/ (platform code) compiles WITHOUT -I include/libc: those headers are N64
-# stubs that shadow the real system libc (their stdio.h only declares sprintf).
-# Game code keeps the shadow; platform code gets the host's actual headers.
+# dreamcast/ (platform code) compiles WITHOUT -I include/libc: those headers are
+# N64 stubs that shadow the real system libc (their stdio.h only declares
+# sprintf). Game code keeps the shadow; platform code gets KOS's actual headers.
 INCLUDES_REIMPL := \
 	-I . \
 	-I include \
@@ -60,39 +63,7 @@ INCLUDES := -I include/libc $(INCLUDES_REIMPL)
 
 OPT      ?= -Os
 
-# SANITIZE=1 builds with AddressSanitizer + UBSan. This is the port's single
-# best debugging tool: the decomp is full of out-of-bounds writes that retail's
-# exact stack/data layout absorbed harmlessly (see the three failure classes in
-# docs/linux_port.md), and on N64 each one cost a multi-day bisect to find. ASan
-# reports them with a file and a line, the first time they happen.
-#
-#   make -f Makefile.pc SANITIZE=1 -j8   # then just run ./dkracing
-#
-# Build it into its own object dir so a sanitized build doesn't get mixed with a
-# normal one. -fno-omit-frame-pointer keeps the reported stack traces readable;
-# -fno-common and -g are already on.
-#
-# float-cast-overflow / float-divide-by-zero are added explicitly because GCC's
-# -fsanitize=undefined umbrella does NOT include them. float-cast-overflow is the
-# one that catches the port's f32->s16 out-of-range class (the x87 fistps 0x8000
-# bug, docs/bug.md): it fires with file:line the moment a float is cast to an
-# integer type it doesn't fit in. (alignment IS in undefined already, which is
-# what reports the LevelObjectEntry misaligned reads.)
-#
-# NOTE: ASan cannot see writes that land *inside* gMainMemoryPool — the game
-# sub-allocates within one big malloc, so ASan treats the whole pool as valid.
-# It only catches stack/global OOB and UAF. Intra-pool corruption and every
-# endianness/byteswap bug are invisible to it; those still need the runtime
-# probes / N64 diff. See docs/music_fudged.md.
-SANITIZE ?= 0
-ifeq ($(SANITIZE),1)
-BUILD    := build/pc-asan
-SAN_FLAGS := -fsanitize=address,undefined,float-cast-overflow,float-divide-by-zero -fno-omit-frame-pointer
-else
-SAN_FLAGS :=
-endif
-
-BASE_CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) $(SAN_FLAGS) \
+BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-std=gnu23 \
 	-fno-builtin \
 	-fno-common \
@@ -103,18 +74,17 @@ BASE_CFLAGS := -m$(BITS) $(OPT) -g $(DEFINES) $(SAN_FLAGS) \
 CFLAGS        := $(BASE_CFLAGS) $(INCLUDES)
 CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 
-# The renderer (linux/main.c) is SDL2 + OpenGL. On the default 32-bit build this
-# needs the i386 SDL2/GL runtime, not the host's 64-bit one.
-LIBS := -lm -lSDL2 -lGL $(SAN_FLAGS)
+# KOS pulls in its own libm/newlib via kos-cc; no SDL/GL on Dreamcast.
+LIBS := -lm
 
 # Every game-code source file, individually.
 SRC_FILES := \
-	linux/main.c \
-	linux/audio.c \
-	linux/audio_hle.c \
-	linux/gfx.c \
-	linux/input.c \
-	linux/reimpl.c \
+	dreamcast/main.c \
+	dreamcast/audio.c \
+	dreamcast/audio_hle.c \
+	dreamcast/gfx.c \
+	dreamcast/input.c \
+	dreamcast/reimpl.c \
 	src/asset_loading.c \
 	src/audio.c \
 	src/audiomgr.c \
@@ -169,8 +139,8 @@ SRC_FILES := \
 # libultra C sources, individually. The .s files (exceptasm, cache/CP0 ops,
 # bcopy/bzero/bcmp, sqrtf, libm_vals) are NOT here — those become host shims.
 # io/ai*.c are also NOT here: osAiSetFrequency/osAiSetNextBuffer/osAiGetLength are
-# nothing but MMIO register pokes, and linux/audio.c reimplements the three the
-# game calls on top of an SDL ring buffer.
+# nothing but MMIO register pokes, and dreamcast/audio.c reimplements the three
+# the game calls on top of the AICA ring buffer.
 LIBULTRA_FILES := \
 	libultra/src/audio/bnkf.c \
 	libultra/src/audio/cents2ratio.c \
@@ -299,16 +269,16 @@ LIBULTRA_FILES := \
 O_FILES := $(addprefix $(BUILD)/,$(SRC_FILES:.c=.o) $(LIBULTRA_FILES:.c=.o))
 D_FILES := $(O_FILES:.o=.d)
 
-TARGET := dkracing
+TARGET := dkracing.elf
 
 .PHONY: all clean
 
 all: $(TARGET)
 
 $(TARGET): $(O_FILES)
-	$(CC) -m$(BITS) $(O_FILES) -o $(TARGET) $(LIBS)
+	$(CC) $(O_FILES) -o $(TARGET) $(LIBS)
 
-$(BUILD)/linux/%.o: linux/%.c
+$(BUILD)/dreamcast/%.o: dreamcast/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS_REIMPL) -c -o $@ $<
 
