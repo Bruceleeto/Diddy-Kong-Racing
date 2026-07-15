@@ -6182,7 +6182,9 @@ void func_80018CE0(Object *racerObj, f32 xPos, f32 yPos, f32 zPos, s32 updateRat
                                     }
                                     break;
                                 default:
+#ifndef TARGET_PC
                                     stubbed_printf("ERROR Channel %d\n", i);
+#endif
                                     break;
                             }
                         }
