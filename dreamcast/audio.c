@@ -1,25 +1,27 @@
-// Host audio backend for the PC build.
+// Dreamcast audio backend — silent, but correctly paced.
 //
 // This is the ONLY platform-specific audio file. Everything above it — the
-// libultra ALSynth sequencer/synthesizer, the audio manager, the (M3) command-list
-// interpreter — is portable C. The Dreamcast port replaces this file with a KOS
-// snd_stream backend and changes nothing else. Keep it that way: no game logic
-// here, no mixing here.
+// libultra ALSynth sequencer/synthesizer, the audio manager, the (M3)
+// command-list interpreter (pc_audio_submit in src/audiomgr.c) — is portable C.
 //
-// Two jobs:
+// There is no SDL and no DAC output here yet: pc_audio_submit already zeroes the
+// synth output buffer, so nothing this file does would be audible anyway. What
+// this file MUST still do is keep the audio manager's frame-size feedback loop
+// alive and stable, because the game ticks the whole audio subsystem through it:
 //
-//   1. The AI (Audio Interface) shims. On N64 these poke MMIO registers; the three
-//      the game actually uses become a ring buffer here. osAiGetLength() is NOT a
-//      throwaway stub — __amHandleFrameMsg recomputes how many samples to
-//      synthesize each frame from it, so it has to honestly report how much audio
-//      is still queued or the frame-size feedback loop goes unstable.
+//   1. The AI (Audio Interface) shims. On N64 these poke MMIO registers. Here
+//      they model a virtual output queue by byte count only — the PCM itself is
+//      discarded. osAiGetLength() is NOT a throwaway stub: __amHandleFrameMsg
+//      recomputes how many samples to synthesize each frame from it, and if it
+//      lies the frame-size loop goes unstable (see the saturation note below).
 //
-//   2. The frame pump. There is no audio thread and no scheduler on PC (see
-//      linux/reimpl.c), so the audio manager is ticked once per video frame from
-//      the main loop instead — same shape as the gfx-task and thread-30 shims in
-//      rcp_dkr.c and thread30_bgload.c.
+//   2. The frame pump. No audio thread, no scheduler (see dreamcast/reimpl.c),
+//      so the audio manager is ticked once per video frame from the main loop.
+//
+// When real AICA/snd_stream output is wired up, only this file changes: feed the
+// PCM handed to osAiSetNextBuffer into a KOS snd_stream callback and let the
+// stream's real drain replace the synthetic one in pc_audio_frame().
 
-#include <SDL2/SDL.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -36,205 +38,97 @@ extern void am_audio_frame_pc(void);
 // the audio thread ticks once per game frame (two video fields), not per field.
 extern unsigned int frameSize;
 
-#define PC_AUDIO_RATE 22050
-#define PC_AUDIO_CHANNELS 2
-#define PC_AUDIO_BYTES_PER_SAMPLE 4 // stereo s16
+#define DC_AUDIO_RATE 22050
+#define DC_AUDIO_BYTES_PER_SAMPLE 4 // stereo s16
 
-// Ring capacity. Generous: the game submits one video frame of audio at a time
-// (~735 stereo samples, ~2.9KB) and we want slack for scheduling jitter without
-// letting latency grow unbounded.
-#define PC_RING_BYTES (64 * 1024)
-
-static SDL_AudioDeviceID sAudioDev;
-static u8 sRing[PC_RING_BYTES];
-static u32 sRingRead;
-static u32 sRingWrite;
-static u32 sRingUsed; // bytes queued and not yet played
-static s32 sAudioReady;
-static u32 sUnderruns;
-
-// SDL pulls from the ring on its own thread; every touch of the ring state is
-// under SDL_LockAudioDevice (the producer) or inside this callback (the consumer).
-static void pc_audio_callback(void *unused, u8 *stream, int len) {
-    u32 n = (u32) len;
-
-    if (n > sRingUsed) {
-        // Underrun: hand SDL what we have and pad the rest with silence. Do not
-        // stall — the game's frame loop is what refills us, and blocking here
-        // would deadlock against it.
-        u32 have = sRingUsed;
-        u32 i;
-
-        for (i = 0; i < have; i++) {
-            stream[i] = sRing[sRingRead];
-            sRingRead = (sRingRead + 1) % PC_RING_BYTES;
-        }
-        memset(stream + have, 0, n - have);
-        sRingUsed = 0;
-        sUnderruns++;
-        return;
-    }
-
-    {
-        u32 i;
-
-        for (i = 0; i < n; i++) {
-            stream[i] = sRing[sRingRead];
-            sRingRead = (sRingRead + 1) % PC_RING_BYTES;
-        }
-        sRingUsed -= n;
-    }
-}
+// Everything below runs on the main thread only (no audio callback thread), so
+// no locking is needed. sQueued is a pure byte count standing in for the depth
+// of the output DAC; the audio samples themselves are thrown away.
+static u32 sQueued; // bytes "submitted to the DAC" and not yet drained
+static s32 sReady;
 
 // ---------------------------------------------------------------------------
 // AI shims (replacing libultra/src/io/ai.c, aigetlen.c, aisetfreq.c,
-// aisetnextbuf.c — all dropped from the PC build, they only poke MMIO)
+// aisetnextbuf.c — all dropped from the build, they only poke MMIO)
 // ---------------------------------------------------------------------------
 
-// Called once from amCreateAudioMgr with OUTPUT_RATE. Returns the rate actually
-// achieved; the manager derives its whole frame-size schedule from the value we
-// return here, so it must be the truth.
+// Called once from amCreateAudioMgr with OUTPUT_RATE. The manager derives its
+// whole frame-size schedule from the value we return, so it must be the rate we
+// actually pace against.
 s32 osAiSetFrequency(u32 frequency) {
-    SDL_AudioSpec want, got;
-
-    if (sAudioReady) {
-        return (s32) PC_AUDIO_RATE;
-    }
-
-    if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
-        fprintf(stderr, "AUDIO: SDL_InitSubSystem failed: %s — running silent\n", SDL_GetError());
-        return (s32) frequency;
-    }
-
-    memset(&want, 0, sizeof(want));
-    want.freq = (int) frequency;
-    want.format = AUDIO_S16SYS;
-    want.channels = PC_AUDIO_CHANNELS;
-    want.samples = 512;
-    want.callback = pc_audio_callback;
-
-    sAudioDev = SDL_OpenAudioDevice(NULL, 0, &want, &got, 0);
-    if (sAudioDev == 0) {
-        fprintf(stderr, "AUDIO: SDL_OpenAudioDevice failed: %s — running silent\n", SDL_GetError());
-        return (s32) frequency;
-    }
-
-    sAudioReady = 1;
-    SDL_PauseAudioDevice(sAudioDev, 0);
-    printf("AUDIO: %d Hz, %d ch, %d-sample buffer\n", got.freq, got.channels, got.samples);
-    return got.freq;
+    (void) frequency;
+    sReady = 1;
+    return (s32) DC_AUDIO_RATE;
 }
 
-// The game hands us the PCM the mixer produced for the *previous* frame.
+// The game hands us the PCM the mixer produced for the previous frame. Silent
+// build: account the byte count so osAiGetLength/pacing stay honest, drop the data.
 void osAiSetNextBuffer(void *buf, u32 size) {
-    const u8 *src = buf;
-    u32 i;
-
-    if (!sAudioReady || buf == NULL || size == 0) {
+    (void) buf;
+    if (!sReady || size == 0) {
         return;
     }
-
-    SDL_LockAudioDevice(sAudioDev);
-    if (sRingUsed + size > PC_RING_BYTES) {
-        // Overrun: the game is producing faster than the DAC drains. Dropping the
-        // newest buffer keeps latency bounded. If this fires steadily, the
-        // frame-size feedback via osAiGetLength() is wrong.
-        SDL_UnlockAudioDevice(sAudioDev);
-        return;
-    }
-    for (i = 0; i < size; i++) {
-        sRing[sRingWrite] = src[i];
-        sRingWrite = (sRingWrite + 1) % PC_RING_BYTES;
-    }
-    sRingUsed += size;
-    SDL_UnlockAudioDevice(sAudioDev);
+    sQueued += size;
 }
 
-// True ring occupancy — what the pump below paces against.
-static u32 pc_audio_queued(void) {
-    u32 used;
-
-    if (!sAudioReady) {
-        return 0;
-    }
-    SDL_LockAudioDevice(sAudioDev);
-    used = sRingUsed;
-    SDL_UnlockAudioDevice(sAudioDev);
-    return used;
-}
-
-// Bytes still to play. This is the feedback signal __amHandleFrameMsg uses to size
-// the next chunk:
+// Bytes still to play. This is the feedback signal __amHandleFrameMsg uses:
 //
 //     frameSamples = (16 + (frameSize - osAiGetLength()/4 + 96)) & ~0xf
 //
 // On N64 the AI holds at most two buffers — one playing, one pending — and
-// osAiGetLength() returns what is left of the *playing* one, so it is never more
-// than a single frame. Our ring is much deeper than that, and reporting the whole
-// backlog makes (frameSize - samplesLeft) go NEGATIVE. The game's clamp below it
-// tests `(u32) info->frameSamples < minFrameSize`, so a negative value casts to a
-// huge unsigned, sails straight through the clamp, and osAiSetNextBuffer gets a
-// ~4GB length. (Observed: frameSamples = -208, then a 16MB overread of the memory
-// pool.)
-//
-// So: saturate at one frame, exactly like the hardware. The formula then always
-// lands in [112, 848] and the clamp does its job. Total latency is governed by the
-// pump's target below, not by this value.
+// osAiGetLength() returns what is left of the playing one, never more than a
+// single frame. Reporting the whole backlog instead makes (frameSize - samplesLeft)
+// go NEGATIVE; the clamp tests `(u32) info->frameSamples < minFrameSize`, so a
+// negative value casts to a huge unsigned, sails through the clamp, and
+// osAiSetNextBuffer gets a ~4GB length. So: saturate at one frame, exactly like
+// the hardware, and the formula always lands in [112, 848].
 u32 osAiGetLength(void) {
-    u32 used = pc_audio_queued();
     u32 oneFrame;
 
     if (frameSize == 0) {
-        return used; // before amCreateAudioMgr has run
+        return sQueued; // before amCreateAudioMgr has run
     }
-    oneFrame = frameSize * PC_AUDIO_BYTES_PER_SAMPLE;
-    return (used > oneFrame) ? oneFrame : used;
+    oneFrame = frameSize * DC_AUDIO_BYTES_PER_SAMPLE;
+    return (sQueued > oneFrame) ? oneFrame : sQueued;
 }
 
 // ---------------------------------------------------------------------------
 // Frame pump
 // ---------------------------------------------------------------------------
 
-// Called once per video frame from linux/main.c, standing in for the audio
-// thread's OS_SC_RETRACE_MSG wakeup — but NOT one tick per call.
+// Called once per video frame from dreamcast/main.c, standing in for the audio
+// thread's OS_SC_RETRACE_MSG wakeup.
 //
-// The manager produces 1/30s of audio per tick, so it needs ticking at 30Hz. The
-// host frame rate is whatever the host frame rate is (60, 144, hitching, vsync
-// off), and pumping once per frame at 60Hz produces audio at 2x the rate the DAC
-// drains it — the backlog runs away and never recovers.
-//
-// So pace against the ring instead of against the frame: top it up to a target
-// depth and stop. This is self-correcting and completely independent of host fps,
-// which is also what the Dreamcast port will want when this moves onto a
-// vblank-driven audio thread.
-#define PC_AUDIO_TARGET_FRAMES 3 // ~100ms of buffered audio
-#define PC_AUDIO_MAX_TICKS 4     // don't spin forever if something goes wrong
+// With no real DAC to drain the queue, we drain it synthetically: one video
+// frame has elapsed, so one video-frame worth of queued audio has now "played".
+// Then top the queue back up to a target depth, bounded so a bad state can't
+// spin forever. This is the same self-correcting pacing the SDL backend used,
+// just with the ring-buffer callback replaced by the drain below — pace against
+// the queue, never against the host frame rate.
+#define DC_AUDIO_TARGET_FRAMES 3 // ~100ms of buffered audio
+#define DC_AUDIO_MAX_TICKS 4     // don't spin forever if something goes wrong
 
 void pc_audio_frame(void) {
+    u32 drained;
     u32 target;
     s32 ticks = 0;
 
-    if (!sAudioReady || frameSize == 0) {
+    if (!sReady || frameSize == 0) {
         return;
     }
-    target = frameSize * PC_AUDIO_BYTES_PER_SAMPLE * PC_AUDIO_TARGET_FRAMES;
 
-    while (pc_audio_queued() < target && ticks < PC_AUDIO_MAX_TICKS) {
+    // Synthetic DAC drain: retire one video frame of queued audio.
+    drained = frameSize * DC_AUDIO_BYTES_PER_SAMPLE;
+    sQueued = (sQueued > drained) ? sQueued - drained : 0;
+
+    target = frameSize * DC_AUDIO_BYTES_PER_SAMPLE * DC_AUDIO_TARGET_FRAMES;
+    while (sQueued < target && ticks < DC_AUDIO_MAX_TICKS) {
         am_audio_frame_pc();
         ticks++;
     }
 }
 
-// Diagnostics — M2's whole deliverable is "the pacing is stable", and this is how
-// we see it.
+// Diagnostics hook kept for API parity with the main loop; nothing to report in
+// the silent backend.
 void pc_audio_report(void) {
-    static u32 lastUnderruns;
-
-    if (!sAudioReady) {
-        return;
-    }
-    if (sUnderruns != lastUnderruns) {
-        printf("AUDIO: %u underruns (ring %u/%u bytes)\n", sUnderruns, osAiGetLength(), (u32) PC_RING_BYTES);
-        lastUnderruns = sUnderruns;
-    }
 }

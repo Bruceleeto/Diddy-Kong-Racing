@@ -1,334 +1,415 @@
+// Dreamcast graphics backend — KallistiOS PVR. First-pass renderer.
+//
+// This implements the same gfx.h interface the SDL/OpenGL host renderer does, so
+// the F3DDKR display-list interpreter (dreamcast/main.c) is untouched: it still
+// hands us screen-space triangles that are already projected and perspective-
+// divided, with per-vertex colour, uv and w. All this file does is turn that
+// stream into PVR TA submissions.
+//
+// Design (deliberately simple — "untextured polys are fine" first cut):
+//
+//   * ONE list: PVR_LIST_TR_POLY, with hardware autosort DISABLED. That makes the
+//     PVR honour submission order exactly like GL's immediate mode, so the game's
+//     own back-to-front / overlay-last draw order just works. Depth is still
+//     resolved per-pixel through the W-buffer (1/w in the vertex z field), so
+//     solid geometry occludes correctly; transparency blends in order on top.
+//     Routing opaque geometry onto the faster PVR_LIST_OP_POLY is a later
+//     optimisation, not needed to see the game.
+//
+//   * Geometry is fed to the TA through the SH4 store queues (pvr_dr_*), the same
+//     way OoT's DC renderer does — a 32-byte header or vertex per store-queue
+//     burst, no per-primitive memcpy.
+//
+//   * The GL fixed-function state (bound texture, depth compare/write, filter,
+//     scissor) is mirrored in statics and folded into a PVR poly header that is
+//     (re)compiled only when something changed, then submitted ahead of each
+//     triangle batch.
+//
+// Known first-pass gaps, all cosmetic: no punch-through list, so alpha-tested
+// texels blend instead of being clipped (can leave faint depth halos); no fog;
+// the menu-highlight texenv "blend toward constant" is approximated by modulate.
+
 #include "gfx.h"
 
-#include <stdio.h>
+#include <kos.h>
+#include <dc/pvr.h>
 #include <stdlib.h>
-// glFogCoordf and GL_FOG_COORD are GL 1.4 (EXT_fog_coord, 1999). The system gl.h
-// only declares them when the extension prototypes are asked for.
-#define GL_GLEXT_PROTOTYPES 1
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_opengl.h>
 
-static SDL_Window *sWindow;
-static SDL_GLContext sContext;
+// ---------------------------------------------------------------------------
+// State mirrored from the gfx.h setters
+// ---------------------------------------------------------------------------
 
-// The N64 framebuffer size we draw in, and how many host pixels one of ours is.
-// gfx_set_scissor() needs both: GL's scissor is in window pixels, measured from
-// the bottom-left, while the game speaks 320x240 from the top-left.
-static int sFbWidth = 320;
-static int sFbHeight = 240;
-static int sScale = 1;
+#define DC_SCREEN_W 640
+#define DC_SCREEN_H 480
+
+#define MAX_TEXTURES 1024
+
+typedef struct {
+    pvr_ptr_t data; // NULL means the slot is free
+    int w, h;
+    int cmS, cmT;
+} DcTexture;
+
+static DcTexture sTextures[MAX_TEXTURES];
+
+static int sPvrReady;
+static int sInScene;
+
+// N64 framebuffer size the game draws in, and how we stretch it to fill the DC
+// 640x480 output.
+static float sScaleX = 2.0f;
+static float sScaleY = 2.0f;
+
+// Current render state.
+static int sBoundTex;      // 1-based index into sTextures, 0 = untextured
+static int sFilterPoint;   // 1 = nearest, 0 = bilinear
+static int sDepthTest = 1;
+static int sDepthWrite = 1;
+static int sDepthOffset;   // decal bias
+
+// Scissor, in N64 pixels (top-left origin). Full screen by default.
+static int sScisEnable;
+static float sScisX0, sScisY0, sScisX1, sScisY1;
+
+// Recompute-on-demand flags.
+static int sHdrDirty = 1;
+static int sScisDirty = 1;
+
+static pvr_poly_hdr_t sHdr __attribute__((aligned(32)));
+static pvr_dr_state_t sDrState;
+
+// ---------------------------------------------------------------------------
+// Init / teardown
+// ---------------------------------------------------------------------------
 
 void gfx_window_init(int width, int height, int scale) {
-    sFbWidth = width;
-    sFbHeight = height;
-    sScale = scale;
+    pvr_init_params_t params = {
+        // Only the TR bin is used this first pass; everything is submitted there.
+        { PVR_BINSIZE_0, PVR_BINSIZE_0, PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_0 },
+        512 * 1024, // vertex buffer
+        0,          // DMA disabled (we submit via the store queues)
+        0,          // no FSAA
+        1,          // autosort DISABLED -> submission order preserved
+        3           // OPB overflow count
+    };
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+    (void) scale; // the DC always outputs 640x480; we stretch to fit
+
+    if (sPvrReady) {
         return;
     }
 
-    sWindow = SDL_CreateWindow("Diddy Kong Racing", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, width * scale,
-                               height * scale, SDL_WINDOW_OPENGL);
-    if (sWindow == NULL) {
-        fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+    sScaleX = (float) DC_SCREEN_W / (float) width;
+    sScaleY = (float) DC_SCREEN_H / (float) height;
+
+    vid_set_mode(DM_640x480, PM_RGB565);
+    if (pvr_init(&params) < 0) {
         return;
     }
-
-    sContext = SDL_GL_CreateContext(sWindow);
-    if (sContext == NULL) {
-        fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
-        return;
-    }
-    SDL_GL_SetSwapInterval(0); // pc_retrace_wait() already paces the game
-
-    glViewport(0, 0, width * scale, height * scale);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    // Draw straight in N64 screen coordinates: origin top-left, y downwards.
-    // The vertices arrive already projected and divided, so z is just a depth
-    // value in [-1, 1].
-    glOrtho(0.0, width, height, 0.0, -1.0, 1.0);
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
-
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
-    glShadeModel(GL_SMOOTH);
-
-    // Texture alpha is how the N64 cuts out sprites and foliage, so it has to
-    // blend. Depth test, depth write and the alpha-compare threshold are all
-    // driven per material now (see apply_render_mode in main.c); these are just
-    // the startup defaults.
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_ALPHA_TEST);
-    glAlphaFunc(GL_GREATER, 0.0f);
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-
-    // Fog comes from the vertex, not from eye-space z. It has to: our vertices
-    // reach GL already perspective-divided, so their eye z is ndc_z * depth, which
-    // is not a depth at all. The RSP computes the factor itself anyway, so we hand
-    // GL that number directly and it does the post-texture blend.
-    //
-    // GL_LINEAR over [0, 1] makes the blend weight (end - coord) / (end - start) =
-    // 1 - coord, and GL's fog is C = f*Cfrag + (1 - f)*Cfog — so a coordinate of 1
-    // is fully fogged, which is the sense the RSP's factor already has.
-    glFogi(GL_FOG_COORD_SRC, GL_FOG_COORD);
-    glFogi(GL_FOG_MODE, GL_LINEAR);
-    glFogf(GL_FOG_START, 0.0f);
-    glFogf(GL_FOG_END, 1.0f);
-
-    // Nearer is smaller here, so a decal has to be pulled towards zero.
-    glPolygonOffset(-1.0f, -1.0f);
+    pvr_set_bg_color(0.0f, 0.0f, 0.0f);
+    sPvrReady = 1;
 }
 
-// The RDP's cms/cmt are a 2-bit field, not a flag: bit 0 is mirror, bit 1 is
-// clamp (G_TX_MIRROR = 1, G_TX_CLAMP = 2, plain wrap = 0). Clamp wins if both.
-static GLint wrap_mode(int cm) {
-    if (cm & 0x2) {
-        return GL_CLAMP_TO_EDGE;
+// ---------------------------------------------------------------------------
+// Textures
+// ---------------------------------------------------------------------------
+
+// RDP cms/cmt -> PVR clamp. bit1 = clamp (wins), bit0 = mirror. Clamp handled
+// here; mirror via uv_flip below.
+static int uv_clamp_from(int cmS, int cmT) {
+    if ((cmS & 0x2) && (cmT & 0x2)) {
+        return PVR_UVCLAMP_UV;
     }
-    if (cm & 0x1) {
-        return GL_MIRRORED_REPEAT;
+    if (cmS & 0x2) {
+        return PVR_UVCLAMP_U;
     }
-    return GL_REPEAT;
+    if (cmT & 0x2) {
+        return PVR_UVCLAMP_V;
+    }
+    return PVR_UVCLAMP_NONE;
+}
+
+static int uv_flip_from(int cmS, int cmT) {
+    int flip = PVR_UVFLIP_NONE;
+    if (cmS & 0x1) {
+        flip |= PVR_UVFLIP_U;
+    }
+    if (cmT & 0x1) {
+        flip |= PVR_UVFLIP_V;
+    }
+    return flip;
 }
 
 unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS, int cmT) {
-    GLuint id = 0;
+    const unsigned char *src = (const unsigned char *) rgba;
+    unsigned short *tmp;
+    pvr_ptr_t vram;
+    int slot;
+    int i;
+    int n = width * height;
 
-    if (sWindow == NULL) {
+    if (!sPvrReady || rgba == NULL || width <= 0 || height <= 0) {
         return 0;
     }
 
-    glGenTextures(1, &id);
-    glBindTexture(GL_TEXTURE_2D, id);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap_mode(cmS));
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap_mode(cmT));
-
-    return id;
-}
-
-/**
- * Texel-weighted lerp between the vertex colour and `color` — GL's GL_BLEND
- * texture env, which computes Cf*(1 - Ct) + Cc*Ct per channel (and Af*At for
- * alpha, same as modulate).
- *
- * That is the exact shape of a combiner that blends the texel towards a constant.
- * Hand it the combiner evaluated with no texel as the vertex colour and with a
- * white texel as `color`, and the hardware reconstructs the real result. All GL
- * 1.1 — no secondary colour, no GL_COMBINE.
- */
-void gfx_set_texenv_blend(const unsigned char color[4]) {
-    GLfloat c[4];
-
-    if (sWindow == NULL) {
-        return;
+    for (slot = 0; slot < MAX_TEXTURES; slot++) {
+        if (sTextures[slot].data == NULL) {
+            break;
+        }
+    }
+    if (slot == MAX_TEXTURES) {
+        return 0;
     }
 
-    c[0] = color[0] / 255.0f;
-    c[1] = color[1] / 255.0f;
-    c[2] = color[2] / 255.0f;
-    c[3] = color[3] / 255.0f;
-
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_BLEND);
-    glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, c);
-}
-
-void gfx_set_fog(int enable, const unsigned char color[4]) {
-    GLfloat c[4];
-
-    if (sWindow == NULL) {
-        return;
+    // RGBA8888 -> ARGB4444 (keeps the alpha the N64 uses to cut sprites out).
+    tmp = (unsigned short *) malloc((size_t) n * 2);
+    if (tmp == NULL) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        unsigned int r = src[i * 4 + 0] >> 4;
+        unsigned int g = src[i * 4 + 1] >> 4;
+        unsigned int b = src[i * 4 + 2] >> 4;
+        unsigned int a = src[i * 4 + 3] >> 4;
+        tmp[i] = (unsigned short) ((a << 12) | (r << 8) | (g << 4) | b);
     }
 
-    if (!enable) {
-        glDisable(GL_FOG);
-        return;
+    vram = pvr_mem_malloc((size_t) n * 2);
+    if (vram == NULL) {
+        free(tmp);
+        return 0;
     }
+    // pvr_txr_load_ex twiddles as it copies (assumes power-of-two dims, which
+    // every N64 texture is).
+    pvr_txr_load_ex(tmp, vram, (uint32) width, (uint32) height, PVR_TXRLOAD_16BPP);
+    free(tmp);
 
-    c[0] = color[0] / 255.0f;
-    c[1] = color[1] / 255.0f;
-    c[2] = color[2] / 255.0f;
-    c[3] = color[3] / 255.0f;
-
-    glFogfv(GL_FOG_COLOR, c);
-    glEnable(GL_FOG);
-}
-
-/** Plain texel * vertex colour, which is what the 3D path wants. */
-void gfx_set_texenv_modulate(void) {
-    if (sWindow == NULL) {
-        return;
-    }
-    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-}
-
-void gfx_set_texture_filter(int point) {
-    GLint filter;
-
-    if (sWindow == NULL) {
-        return;
-    }
-
-    filter = point ? GL_NEAREST : GL_LINEAR;
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
-}
-
-void gfx_bind_texture(unsigned int handle) {
-    if (sWindow == NULL) {
-        return;
-    }
-
-    if (handle == 0) {
-        glDisable(GL_TEXTURE_2D);
-    } else {
-        glEnable(GL_TEXTURE_2D);
-        glBindTexture(GL_TEXTURE_2D, handle);
-    }
-}
-
-// `x1`/`y1` are exclusive — the caller has already turned the RDP's inclusive
-// lower-right corner into one past the end.
-void gfx_set_scissor(float x0, float y0, float x1, float y1) {
-    int w, h, gx, gy;
-
-    if (sWindow == NULL) {
-        return;
-    }
-
-    // GL measures from the bottom-left, so y flips.
-    gx = (int) (x0 * sScale);
-    gy = (int) ((sFbHeight - y1) * sScale);
-    w = (int) ((x1 - x0) * sScale);
-    h = (int) ((y1 - y0) * sScale);
-
-    if (w < 0 || h < 0) {
-        // An empty rect means draw nothing, which is not the same as "no clip".
-        w = 0;
-        h = 0;
-    }
-
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(gx, gy, w, h);
-}
-
-void gfx_disable_scissor(void) {
-    if (sWindow == NULL) {
-        return;
-    }
-    glDisable(GL_SCISSOR_TEST);
-}
-
-void gfx_frame_begin(void) {
-    if (sWindow == NULL) {
-        return;
-    }
-    // glClear honours both the depth mask and the scissor, so neither may be left
-    // where the previous frame's last command put it, or the clear silently does
-    // nothing (or only part of the screen).
-    glDepthMask(GL_TRUE);
-    glDisable(GL_SCISSOR_TEST);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-}
-
-void gfx_draw_tris(const GfxTriVert *verts, int count) {
-    int i;
-
-    if (sWindow == NULL || count <= 0) {
-        return;
-    }
-
-    // The vertices arrive already divided by w, but handing GL a position with
-    // an implicit w of 1 would make it interpolate the texture coordinates
-    // linearly in screen space — affine mapping, which visibly swims and shears
-    // on a polygon whose corners are at very different depths (a wall up close).
-    // The N64 does not do that: G_TP_PERSP is set in every DKR othermode, and
-    // the RDP interpolates against 1/w per pixel.
-    //
-    // So multiply the position back up by w and hand GL the real w. The
-    // projection is a plain ortho, so the divide GL does reproduces exactly the
-    // screen position computed in project() — but now w is on the wire, and the
-    // fixed-function rasteriser interpolates the texture perspective-correctly.
-    glBegin(GL_TRIANGLES);
-    for (i = 0; i < count; i++) {
-        float w = verts[i].w;
-
-        glColor4ub(verts[i].r, verts[i].g, verts[i].b, verts[i].a);
-        glFogCoordf(verts[i].fog);
-        glTexCoord2f(verts[i].u, verts[i].v);
-        glVertex4f(verts[i].x * w, verts[i].y * w, verts[i].z * w, w);
-    }
-    glEnd();
+    sTextures[slot].data = vram;
+    sTextures[slot].w = width;
+    sTextures[slot].h = height;
+    sTextures[slot].cmS = cmS;
+    sTextures[slot].cmT = cmT;
+    return (unsigned int) (slot + 1);
 }
 
 void gfx_delete_texture(unsigned int handle) {
-    GLuint id = handle;
+    int slot;
 
-    if (sWindow == NULL || handle == 0) {
+    if (handle == 0 || handle > MAX_TEXTURES) {
         return;
     }
-    glDeleteTextures(1, &id);
+    slot = (int) handle - 1;
+    if (sTextures[slot].data != NULL) {
+        pvr_mem_free(sTextures[slot].data);
+        sTextures[slot].data = NULL;
+    }
+    if (sBoundTex == (int) handle) {
+        sBoundTex = 0;
+        sHdrDirty = 1;
+    }
+}
+
+void gfx_bind_texture(unsigned int handle) {
+    if (handle > MAX_TEXTURES) {
+        handle = 0;
+    }
+    if ((int) handle != sBoundTex) {
+        sBoundTex = (int) handle;
+        sHdrDirty = 1;
+    }
+}
+
+void gfx_set_texture_filter(int point) {
+    if (point != sFilterPoint) {
+        sFilterPoint = point;
+        sHdrDirty = 1;
+    }
+}
+
+// The menu-highlight "blend toward constant" env has no fixed-function PVR
+// equivalent; approximate with modulate. Kept as its own entry point so it can
+// be done properly later without touching callers.
+void gfx_set_texenv_blend(const unsigned char color[4]) {
+    (void) color;
+    sHdrDirty = 1;
+}
+
+void gfx_set_texenv_modulate(void) {
+    sHdrDirty = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Render-mode state
+// ---------------------------------------------------------------------------
+
+// No fog in the first pass — accepted as a cosmetic gap.
+void gfx_set_fog(int enable, const unsigned char color[4]) {
+    (void) enable;
+    (void) color;
 }
 
 void gfx_set_depth_test(int enable) {
-    if (sWindow == NULL) {
-        return;
-    }
-
-    if (enable) {
-        glEnable(GL_DEPTH_TEST);
-    } else {
-        glDisable(GL_DEPTH_TEST);
+    if (enable != sDepthTest) {
+        sDepthTest = enable;
+        sHdrDirty = 1;
     }
 }
 
 void gfx_set_depth_write(int enable) {
-    if (sWindow == NULL) {
-        return;
+    if (enable != sDepthWrite) {
+        sDepthWrite = enable;
+        sHdrDirty = 1;
     }
-    glDepthMask(enable ? GL_TRUE : GL_FALSE);
 }
 
 void gfx_set_depth_offset(int enable) {
-    if (sWindow == NULL) {
-        return;
-    }
-
-    if (enable) {
-        glEnable(GL_POLYGON_OFFSET_FILL);
-    } else {
-        glDisable(GL_POLYGON_OFFSET_FILL);
-    }
+    sDepthOffset = enable; // applied per-vertex, no header change
 }
 
 void gfx_set_alpha_test(float ref) {
-    if (sWindow == NULL) {
+    // No punch-through list in this first pass: in the TR list a texel's own
+    // alpha already blends it out, so the threshold is a no-op here.
+    (void) ref;
+}
+
+void gfx_set_scissor(float x0, float y0, float x1, float y1) {
+    sScisEnable = 1;
+    sScisX0 = x0;
+    sScisY0 = y0;
+    sScisX1 = x1;
+    sScisY1 = y1;
+    sScisDirty = 1;
+}
+
+void gfx_disable_scissor(void) {
+    if (sScisEnable) {
+        sScisEnable = 0;
+        sScisDirty = 1;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame
+// ---------------------------------------------------------------------------
+
+void gfx_frame_begin(void) {
+    if (!sPvrReady) {
         return;
     }
-    glAlphaFunc(GL_GREATER, ref);
+    pvr_wait_ready();
+    pvr_scene_begin();
+    pvr_list_begin(PVR_LIST_TR_POLY);
+    pvr_dr_init(&sDrState);
+    sInScene = 1;
+    sHdrDirty = 1;
+    sScisDirty = 1;
+}
+
+// User clip is specified in 32-pixel tiles, lower-right inclusive.
+static void submit_user_clip(int x0, int y0, int x1, int y1) {
+    unsigned int *clip;
+
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > DC_SCREEN_W) x1 = DC_SCREEN_W;
+    if (y1 > DC_SCREEN_H) y1 = DC_SCREEN_H;
+
+    clip = (unsigned int *) pvr_dr_target(sDrState);
+    clip[0] = PVR_CMD_USERCLIP;
+    clip[1] = 0;
+    clip[2] = 0;
+    clip[3] = 0;
+    clip[4] = (unsigned int) (x0 >> 5);       // min tile x
+    clip[5] = (unsigned int) (y0 >> 5);       // min tile y
+    clip[6] = (unsigned int) ((x1 - 1) >> 5); // max tile x (inclusive)
+    clip[7] = (unsigned int) ((y1 - 1) >> 5); // max tile y (inclusive)
+    pvr_dr_commit(clip);
+}
+
+static void compile_header(void) {
+    pvr_poly_cxt_t cxt;
+
+    if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
+        DcTexture *t = &sTextures[sBoundTex - 1];
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB4444, t->w, t->h, t->data,
+                         sFilterPoint ? PVR_FILTER_NEAREST : PVR_FILTER_BILINEAR);
+        cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
+        cxt.txr.uv_clamp = uv_clamp_from(t->cmS, t->cmT);
+        cxt.txr.uv_flip = uv_flip_from(t->cmS, t->cmT);
+        cxt.txr.alpha = PVR_TXRALPHA_ENABLE;
+    } else {
+        pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
+    }
+
+    cxt.gen.culling = PVR_CULLING_NONE; // the game already back-face culls in SW
+    cxt.gen.clip_mode = sScisEnable ? PVR_USERCLIP_INSIDE : PVR_USERCLIP_DISABLE;
+    cxt.depth.comparison = sDepthTest ? PVR_DEPTHCMP_GEQUAL : PVR_DEPTHCMP_ALWAYS;
+    cxt.depth.write = sDepthWrite ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
+    cxt.blend.src = PVR_BLEND_SRCALPHA;
+    cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+
+    pvr_poly_compile(&sHdr, &cxt);
+}
+
+static inline unsigned int pack_argb(unsigned char a, unsigned char r, unsigned char g, unsigned char b) {
+    return ((unsigned int) a << 24) | ((unsigned int) r << 16) | ((unsigned int) g << 8) | (unsigned int) b;
+}
+
+void gfx_draw_tris(const GfxTriVert *verts, int count) {
+    pvr_poly_hdr_t *hdrDst;
+    int i, j;
+
+    if (!sInScene || count < 3) {
+        return;
+    }
+
+    if (sScisDirty) {
+        if (sScisEnable) {
+            submit_user_clip((int) sScisX0, (int) sScisY0, (int) sScisX1, (int) sScisY1);
+        } else {
+            submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+        }
+        sScisDirty = 0;
+    }
+
+    if (sHdrDirty) {
+        compile_header();
+        sHdrDirty = 0;
+    }
+    hdrDst = (pvr_poly_hdr_t *) pvr_dr_target(sDrState);
+    *hdrDst = sHdr;
+    pvr_dr_commit(hdrDst);
+
+    // GL_TRIANGLES -> one 3-vertex PVR strip per triangle (3rd vertex EOL).
+    for (i = 0; i + 3 <= count; i += 3) {
+        for (j = 0; j < 3; j++) {
+            const GfxTriVert *s = &verts[i + j];
+            pvr_vertex_t *v = (pvr_vertex_t *) pvr_dr_target(sDrState);
+            float w = s->w;
+            float invw = (w > 1e-6f) ? (1.0f / w) : 1.0e6f;
+
+            if (sDepthOffset) {
+                invw *= 1.003f; // nudge decals toward the viewer
+            }
+
+            v->flags = (j == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+            v->x = s->x * sScaleX;
+            v->y = s->y * sScaleY;
+            v->z = invw;
+            v->u = s->u;
+            v->v = s->v;
+            v->argb = pack_argb(s->a, s->r, s->g, s->b);
+            v->oargb = 0;
+            pvr_dr_commit(v);
+        }
+    }
 }
 
 void gfx_frame_end(void) {
-    SDL_Event event;
-
-    if (sWindow == NULL) {
+    if (!sInScene) {
         return;
     }
-
-    SDL_GL_SwapWindow(sWindow);
-
-    while (SDL_PollEvent(&event)) {
-        if (event.type == SDL_QUIT ||
-            (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE)) {
-            SDL_Quit();
-            exit(0);
-        }
-    }
+    pvr_list_finish();
+    pvr_scene_finish();
+    sInScene = 0;
 }

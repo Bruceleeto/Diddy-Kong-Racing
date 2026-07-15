@@ -1,9 +1,11 @@
 #include "input.h"
 
-#include <SDL2/SDL.h>
+#include <kos.h>
 
 // The CONT_* button bits from include/PR/os_cont.h, repeated here because this
-// file cannot include the N64 headers (see input.h).
+// file cannot include the N64 headers (see input.h). These are the N64 side; the
+// KOS CONT_* masks below (CONT_A etc.) are the Dreamcast pad and come from
+// <dc/maple/controller.h>.
 #define BTN_A 0x8000
 #define BTN_B 0x4000
 #define BTN_Z 0x2000
@@ -19,75 +21,62 @@
 #define BTN_CLEFT 0x0002
 #define BTN_CRIGHT 0x0001
 
-// Full deflection on a real stick, and its diagonal component: the N64 stick is
-// round, so holding two axes at once cannot reach 80 on both.
+// Full deflection on the N64 stick.
 #define STICK_MAX 80
-#define STICK_DIAG 57
 
-typedef struct {
-    int scancode;
-    unsigned short button;
-} KeyBinding;
-
-static const KeyBinding sKeyBindings[] = {
-    { SDL_SCANCODE_X, BTN_A },      // accelerate
-    { SDL_SCANCODE_C, BTN_B },      // brake / reverse
-    { SDL_SCANCODE_Z, BTN_Z },      // fire weapon
-    { SDL_SCANCODE_SPACE, BTN_R },  // hop / powerslide
-    { SDL_SCANCODE_Q, BTN_L },
-    { SDL_SCANCODE_RETURN, BTN_START },
-    { SDL_SCANCODE_I, BTN_CUP },
-    { SDL_SCANCODE_K, BTN_CDOWN },
-    { SDL_SCANCODE_J, BTN_CLEFT },
-    { SDL_SCANCODE_L, BTN_CRIGHT },
-};
-
-#define NUM_KEY_BINDINGS (int) (sizeof(sKeyBindings) / sizeof(sKeyBindings[0]))
-
-// Steering: arrow keys and WASD both drive the analog stick.
-static int axis_value(const unsigned char *keys, int negA, int negB, int posA, int posB) {
-    int value = 0;
-
-    if (keys[negA] || keys[negB]) {
-        value -= 1;
-    }
-    if (keys[posA] || keys[posB]) {
-        value += 1;
-    }
-    return value;
-}
+// A DC analog trigger past this (0..255) counts as a digital press.
+#define TRIG_THRESHOLD 64
 
 void input_host_read(unsigned short *button, signed char *stickX, signed char *stickY) {
-    const unsigned char *keys;
+    maple_device_t *cont;
+    cont_state_t *st;
     unsigned short buttons = 0;
     int x, y;
-    int magnitude;
-    int i;
 
     *button = 0;
     *stickX = 0;
     *stickY = 0;
 
-    // The game polls the controller before the window opens, and SDL_GetKeyboardState
-    // is only meaningful once the video subsystem is up.
-    if (!SDL_WasInit(SDL_INIT_VIDEO)) {
+    cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    if (cont == NULL) {
+        return; // no pad plugged in — report neutral
+    }
+    st = (cont_state_t *) maple_dev_status(cont);
+    if (st == NULL) {
         return;
     }
 
-    keys = SDL_GetKeyboardState(NULL);
+    // Face buttons and start.
+    if (st->buttons & CONT_A) buttons |= BTN_A;         // accelerate
+    if (st->buttons & CONT_B) buttons |= BTN_B;         // brake / reverse
+    if (st->buttons & CONT_START) buttons |= BTN_START;
 
-    for (i = 0; i < NUM_KEY_BINDINGS; i++) {
-        if (keys[sKeyBindings[i].scancode]) {
-            buttons |= sKeyBindings[i].button;
-        }
-    }
+    // Triggers: N64 Z (fire) on the left, N64 R (hop / powerslide) on the right.
+    if (st->ltrig > TRIG_THRESHOLD) buttons |= BTN_Z;
+    if (st->rtrig > TRIG_THRESHOLD) buttons |= BTN_R;
 
-    x = axis_value(keys, SDL_SCANCODE_LEFT, SDL_SCANCODE_A, SDL_SCANCODE_RIGHT, SDL_SCANCODE_D);
-    y = axis_value(keys, SDL_SCANCODE_DOWN, SDL_SCANCODE_S, SDL_SCANCODE_UP, SDL_SCANCODE_W);
+    // The DC pad has no C-cluster; put camera on the X/Y face buttons, and let
+    // X double as the N64 L (only used in a couple of debug spots).
+    if (st->buttons & CONT_Y) buttons |= BTN_CUP;
+    if (st->buttons & CONT_X) buttons |= BTN_CDOWN | BTN_L;
 
-    magnitude = (x != 0 && y != 0) ? STICK_DIAG : STICK_MAX;
+    // D-pad drives the N64 D-pad (menu navigation).
+    if (st->buttons & CONT_DPAD_UP) buttons |= BTN_UP;
+    if (st->buttons & CONT_DPAD_DOWN) buttons |= BTN_DOWN;
+    if (st->buttons & CONT_DPAD_LEFT) buttons |= BTN_LEFT;
+    if (st->buttons & CONT_DPAD_RIGHT) buttons |= BTN_RIGHT;
+
+    // Analog stick: DC joyx/joyy are -128..127. Scale to the N64's -80..80, and
+    // flip Y — the DC reports up as negative, the N64 as positive.
+    x = (st->joyx * STICK_MAX) / 128;
+    y = (-st->joyy * STICK_MAX) / 128;
+
+    if (x < -STICK_MAX) x = -STICK_MAX;
+    if (x > STICK_MAX) x = STICK_MAX;
+    if (y < -STICK_MAX) y = -STICK_MAX;
+    if (y > STICK_MAX) y = STICK_MAX;
 
     *button = buttons;
-    *stickX = (signed char) (x * magnitude);
-    *stickY = (signed char) (y * magnitude);
+    *stickX = (signed char) x;
+    *stickY = (signed char) y;
 }

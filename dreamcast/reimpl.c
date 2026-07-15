@@ -57,6 +57,14 @@ u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
 // The LUT is an array of big-endian u32s — byteswapped once at load. Asset
 // *contents* are left big-endian; each parse site gets fixed as it comes up.
 // ---------------------------------------------------------------------------
+// On Dreamcast the assets ride on the disc, which KOS mounts at /cd. On the PC
+// build they sit in the repo's assets/ dir, read relative to the launch cwd.
+#ifdef TARGET_DC
+#define ASSET_DIR "/cd/assets/"
+#else
+#define ASSET_DIR "assets/"
+#endif
+
 static u8 *sAssetLut = NULL;
 static u32 sAssetLutSize = 0;
 static u8 *sAssetsBin = NULL;
@@ -90,8 +98,8 @@ static void pc_assets_init(void) {
     if (sAssetLut != NULL) {
         return;
     }
-    sAssetLut = pc_load_file("assets/assets.lut.bin", &sAssetLutSize);
-    sAssetsBin = pc_load_file("assets/assets.bin", &sAssetsBinSize);
+    sAssetLut = pc_load_file(ASSET_DIR "assets.lut.bin", &sAssetLutSize);
+    sAssetsBin = pc_load_file(ASSET_DIR "assets.bin", &sAssetsBinSize);
 
     // LUT: entry count followed by offsets, all big-endian u32 — swap in place.
     for (i = 0; i + 3 < sAssetLutSize; i += 4) {

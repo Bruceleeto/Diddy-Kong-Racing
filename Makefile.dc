@@ -191,7 +191,6 @@ LIBULTRA_FILES := \
 	libultra/src/audio/synsetvol.c \
 	libultra/src/audio/synstartvoice.c \
 	libultra/src/audio/synstopvoice.c \
-	libultra/src/debug/assert.c \
 	libultra/src/debug/kdebugserver.c \
 	libultra/src/gu/mtxutil.c \
 	libultra/src/gu/perspective.c \
