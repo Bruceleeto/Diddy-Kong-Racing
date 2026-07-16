@@ -1505,12 +1505,6 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     // here, so the frame boundary drives it directly. (linux/audio.c)
     pc_audio_frame();
     pc_audio_report();
-
-    // TEMP heartbeat: if this keeps ticking on the black screen it's a render/state
-    // issue; if it stops, the frame loop is hung upstream of here.
-    if ((sGfxFrameCount % 60) == 0) {
-        printf("HEARTBEAT: gfx frame %u\n", (unsigned) sGfxFrameCount);
-    }
 }
 
 int main(int argc, char **argv) {
