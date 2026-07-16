@@ -65,6 +65,17 @@ static float sScaleY = 2.0f;
 // Current render state.
 static int sBoundTex;      // 1-based index into sTextures, 0 = untextured
 static int sFilterPoint;   // 1 = nearest, 0 = bilinear
+// texenv "blend toward constant" (the textured 2D path — font glyphs, logos, and
+// the menu highlight). The RDP combiner is linear in the texel:
+//     result = unlit + texel * (lit - unlit)
+// where `unlit`/`lit` are the combiner evaluated at texel 0 and 1. The interpreter
+// hands us `unlit` per-vertex (the vertex colour) and `lit` as this constant. The
+// PVR computes texel*argb + oargb (offset colour, added post-modulate), so this
+// maps EXACTLY: argb = lit - unlit, oargb = unlit. No approximation — and the
+// selection highlight, which lives in the per-vertex `unlit`, survives because it
+// rides in oargb.
+static int sTexEnvBlend;
+static unsigned char sBlendColor[4]; // `lit`
 static int sDepthTest = 1;
 static int sDepthWrite = 1;
 static int sDepthOffset;   // decal bias
@@ -259,16 +270,20 @@ void gfx_set_texture_filter(int point) {
     }
 }
 
-// The menu-highlight "blend toward constant" env has no fixed-function PVR
-// equivalent; approximate with modulate. Kept as its own entry point so it can
-// be done properly later without touching callers.
+// See sTexEnvBlend above. Store the constant and switch the draw path to source
+// the vertex colour from it.
 void gfx_set_texenv_blend(const unsigned char color[4]) {
-    (void) color;
-    sHdrDirty = 1;
+    sTexEnvBlend = 1;
+    if (color != NULL) {
+        sBlendColor[0] = color[0];
+        sBlendColor[1] = color[1];
+        sBlendColor[2] = color[2];
+        sBlendColor[3] = color[3];
+    }
 }
 
 void gfx_set_texenv_modulate(void) {
-    sHdrDirty = 1;
+    sTexEnvBlend = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +394,10 @@ static void compile_header(void) {
 
     cxt.gen.culling = PVR_CULLING_NONE; // the game already back-face culls in SW
     cxt.gen.clip_mode = sScisEnable ? PVR_USERCLIP_INSIDE : PVR_USERCLIP_DISABLE;
+    // Offset colour (specular) always on: it carries the combiner's additive term
+    // in the texenv-blend path (oargb, added post-modulate). Non-blend draws set
+    // oargb = 0, so the add is a free no-op there.
+    cxt.gen.specular = PVR_SPECULAR_ENABLE;
     cxt.depth.comparison = sDepthTest ? PVR_DEPTHCMP_GEQUAL : PVR_DEPTHCMP_ALWAYS;
     cxt.depth.write = sDepthWrite ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
     cxt.blend.src = PVR_BLEND_SRCALPHA;
@@ -447,8 +466,23 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             v->z = invw;
             v->u = s->u * uScale;
             v->v = s->v * vScale;
-            v->argb = pack_argb(s->a, s->r, s->g, s->b);
-            v->oargb = 0;
+            if (sTexEnvBlend) {
+                // result = unlit + texel*(lit - unlit): argb = lit - unlit (the
+                // modulated part), oargb = unlit (the additive offset). unlit is
+                // the per-vertex colour; lit is sBlendColor. Clamp the difference
+                // at 0 — the rare lit<unlit channel just loses its texel weighting.
+                int dr = (int) sBlendColor[0] - (int) s->r;
+                int dg = (int) sBlendColor[1] - (int) s->g;
+                int db = (int) sBlendColor[2] - (int) s->b;
+                if (dr < 0) dr = 0;
+                if (dg < 0) dg = 0;
+                if (db < 0) db = 0;
+                v->argb = pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db);
+                v->oargb = ((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b;
+            } else {
+                v->argb = pack_argb(s->a, s->r, s->g, s->b);
+                v->oargb = 0;
+            }
             pvr_dr_commit(v);
         }
     }
