@@ -57,10 +57,11 @@ u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
 // The LUT is an array of big-endian u32s — byteswapped once at load. Asset
 // *contents* are left big-endian; each parse site gets fixed as it comes up.
 // ---------------------------------------------------------------------------
-// On Dreamcast the assets ride on the disc, which KOS mounts at /cd. On the PC
-// build they sit in the repo's assets/ dir, read relative to the launch cwd.
+// On Dreamcast the assets are served from the host over dcload, which KOS mounts
+// at /pc (the machine dc-tool runs on). On the PC build they sit in the repo's
+// assets/ dir, read relative to the launch cwd.
 #ifdef TARGET_DC
-#define ASSET_DIR "/cd/assets/"
+#define ASSET_DIR "/pc/assets/"
 #else
 #define ASSET_DIR "assets/"
 #endif

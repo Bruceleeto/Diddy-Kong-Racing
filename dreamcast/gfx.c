@@ -46,7 +46,9 @@
 
 typedef struct {
     pvr_ptr_t data; // NULL means the slot is free
-    int w, h;
+    int w, h;               // original N64 texture size
+    int padded_w, padded_h; // power-of-two size actually stored in VRAM
+    float u_scale, v_scale;  // original / padded — folds NPOT padding into the UVs
     int cmS, cmT;
 } DcTexture;
 
@@ -85,8 +87,12 @@ static pvr_dr_state_t sDrState;
 void gfx_window_init(int width, int height, int scale) {
     pvr_init_params_t params = {
         // Only the TR bin is used this first pass; everything is submitted there.
-        { PVR_BINSIZE_0, PVR_BINSIZE_0, PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_0 },
-        512 * 1024, // vertex buffer
+        { PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_32, PVR_BINSIZE_0, PVR_BINSIZE_0 },
+        // TA vertex buffer. A full track submits thousands of triangles, each as
+        // its own 3-vertex strip (~96 bytes); 512K (~5.5k tris) overflows on the
+        // heavy tracks and the PVR then hangs at pvr_wait_ready. 1.5M (~16k tris)
+        // clears it with VRAM to spare for framebuffers and textures.
+        1536 * 1024, // vertex buffer
         0,          // DMA disabled (we submit via the store queues)
         0,          // no FSAA
         1,          // autosort DISABLED -> submission order preserved
@@ -140,13 +146,28 @@ static int uv_flip_from(int cmS, int cmT) {
     return flip;
 }
 
+// Smallest power of two >= v, clamped to the PVR's [8, 1024] texture range.
+static int next_pot(int v) {
+    int p = 8;
+    while (p < v) {
+        p <<= 1;
+    }
+    return (p > 1024) ? 1024 : p;
+}
+
+// The PVR only samples power-of-two textures, and its twiddle loader assumes POT
+// dims. N64 textures are often non-POT, so — the way OoT's DC port does it — pad
+// the image up into a POT buffer (edge-replicated so bilinear filtering doesn't
+// bleed the border), store it NON-twiddled (a plain linear copy, no twiddle
+// arithmetic to go out of bounds), and fold the padding ratio into the UVs at
+// draw time via u_scale/v_scale.
 unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS, int cmT) {
     const unsigned char *src = (const unsigned char *) rgba;
     unsigned short *tmp;
     pvr_ptr_t vram;
     int slot;
-    int i;
-    int n = width * height;
+    int pw, ph;
+    int x, y;
 
     if (!sPvrReady || rgba == NULL || width <= 0 || height <= 0) {
         return 0;
@@ -161,32 +182,44 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
         return 0;
     }
 
-    // RGBA8888 -> ARGB4444 (keeps the alpha the N64 uses to cut sprites out).
-    tmp = (unsigned short *) malloc((size_t) n * 2);
+    pw = next_pot(width);
+    ph = next_pot(height);
+
+    tmp = (unsigned short *) malloc((size_t) pw * ph * 2);
     if (tmp == NULL) {
         return 0;
     }
-    for (i = 0; i < n; i++) {
-        unsigned int r = src[i * 4 + 0] >> 4;
-        unsigned int g = src[i * 4 + 1] >> 4;
-        unsigned int b = src[i * 4 + 2] >> 4;
-        unsigned int a = src[i * 4 + 3] >> 4;
-        tmp[i] = (unsigned short) ((a << 12) | (r << 8) | (g << 4) | b);
+    // RGBA8888 -> ARGB4444 into the padded buffer. Samples outside the original
+    // clamp to its edge (replicate), which keeps the padding from darkening the
+    // border under bilinear filtering.
+    for (y = 0; y < ph; y++) {
+        int sy = (y < height) ? y : height - 1;
+        for (x = 0; x < pw; x++) {
+            int sx = (x < width) ? x : width - 1;
+            const unsigned char *p = &src[(sy * width + sx) * 4];
+            unsigned int r = p[0] >> 4;
+            unsigned int g = p[1] >> 4;
+            unsigned int b = p[2] >> 4;
+            unsigned int a = p[3] >> 4;
+            tmp[y * pw + x] = (unsigned short) ((a << 12) | (r << 8) | (g << 4) | b);
+        }
     }
 
-    vram = pvr_mem_malloc((size_t) n * 2);
+    vram = pvr_mem_malloc((size_t) pw * ph * 2);
     if (vram == NULL) {
         free(tmp);
         return 0;
     }
-    // pvr_txr_load_ex twiddles as it copies (assumes power-of-two dims, which
-    // every N64 texture is).
-    pvr_txr_load_ex(tmp, vram, (uint32) width, (uint32) height, PVR_TXRLOAD_16BPP);
+    pvr_txr_load(tmp, vram, (uint32) (pw * ph * 2)); // plain copy, non-twiddled
     free(tmp);
 
     sTextures[slot].data = vram;
     sTextures[slot].w = width;
     sTextures[slot].h = height;
+    sTextures[slot].padded_w = pw;
+    sTextures[slot].padded_h = ph;
+    sTextures[slot].u_scale = (float) width / (float) pw;
+    sTextures[slot].v_scale = (float) height / (float) ph;
     sTextures[slot].cmS = cmS;
     sTextures[slot].cmT = cmT;
     return (unsigned int) (slot + 1);
@@ -331,7 +364,10 @@ static void compile_header(void) {
 
     if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
         DcTexture *t = &sTextures[sBoundTex - 1];
-        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB4444, t->w, t->h, t->data,
+        // Padded (power-of-two) dims, and NON-twiddled to match the plain copy in
+        // gfx_create_texture.
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_ARGB4444 | PVR_TXRFMT_NONTWIDDLED,
+                         t->padded_w, t->padded_h, t->data,
                          sFilterPoint ? PVR_FILTER_NEAREST : PVR_FILTER_BILINEAR);
         cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
         cxt.txr.uv_clamp = uv_clamp_from(t->cmS, t->cmT);
@@ -357,15 +393,28 @@ static inline unsigned int pack_argb(unsigned char a, unsigned char r, unsigned 
 
 void gfx_draw_tris(const GfxTriVert *verts, int count) {
     pvr_poly_hdr_t *hdrDst;
+    float uScale = 1.0f, vScale = 1.0f;
     int i, j;
 
     if (!sInScene || count < 3) {
         return;
     }
 
+    // NPOT textures are stored padded; the game's 0..1 UVs address the original,
+    // so scale them into the padded texture's used region.
+    if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
+        uScale = sTextures[sBoundTex - 1].u_scale;
+        vScale = sTextures[sBoundTex - 1].v_scale;
+    }
+
     if (sScisDirty) {
         if (sScisEnable) {
-            submit_user_clip((int) sScisX0, (int) sScisY0, (int) sScisX1, (int) sScisY1);
+            // The scissor arrives in N64 pixels; the framebuffer is scaled up, so
+            // the clip rect has to be scaled the same way the vertices are — else
+            // a full-screen 320x240 scissor confines everything to the top-left
+            // quarter of the 640x480 output.
+            submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
+                             (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
         } else {
             submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
         }
@@ -396,8 +445,8 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             v->x = s->x * sScaleX;
             v->y = s->y * sScaleY;
             v->z = invw;
-            v->u = s->u;
-            v->v = s->v;
+            v->u = s->u * uScale;
+            v->v = s->v * vScale;
             v->argb = pack_argb(s->a, s->r, s->g, s->b);
             v->oargb = 0;
             pvr_dr_commit(v);
