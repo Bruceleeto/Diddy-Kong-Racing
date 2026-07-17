@@ -864,6 +864,26 @@ void decrypt_magic_codes(s32 *data, s32 length) {
             *ptr++ = (((temp[j] & 0xAA) >> 1) | ((temp[j] & 0x55) << 1));
         }
     }
+
+#ifdef TARGET_PC
+    // The decryption above is endian-safe (it works on bytes in memory order),
+    // but the decrypted table is big-endian ROM data: a u16 cheat count followed
+    // by a u16 offset table (two entries per cheat — code string, description).
+    // The matcher (menu.c) reads those as native u16, so on a little-endian host
+    // the count and every offset come out byteswapped and no cheat ever matches.
+    // Swap just the header words back; the ASCII strings after them are bytes and
+    // must be left alone. Header length = 1 count word + 2 offsets per cheat.
+    {
+        u16 *words = (u16 *) data;
+        s32 count = (s32) (u16) ((words[0] << 8) | (words[0] >> 8));
+        s32 headerWords = 1 + count * 2;
+        s32 k;
+
+        for (k = 0; k < headerWords; k++) {
+            words[k] = (u16) ((words[k] << 8) | (words[k] >> 8));
+        }
+    }
+#endif
 }
 
 /**
