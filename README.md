@@ -1,10 +1,19 @@
 # Diddy Kong Racing
 
-tldr
+tldr for dreamcast
+
+`put baserom.z64 in baseroms folder`
 
 `make setup`
 
 `make extract`
+
+`make build_assets`
+
+`make -f Makefile.dc -j8`
+
+
+for n64:
 
 `make -j8 COMPILER=gcc`
 

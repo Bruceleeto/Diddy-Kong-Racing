@@ -1,25 +1,3 @@
-# Makefile.dc — Sega Dreamcast build of the DKR game code, via KallistiOS.
-#
-# Usage:
-#   source /opt/toolchains/dc/kos/environ.sh   # sets KOS_BASE, kos-cc, etc.
-#   make -f Makefile.dc -j8                     # build ./dkracing.elf
-#   make -f Makefile.dc clean
-#
-# Notes:
-# - Built with kos-cc (KOS's sh-elf-gcc wrapper). The SH4 runs little-endian,
-#   the same byte order as the PC port, so every endianness fix the Linux build
-#   needed applies here unchanged. Pointers are 4 bytes (the decomp's BITS=32
-#   assumption holds), so no -m width flag is needed.
-# - This shares ALL the game code and the libultra C sources with Makefile.pc.
-#   The only platform-specific dir is dreamcast/ (a copy of linux/). Unlike the
-#   Linux port, the DC build does NOT use SDL or OpenGL: dreamcast/{gfx,audio,
-#   input}.c get rewritten against KOS's PVR / AICA / maple APIs. Until those are
-#   ported they will not compile — that's the visible worklist.
-# - Defines: -DTARGET_PC is kept so every existing non-N64 code path (the port's
-#   reimpl, byteswaps, host shims) compiles as-is; -DTARGET_DC is added on top so
-#   DC-specific branches can be split out from the generic PC path.
-# - libultra/src/gu/{sinf,cosf}.c are omitted the same way the PC build omits
-#   them (byte-swapped polynomial constants); KOS's libm provides sinf/cosf.
 
 include $(KOS_BASE)/Makefile.rules
 
@@ -40,9 +18,7 @@ DEFINES := \
 	-DBUILD_VERSION_STRING=\"2.0G\" \
 	-D_MIPS_SZLONG=32
 
-# dreamcast/ (platform code) compiles WITHOUT -I include/libc: those headers are
-# N64 stubs that shadow the real system libc (their stdio.h only declares
-# sprintf). Game code keeps the shadow; platform code gets KOS's actual headers.
+
 INCLUDES_REIMPL := \
 	-I . \
 	-I include \
@@ -136,11 +112,7 @@ SRC_FILES := \
 	src/hasm/obj_animate.c \
 	src/hasm/obj_shade_fast.c
 
-# libultra C sources, individually. The .s files (exceptasm, cache/CP0 ops,
-# bcopy/bzero/bcmp, sqrtf, libm_vals) are NOT here — those become host shims.
-# io/ai*.c are also NOT here: osAiSetFrequency/osAiSetNextBuffer/osAiGetLength are
-# nothing but MMIO register pokes, and dreamcast/audio.c reimplements the three
-# the game calls on top of the AICA ring buffer.
+
 LIBULTRA_FILES := \
 	libultra/src/audio/bnkf.c \
 	libultra/src/audio/cents2ratio.c \
