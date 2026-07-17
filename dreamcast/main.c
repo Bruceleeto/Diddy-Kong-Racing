@@ -5,6 +5,10 @@
 #include <time.h>
 #include "gfx.h"
 
+// KOS uptime in ns (dreamcast/reimpl.c). Declared here rather than via
+// <kos/timer.h>, whose arch chain redefines R4300.h's EXC_CODE.
+extern u64 pc_uptime_ns(void);
+
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
 // main_game_loop() forever-loop. Called directly on the host thread.
 void thread3_main(void *unused);
@@ -17,14 +21,12 @@ static OSThread sHostThread;
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
 
 s32 pc_retrace_wait(void) {
-    static long long sLastNs = 0;
-    long long targetNs;
-    struct timespec ts;
-    long long nowNs;
+    static u64 sLastNs = 0;
+    u64 targetNs;
+    u64 nowNs;
     s32 periods;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    nowNs = (long long) ts.tv_sec * 1000000000ll + ts.tv_nsec;
+    nowNs = pc_uptime_ns();
 
     if (sLastNs == 0) {
         sLastNs = nowNs;

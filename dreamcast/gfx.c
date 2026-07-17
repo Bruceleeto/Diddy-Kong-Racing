@@ -1,55 +1,7 @@
-// Dreamcast graphics backend — KallistiOS PVR. First-pass renderer.
-//
-// This implements the same gfx.h interface the SDL/OpenGL host renderer does, so
-// the F3DDKR display-list interpreter (dreamcast/main.c) is untouched: it still
-// hands us screen-space triangles that are already projected and perspective-
-// divided, with per-vertex colour, uv and w. All this file does is turn that
-// stream into PVR TA submissions.
-//
-// Design (deliberately simple — "untextured polys are fine" first cut):
-//
-//   * TWO lists. Everything goes to PVR_LIST_TR_POLY, with hardware autosort
-//     DISABLED, except alpha-tested batches (gfx_set_alpha_test with ref > 0),
-//     which go to PVR_LIST_PT_POLY. Punch-through is the only PVR path that
-//     discards a texel before the depth stage, which is exactly what the RDP's
-//     alpha compare does and what the trees need: without it their transparent
-//     texels blend away to nothing but still stamp the W-buffer, and everything
-//     drawn later and behind them is depth-rejected — a sprite-shaped hole showing
-//     whatever was in the framebuffer first.
-//
-//     The PT threshold is one global register, not per-poly. That is exact here
-//     rather than a compromise: every alpha-tested material in the game resolves to
-//     ref = 0.5 (CVG_X_ALPHA), and nothing uses G_AC_THRESHOLD.
-//
-//     A list cannot be reopened once closed, and the TR list is open for the whole
-//     display-list walk, so PT batches are recorded into sPtBuf as raw 32-byte TA
-//     words and replayed into the PT list at frame end. Submission order between
-//     lists does not matter: the PVR always renders OP, then PT, then TR.
-//
-//   * The TR list, with autosort DISABLED. That makes the
-//     PVR honour submission order exactly like GL's immediate mode, so the game's
-//     own back-to-front / overlay-last draw order just works. Depth is still
-//     resolved per-pixel through the W-buffer (1/w in the vertex z field), so
-//     solid geometry occludes correctly; transparency blends in order on top.
-//     Routing opaque geometry onto the faster PVR_LIST_OP_POLY is a later
-//     optimisation, not needed to see the game.
-//
-//   * Geometry is fed to the TA through the SH4 store queues (pvr_dr_*), the same
-//     way OoT's DC renderer does — a 32-byte header or vertex per store-queue
-//     burst, no per-primitive memcpy.
-//
-//   * The GL fixed-function state (bound texture, depth compare/write, filter,
-//     scissor) is mirrored in statics and folded into a PVR poly header that is
-//     (re)compiled only when something changed, then submitted ahead of each
-//     triangle batch.
-//
-// Known first-pass gaps, all cosmetic: no fog; the menu-highlight texenv "blend
-// toward constant" is approximated by modulate.
 
 #include "gfx.h"
 
 #include <kos.h>
-#include <dc/pvr.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -228,11 +180,9 @@ void gfx_window_init(int width, int height, int scale) {
     sScaleX = (float) DC_SCREEN_W / (float) width;
     sScaleY = (float) DC_SCREEN_H / (float) height;
 
-    vid_set_mode(DM_640x480, PM_RGB565);
     if (pvr_init(&params) < 0) {
         return;
     }
-    pvr_set_bg_color(0.0f, 0.0f, 0.0f);
 
     // Set after pvr_init so it cannot be clobbered by it.
     *((volatile unsigned int *) PVR_PT_ALPHA_REF) = PT_ALPHA_REF_VALUE;
@@ -480,10 +430,8 @@ void gfx_frame_begin(void) {
     if (!sPvrReady) {
         return;
     }
-    pvr_wait_ready();
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_TR_POLY);
-    pvr_dr_init(&sDrState);
     sInScene = 1;
     sHdrDirty = 1;
     sScisDirty = 1;
@@ -930,7 +878,6 @@ static void replay_list(int list, unsigned char (*buf)[32], int count) {
         return;
     }
     pvr_list_begin(list);
-    pvr_dr_init(&sDrState);
     for (i = 0; i < count; i++) {
         unsigned char *d = (unsigned char *) pvr_dr_target(sDrState);
 

@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
+#include <kos.h>
 
 #include "input.h"
 
@@ -377,10 +377,15 @@ u32 osSetIntMask(u32 mask) {
 // The N64 Count register ticks at 46.875 MHz (CPU clock / 2).
 // 46875000 ticks/sec over 1e9 ns/sec = exactly 3/64 ticks per nanosecond.
 u32 osGetCount(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    u64 ns = (u64) ts.tv_sec * 1000000000ull + (u64) ts.tv_nsec;
+    u64 ns = timer_ns_gettime64();
     return (u32) (ns * 3 / 64);
+}
+
+// KOS uptime in nanoseconds, for callers that can't include a KOS header —
+// main.c pulls in <ultra64.h>, whose R4300.h collides with the SH4 arch defs
+// (EXC_CODE) that any <kos/*.h> drags in. This wrapper keeps KOS out of there.
+u64 pc_uptime_ns(void) {
+    return timer_ns_gettime64();
 }
 void __osSetCompare(u32 value) {}
 u32 __osGetSR(void) {
