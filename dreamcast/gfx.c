@@ -515,6 +515,163 @@ static void submit_user_clip(int x0, int y0, int x1, int y1) {
     ta_commit(clip);
 }
 
+// ---------------------------------------------------------------------------
+// Exact scissor
+//
+// submit_user_clip() above rounds every edge out to its enclosing 32-pixel tile,
+// because that is the only granularity the PVR's user clip has. The rect it
+// produces is therefore never smaller than the one asked for, and can be up to 31
+// pixels larger per edge — so geometry sitting within a tile of a scissor edge
+// survives a clip that should have cut it. The RDP's scissor is pixel-exact, so
+// the game relies on it being so: the track-select preview leaks its sky and road
+// out past the picture frame, on whichever edges do not happen to land on a tile
+// boundary.
+//
+// The fix is to clip the geometry to the true rect here, on the CPU. The tile clip
+// stays as a free coarse reject; this only has to be exact in the boundary tiles.
+// Nothing is done unless a scissor is actually set and at least one of its edges is
+// misaligned, so the common cases (no scissor, or a full-screen one) cost a compare.
+// ---------------------------------------------------------------------------
+
+/** True when the tile-rounded clip would take in pixels the real one excludes. */
+static int scissor_needs_exact_clip(void) {
+    int x0, y0, x1, y1;
+
+    if (!sScisEnable) {
+        return 0;
+    }
+    x0 = (int) (sScisX0 * sScaleX);
+    y0 = (int) (sScisY0 * sScaleY);
+    x1 = (int) (sScisX1 * sScaleX);
+    y1 = (int) (sScisY1 * sScaleY);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > DC_SCREEN_W) x1 = DC_SCREEN_W;
+    if (y1 > DC_SCREEN_H) y1 = DC_SCREEN_H;
+
+    // An edge on a multiple of 32 is already exact; so is one clamped to the screen.
+    return ((x0 & 31) != 0) || ((y0 & 31) != 0) || ((x1 & 31) != 0) || ((y1 & 31) != 0);
+}
+
+static inline float vert_invw(const GfxTriVert *v) {
+    return (v->w > 1e-6f) ? (1.0f / v->w) : 1.0e6f;
+}
+
+static inline unsigned char clamp_u8(float f) {
+    if (f <= 0.0f) return 0;
+    if (f >= 255.0f) return 255;
+    return (unsigned char) (f + 0.5f);
+}
+
+/**
+ * The vertex `s` of the way along a->b, where `s` is measured in screen space.
+ *
+ * Position is linear in screen space, so it interpolates directly. Everything the
+ * projection divided by w is not: only attr/w is linear across the screen, so each
+ * attribute is interpolated in attr/w and multiplied back out. That is the same
+ * correction the PVR applies between vertices — doing it here just means the new
+ * vertex carries the value the original triangle really had at that point.
+ */
+static void clip_lerp(GfxTriVert *out, const GfxTriVert *a, const GfxTriVert *b, float s) {
+    float ia = vert_invw(a);
+    float ib = vert_invw(b);
+    float iw = ia + s * (ib - ia);
+    float w = (iw > 1e-9f) ? (1.0f / iw) : a->w;
+
+#define PERSP(fa, fb) ((((fa) * ia) + s * (((fb) * ib) - ((fa) * ia))) * w)
+    out->x = a->x + s * (b->x - a->x);
+    out->y = a->y + s * (b->y - a->y);
+    out->z = a->z + s * (b->z - a->z); // unused by this backend; kept consistent
+    out->w = w;
+    out->u = PERSP(a->u, b->u);
+    out->v = PERSP(a->v, b->v);
+    out->fog = PERSP(a->fog, b->fog);
+    out->r = clamp_u8(PERSP((float) a->r, (float) b->r));
+    out->g = clamp_u8(PERSP((float) a->g, (float) b->g));
+    out->b = clamp_u8(PERSP((float) a->b, (float) b->b));
+    out->a = clamp_u8(PERSP((float) a->a, (float) b->a));
+#undef PERSP
+}
+
+// A triangle against four half-planes gains at most one vertex per plane.
+#define CLIP_MAX_VERTS 8
+
+/**
+ * Sutherland-Hodgman against one axis-aligned half-plane.
+ * `axis` picks x (0) or y (1); `keepGreater` selects coord >= bound over <= bound.
+ * Returns the new vertex count; `out` needs room for n + 1.
+ */
+static int clip_poly_plane(const GfxTriVert *in, int n, GfxTriVert *out, int axis, float bound,
+                           int keepGreater) {
+    int m = 0;
+    int i;
+
+    for (i = 0; i < n; i++) {
+        const GfxTriVert *a = &in[i];
+        const GfxTriVert *b = &in[(i + 1) % n];
+        float ca = axis ? a->y : a->x;
+        float cb = axis ? b->y : b->x;
+        int ina = keepGreater ? (ca >= bound) : (ca <= bound);
+        int inb = keepGreater ? (cb >= bound) : (cb <= bound);
+
+        if (ina) {
+            out[m++] = *a;
+        }
+        if (ina != inb) {
+            float d = cb - ca;
+            float s = (d != 0.0f) ? ((bound - ca) / d) : 0.0f;
+
+            if (s < 0.0f) s = 0.0f;
+            if (s > 1.0f) s = 1.0f;
+            clip_lerp(&out[m++], a, b, s);
+        }
+    }
+    return m;
+}
+
+/**
+ * Clips one triangle to the scissor rect. Returns the resulting convex polygon's
+ * vertex count in `poly` (0 when nothing survives), to be fanned into triangles.
+ */
+static int clip_tri_to_scissor(const GfxTriVert *tri, GfxTriVert *poly) {
+    GfxTriVert a[CLIP_MAX_VERTS], b[CLIP_MAX_VERTS];
+    float minX, maxX, minY, maxY;
+    int n;
+
+    minX = maxX = tri[0].x;
+    minY = maxY = tri[0].y;
+    for (n = 1; n < 3; n++) {
+        if (tri[n].x < minX) minX = tri[n].x;
+        if (tri[n].x > maxX) maxX = tri[n].x;
+        if (tri[n].y < minY) minY = tri[n].y;
+        if (tri[n].y > maxY) maxY = tri[n].y;
+    }
+    // Wholly outside: gone. Wholly inside: untouched, which is the common case and
+    // keeps the clipper off the fast path for everything but the boundary tiles.
+    if (maxX < sScisX0 || minX > sScisX1 || maxY < sScisY0 || minY > sScisY1) {
+        return 0;
+    }
+    if (minX >= sScisX0 && maxX <= sScisX1 && minY >= sScisY0 && maxY <= sScisY1) {
+        poly[0] = tri[0];
+        poly[1] = tri[1];
+        poly[2] = tri[2];
+        return 3;
+    }
+
+    a[0] = tri[0];
+    a[1] = tri[1];
+    a[2] = tri[2];
+    n = clip_poly_plane(a, 3, b, 0, sScisX0, 1);
+    if (n < 3) return 0;
+    n = clip_poly_plane(b, n, a, 0, sScisX1, 0);
+    if (n < 3) return 0;
+    n = clip_poly_plane(a, n, b, 1, sScisY0, 1);
+    if (n < 3) return 0;
+    n = clip_poly_plane(b, n, poly, 1, sScisY1, 0);
+    if (n < 3) return 0;
+    return n;
+}
+
 static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     pvr_poly_cxt_t cxt;
 
@@ -570,17 +727,61 @@ static inline unsigned int pack_argb(unsigned char a, unsigned char r, unsigned 
     return ((unsigned int) a << 24) | ((unsigned int) r << 16) | ((unsigned int) g << 8) | (unsigned int) b;
 }
 
+/** One PVR vertex from one GfxTriVert. `eol` ends the 3-vertex strip. */
+static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) {
+    pvr_vertex_t *v = (pvr_vertex_t *) ta_target();
+    float w = s->w;
+    float invw = (w > 1e-6f) ? (1.0f / w) : 1.0e6f;
+
+    if (sDepthOffset) {
+        invw *= 1.003f; // nudge decals toward the viewer
+    }
+
+    v->flags = eol ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+    v->x = s->x * sScaleX;
+    v->y = s->y * sScaleY;
+    v->z = invw;
+    v->u = s->u * uScale;
+    v->v = s->v * vScale;
+    if (sTexEnvBlend) {
+        // result = unlit + texel*(lit - unlit): argb = lit - unlit (the
+        // modulated part), oargb = unlit (the additive offset). unlit is
+        // the per-vertex colour; lit is sBlendColor. Clamp the difference
+        // at 0 — the rare lit<unlit channel just loses its texel weighting.
+        int dr = (int) sBlendColor[0] - (int) s->r;
+        int dg = (int) sBlendColor[1] - (int) s->g;
+        int db = (int) sBlendColor[2] - (int) s->b;
+
+        if (dr < 0) dr = 0;
+        if (dg < 0) dg = 0;
+        if (db < 0) db = 0;
+        v->argb = pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db);
+        v->oargb = ((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b;
+    } else {
+        v->argb = pack_argb(s->a, s->r, s->g, s->b);
+        v->oargb = 0;
+    }
+    ta_commit(v);
+}
+
 void gfx_draw_tris(const GfxTriVert *verts, int count) {
     pvr_poly_hdr_t ptHdr __attribute__((aligned(32)));
+    GfxTriVert poly[CLIP_MAX_VERTS];
     const pvr_poly_hdr_t *hdrSrc;
     pvr_poly_hdr_t *hdrDst;
     float uScale = 1.0f, vScale = 1.0f;
     int tris = count / 3;
+    int outTris = tris;
+    int exact;
     int i, j;
 
     if (!sInScene || count < 3) {
         return;
     }
+
+    // With a misaligned scissor the tile clip is not enough, so the geometry is cut
+    // to the true rect at emit time below.
+    exact = scissor_needs_exact_clip();
 
     // Pick the list. Alpha-tested batches go to PT. Backdrop — anything that cannot
     // be depth-rejected and is drawn before the first alpha-tested batch — goes to
@@ -611,8 +812,25 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         }
     }
 
+    // Only the recorded lists reserve space up front, and clipping changes how many
+    // triangles there will be — so when it is active, count them for real first.
+    // TR streams straight out and needs no count, which keeps the second pass off
+    // the path that matters: a split-screen viewport is a misaligned rect covering
+    // the whole scene. Fully-inside triangles short-circuit in clip_tri_to_scissor,
+    // so even this pass is a handful of compares each.
+    if (exact && sRoute != ROUTE_TR) {
+        outTris = 0;
+        for (i = 0; i + 3 <= count; i += 3) {
+            int n = clip_tri_to_scissor(&verts[i], poly);
+
+            if (n >= 3) {
+                outTris += n - 2;
+            }
+        }
+    }
+
     if (sRoute == ROUTE_PT) {
-        int need = 1 + (tris * 3) + (sScisDirtyPt ? 1 : 0);
+        int need = 1 + (outTris * 3) + (sScisDirtyPt ? 1 : 0);
 
         if (sPtCount + need > PT_MAX_WORDS) {
             if (!sPtOverflow) {
@@ -623,7 +841,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             return;
         }
     } else if (sRoute == ROUTE_OP) {
-        int need = 1 + (tris * 3) + (sScisDirtyOp ? 1 : 0);
+        int need = 1 + (outTris * 3) + (sScisDirtyOp ? 1 : 0);
 
         if (sOpCount + need > OP_MAX_WORDS) {
             // Falls back to TR rather than dropping the draw: a backdrop in the
@@ -685,40 +903,19 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 
     // GL_TRIANGLES -> one 3-vertex PVR strip per triangle (3rd vertex EOL).
     for (i = 0; i + 3 <= count; i += 3) {
-        for (j = 0; j < 3; j++) {
-            const GfxTriVert *s = &verts[i + j];
-            pvr_vertex_t *v = (pvr_vertex_t *) ta_target();
-            float w = s->w;
-            float invw = (w > 1e-6f) ? (1.0f / w) : 1.0e6f;
-
-            if (sDepthOffset) {
-                invw *= 1.003f; // nudge decals toward the viewer
+        if (!exact) {
+            for (j = 0; j < 3; j++) {
+                emit_vert(&verts[i + j], j == 2, uScale, vScale);
             }
+        } else {
+            // The clip turns a triangle into a convex polygon; fan it back out.
+            int n = clip_tri_to_scissor(&verts[i], poly);
 
-            v->flags = (j == 2) ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
-            v->x = s->x * sScaleX;
-            v->y = s->y * sScaleY;
-            v->z = invw;
-            v->u = s->u * uScale;
-            v->v = s->v * vScale;
-            if (sTexEnvBlend) {
-                // result = unlit + texel*(lit - unlit): argb = lit - unlit (the
-                // modulated part), oargb = unlit (the additive offset). unlit is
-                // the per-vertex colour; lit is sBlendColor. Clamp the difference
-                // at 0 — the rare lit<unlit channel just loses its texel weighting.
-                int dr = (int) sBlendColor[0] - (int) s->r;
-                int dg = (int) sBlendColor[1] - (int) s->g;
-                int db = (int) sBlendColor[2] - (int) s->b;
-                if (dr < 0) dr = 0;
-                if (dg < 0) dg = 0;
-                if (db < 0) db = 0;
-                v->argb = pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db);
-                v->oargb = ((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b;
-            } else {
-                v->argb = pack_argb(s->a, s->r, s->g, s->b);
-                v->oargb = 0;
+            for (j = 1; j + 1 < n; j++) {
+                emit_vert(&poly[0], 0, uScale, vScale);
+                emit_vert(&poly[j], 0, uScale, vScale);
+                emit_vert(&poly[j + 1], 1, uScale, vScale);
             }
-            ta_commit(v);
         }
     }
 
