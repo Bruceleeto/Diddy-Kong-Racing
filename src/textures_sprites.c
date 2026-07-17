@@ -1047,6 +1047,18 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
     allocSize = numTextures * 4 * sizeof(Vertex);
     allocSize += (numTextures * 4) << 3;
     allocSize += spriteAsset->numberOfFrames * sizeof(Gfx);
+#ifdef TARGET_PC
+    // Retail bug: sprite_init_frame ends every frame with gDPPipeSync +
+    // gSPEndDisplayList (2 Gfx), but only 1 Gfx per frame is budgeted here; a
+    // frame with no tiles (e.g. the banana-sparkle's first/last frames) makes
+    // the display list overrun into the vertex data that follows, stamping
+    // G_RDPPIPESYNC/G_ENDDL words over the first two vertices. On big-endian
+    // N64 the stray opcode byte lands in a vertex X with Y=0 — a near-invisible
+    // horizontal sliver — but little-endian puts it in Y, which draws a giant
+    // white streak across the screen. Reserve the second Gfx per frame (and
+    // shift the vertex region below to match). See docs/bug.md.
+    allocSize += spriteAsset->numberOfFrames * sizeof(Gfx);
+#endif
     allocSize += numTextures << 4 << 1;
     allocSize += numTextures * 4;
     allocSize += (s32) align16((u8 *) 0x10);
@@ -1065,6 +1077,11 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
     gSpriteDLists = (Gfx *) ((s32) gSpriteTriangles + numTextures * 0x20); // 0x20 = sizeof(Triangle) * 2
     gSpriteVertices = (Vertex *) ((s32) gSpriteDLists + numTextures * 0x20 +
                                   spriteAsset->numberOfFrames * sizeof(Gfx)); // 0x20 = sizeof(Gfx) * 4
+#ifdef TARGET_PC
+    // Second half of the per-frame trailer fix above: keep the vertex region
+    // clear of the display list's worst-case size.
+    gSpriteVertices = (Vertex *) ((s32) gSpriteVertices + spriteAsset->numberOfFrames * sizeof(Gfx));
+#endif
     sprite->textures = (TextureHeader **) ((s32) gSpriteVertices + numTextures * sizeof(Vertex) * 4);
 
     allocFailed = FALSE;

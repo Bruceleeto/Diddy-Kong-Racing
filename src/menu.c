@@ -3554,7 +3554,15 @@ s32 menu_title_screen_loop(s32 updateRate) {
         } else if (gTitleAudioCounter < 5.0f) {
             music_volume_set((s32) ((f32) sMenuMusicVolume * (gTitleAudioCounter - 4.0f)));
         } else {
+#ifdef TARGET_PC
+            // Retail reads byte 3 of the s32 to grab its low byte (= the full
+            // restore volume, 0x7F) — correct only on big-endian. On little-endian
+            // PC byte 3 is the high byte (0), which sets music volume to 0 and
+            // leaves it there. Read the low byte value-neutrally instead.
+            music_volume_set((u8) sMenuMusicVolume);
+#else
             music_volume_set(*((s8 *) &sMenuMusicVolume + 3));
+#endif
         }
     }
     if (gTitleRevealTimer == 0) {

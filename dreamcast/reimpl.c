@@ -1,8 +1,3 @@
-// OS reimplementation stubs for the PC build.
-// Modeled on the OoT DC port's src/linux/reimpl.c — same names and behavior
-// where the two games needed the same symbol; DKR-specific ones added at the
-// bottom of each section.
-
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,7 +39,7 @@ u8 *main_BSS_START[1] = { 0 };
 // N64: the main heap is [end of BSS .. RAM_END], carved out by the linker.
 // PC: a static pool. memory.c's "ramEnd - (s32)&gMainMemoryPool" sizing math
 // still needs TARGET_PC surgery to use this pool's real size instead.
-u8 gMainMemoryPool[16 * 1024 * 1024] __attribute__((aligned(16)));
+u8 gMainMemoryPool[3 * 1024 * 1024] __attribute__((aligned(16)));
 u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
 
 // ---------------------------------------------------------------------------
@@ -57,6 +52,13 @@ u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
 // The LUT is an array of big-endian u32s — byteswapped once at load. Asset
 // *contents* are left big-endian; each parse site gets fixed as it comes up.
 // ---------------------------------------------------------------------------
+
+#ifdef TARGET_DC
+#define ASSET_DIR "/pc/assets/"
+#else
+#define ASSET_DIR "assets/"
+#endif
+
 static u8 *sAssetLut = NULL;
 static u32 sAssetLutSize = 0;
 static u8 *sAssetsBin = NULL;
@@ -90,8 +92,8 @@ static void pc_assets_init(void) {
     if (sAssetLut != NULL) {
         return;
     }
-    sAssetLut = pc_load_file("assets/assets.lut.bin", &sAssetLutSize);
-    sAssetsBin = pc_load_file("assets/assets.bin", &sAssetsBinSize);
+    sAssetLut = pc_load_file(ASSET_DIR "assets.lut.bin", &sAssetLutSize);
+    sAssetsBin = pc_load_file(ASSET_DIR "assets.bin", &sAssetsBinSize);
 
     // LUT: entry count followed by offsets, all big-endian u32 — swap in place.
     for (i = 0; i + 3 < sAssetLutSize; i += 4) {

@@ -15,6 +15,11 @@
 ALCSPlayer *gMusicPlayer = NULL;  // Official Name: tuneSeqPlayer
 
 #ifdef TARGET_PC
+// linux/reimpl.c — the shared byteswap helpers (same as game.c uses for the
+// level-header and AI-behaviour tables).
+extern void pc_swap32_buf(void *buf, u32 numBytes);
+extern void pc_swap16_buf(void *buf, u32 numBytes);
+
 // Audio is not initialized on PC (audio_init early-returns), so the public
 // music API no-ops. gMusicPlayer is created by audio_init, so it doubles as
 // the "music system initialized" flag.
@@ -93,15 +98,111 @@ SoundHandle gRacerSoundMask;
  * Allocate memory for all the audio systems, including sequence data, sound data and heaps.
  * Afterwards, set up the audio thread and start it.
  */
+#ifdef TARGET_PC
+/**
+ * M1 diagnostic (docs/audio.md): walk the swapped banks and report what came out.
+ * This is the deliverable of the byteswap milestone — there is no mixer yet, so
+ * these numbers are the only evidence the swap is right. Delete once signed off.
+ */
+static void audio_pc_census_bank(const char *name, ALBankFile *file) {
+    s32 b, in, s;
+    s32 sounds = 0, adpcm = 0, raw16 = 0, other = 0, looped = 0;
+
+    if (file == NULL) {
+        stubbed_printf("AUDIO/census: %s is NULL\n", name);
+        return;
+    }
+    stubbed_printf("AUDIO/census: %s rev=%d banks=%d\n", name, file->revision, file->bankCount);
+
+    for (b = 0; b < file->bankCount; b++) {
+        ALBank *bank = file->bankArray[b];
+
+        if (bank == NULL) {
+            continue;
+        }
+        stubbed_printf("  bank %d: insts=%d sampleRate=%d percussion=%s\n", b, bank->instCount, bank->sampleRate,
+                       bank->percussion ? "yes" : "no");
+
+        for (in = 0; in < bank->instCount; in++) {
+            ALInstrument *inst = bank->instArray[in];
+
+            if (inst == NULL) {
+                continue;
+            }
+            for (s = 0; s < inst->soundCount; s++) {
+                ALSound *snd = inst->soundArray[s];
+                ALWaveTable *w;
+
+                if (snd == NULL || snd->wavetable == NULL) {
+                    continue;
+                }
+                w = snd->wavetable;
+                sounds++;
+                if (w->type == AL_ADPCM_WAVE) {
+                    adpcm++;
+                    if (w->waveInfo.adpcmWave.loop) {
+                        looped++;
+                    }
+                } else if (w->type == AL_RAW16_WAVE) {
+                    raw16++;
+                    if (w->waveInfo.rawWave.loop) {
+                        looped++;
+                    }
+                } else {
+                    other++;
+                }
+                // First few waves in full, so base/len can be sanity-checked by eye.
+                // The book's order/npredictors are the best swap canary we have:
+                // order is always 2 and npredictors is small (1-8). If those come
+                // back as huge numbers, the BSWAP32-before-sizing in _bnkfSwapBook
+                // is wrong and the book array was swapped at the wrong length.
+                if (sounds <= 4) {
+                    stubbed_printf("    wave %d: type=%d base=%08X len=%d", sounds, w->type, (u32) w->base, w->len);
+                    if (w->type == AL_ADPCM_WAVE && w->waveInfo.adpcmWave.book != NULL) {
+                        stubbed_printf(" book(order=%d npred=%d)", w->waveInfo.adpcmWave.book->order,
+                                       w->waveInfo.adpcmWave.book->npredictors);
+                    }
+                    stubbed_printf("\n");
+                }
+            }
+        }
+    }
+    stubbed_printf("  %s totals: sounds=%d adpcm=%d raw16=%d other=%d looped=%d\n", name, sounds, adpcm, raw16, other,
+                   looped);
+    if (other != 0) {
+        stubbed_printf("  *** %s: %d waves of UNKNOWN type — the swap is probably wrong ***\n", name, other);
+    }
+}
+
+static void audio_pc_census(void) {
+    s32 i;
+    u32 maxLen = 0;
+
+    audio_pc_census_bank("soundBank", gSoundBank);
+    audio_pc_census_bank("sequenceBank", gSequenceBank);
+
+    stubbed_printf("AUDIO/census: sequences=%d sounds=%d(table) seqSounds=%d\n",
+                   gSequenceTable ? gSequenceTable->seqCount : -1, gSoundCount, gSeqSoundCount);
+    for (i = 0; gSequenceTable != NULL && i < gSequenceTable->seqCount; i++) {
+        if (gSequenceTable->seqArray[i].len > (s32) maxLen) {
+            maxLen = gSequenceTable->seqArray[i].len;
+        }
+        if (i < 3) {
+            stubbed_printf("  seq %d: offset=%08X len=%d\n", i, (u32) gSequenceTable->seqArray[i].offset,
+                           gSequenceTable->seqArray[i].len);
+        }
+    }
+    stubbed_printf("  longest sequence=%d bytes\n", maxLen);
+
+    for (i = 0; i < 3 && i < gSoundCount; i++) {
+        stubbed_printf("  sound %d: bite=%d vol=%d pitch=%d range=%d prio=%d\n", i, gSoundTable[i].soundBite,
+                       gSoundTable[i].volume, gSoundTable[i].pitch, gSoundTable[i].range, gSoundTable[i].priority);
+    }
+}
+#endif
+
 void audio_init(OSSched *sc) {
     s32 i;
-#ifdef TARGET_PC
-    // Audio deferred entirely (OoT-port style): the bank/sequence tables are
-    // big-endian and the synthesizer drives RSP command lists — both are the
-    // audio milestone's problem. Sound globals stay NULL; later audio calls
-    // that trip on them get stubbed as they surface.
-    return;
-#endif
     ALSynConfig synth_config;
     s32 *addrPtr;
     u32 seqfSize;
@@ -113,6 +214,13 @@ void audio_init(OSSched *sc) {
     alHeapInit(&gALHeap, gAudioHeapStack, sizeof(gAudioHeapStack));
 
     addrPtr = (s32 *) asset_table_load(ASSET_AUDIO_TABLE);
+#ifdef TARGET_PC
+    // The top-level asset LUT is swapped once at load (linux/reimpl.c), but
+    // per-asset sub-tables like this one are not — same as the level-header and
+    // AI-behaviour tables in game.c. Everything below indexes addrPtr[], so this
+    // has to happen before the first use.
+    pc_swap32_buf(addrPtr, asset_table_size(ASSET_AUDIO_TABLE));
+#endif
     gSoundBank = (ALBankFile *) mempool_alloc_safe(addrPtr[ASSET_AUDIO_2] - addrPtr[ASSET_AUDIO_1], COLOUR_TAG_CYAN);
     asset_load(ASSET_AUDIO, (u32) gSoundBank, addrPtr[ASSET_AUDIO_1], addrPtr[ASSET_AUDIO_2] - addrPtr[ASSET_AUDIO_1]);
     alBnkfNew(gSoundBank, asset_rom_offset(ASSET_AUDIO, addrPtr[ASSET_AUDIO_2]));
@@ -121,6 +229,16 @@ void audio_init(OSSched *sc) {
     gSoundTable = (SoundData *) mempool_alloc_safe(gSoundTableSize, COLOUR_TAG_CYAN);
     asset_load(ASSET_AUDIO, (u32) gSoundTable, addrPtr[ASSET_AUDIO_6], gSoundTableSize);
     gSoundCount = gSoundTableSize / sizeof(SoundData);
+#ifdef TARGET_PC
+    // SoundData is 0x0A bytes of MIXED widths (u16 at 0, six u8s, u16 at 6), so a
+    // blanket pc_swap16_buf over the array would corrupt every u8 pair. Only the
+    // two u16 fields swap. Note gSpatialSoundTable is an alias of this same array
+    // (audspat_init takes it from sound_table_properties) — swap it once, here.
+    for (i = 0; i < gSoundCount; i++) {
+        pc_swap16_buf(&gSoundTable[i].soundBite, sizeof(u16));
+        pc_swap16_buf(&gSoundTable[i].range, sizeof(u16));
+    }
+#endif
 
     gSeqSoundTableSize = addrPtr[ASSET_AUDIO_6] - addrPtr[ASSET_AUDIO_5];
     gSeqSoundTable = (MusicData *) mempool_alloc_safe(gSeqSoundTableSize, COLOUR_TAG_CYAN);
@@ -132,6 +250,14 @@ void audio_init(OSSched *sc) {
     alBnkfNew(gSequenceBank, asset_rom_offset(ASSET_AUDIO, addrPtr[ASSET_AUDIO_0]));
     gSequenceTable = (ALSeqFile *) alHeapAlloc(&gALHeap, 1, 4);
     asset_load(ASSET_AUDIO, (u32) gSequenceTable, addrPtr[ASSET_AUDIO_4], 4);
+#ifdef TARGET_PC
+    // This 4-byte peek reads seqCount straight out of the raw BE header to size
+    // the real load below — it happens before alSeqFileNew (which does the full
+    // swap) ever sees the file, so it needs its own. This temp buffer is thrown
+    // away right after, so the swap in alSeqFileNew is not a double-swap.
+    pc_swap16_buf(&gSequenceTable->revision, sizeof(s16));
+    pc_swap16_buf(&gSequenceTable->seqCount, sizeof(s16));
+#endif
 
     seqfSize = (gSequenceTable->seqCount) * 8 + 4;
     gSequenceTable = mempool_alloc_safe(seqfSize, COLOUR_TAG_CYAN);
@@ -149,6 +275,15 @@ void audio_init(OSSched *sc) {
             seqLength = gSeqLengthTable[i];
         }
     }
+
+#ifdef TARGET_PC
+    // M1 census (docs/audio.md): everything above is the byteswap layer; dump what
+    // it produced so the numbers can be eyeballed before a mixer exists to hide
+    // behind. Sample rates should be recognizable (11025/16000/22050-ish), wave
+    // lengths sane, counts non-absurd. Garbage here means the swap is wrong.
+    // Remove once M1 is signed off.
+    audio_pc_census();
+#endif
 
     synth_config.maxVVoices = 40;
     synth_config.maxPVoices = 40;
@@ -349,11 +484,7 @@ void sound_update_queue(u8 updateRate) {
     s32 i;
     s32 j;
 
-#ifdef TARGET_PC
-    // Audio subsystem is not initialized on PC (see audio_init) — the whole
-    // per-frame music/sfx pump would deref NULL players.
-    return;
-#endif
+    MUSIC_PC_GUARD();
     if (sMusicDelayLength > 0) {
         sMusicDelayTimer += updateRate;
         sMusicFadeVolume = ((f32) sMusicDelayTimer) / ((f32) sMusicDelayLength);
@@ -1116,6 +1247,13 @@ void music_sequence_init(ALCSPlayer *seqp, void *sequence, u8 *seqID, ALCSeq *se
         asset_load(ASSET_AUDIO, (u32) sequence,
                    gSequenceTable->seqArray[*seqID].offset - asset_rom_offset(ASSET_AUDIO, 0),
                    (s32) gSeqLengthTable[*seqID]);
+#ifdef TARGET_PC
+        // ALCMidiHdr is 17 big-endian u32s (16 track offsets + division) sitting at
+        // the head of the sequence, and alCSeqNew reads them immediately. The MIDI
+        // event stream after the header is a byte stream (with variable-length
+        // quantities) — it must NOT be swapped.
+        pc_swap32_buf(sequence, sizeof(ALCMidiHdr));
+#endif
         alCSeqNew(seq, sequence);
         alCSPSetSeq(seqp, seq);
         alCSPPlay(seqp);

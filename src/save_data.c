@@ -1068,9 +1068,26 @@ s32 calculate_eeprom_settings_checksum(u64 eepromSettings) {
     s32 i;
 
     ret = 5;
+#ifdef TARGET_PC
+    // Same sum over nibbles 0..13, but split across the two 32-bit halves so the
+    // shift amount is variable on a u32 instead of a u64. On the SH4 (Dreamcast)
+    // a variable u64 shift has no instruction and would otherwise pull in libgcc's
+    // __lshrdi3; the split is harmless on the x86 PC build, which shares this path.
+    {
+        u32 lo = (u32) eepromSettings;
+        u32 hi = (u32) (eepromSettings >> 32);
+        for (i = 0; i < 8; i++) { // nibbles 0..7
+            ret += (lo >> (i << 2)) & 0xF;
+        }
+        for (i = 0; i < 6; i++) { // nibbles 8..13
+            ret += (hi >> (i << 2)) & 0xF;
+        }
+    }
+#else
     for (i = 0; i <= 13; i++) {
         ret += (u16) (eepromSettings >> (i << 2)) & 0xF;
     }
+#endif
     return ret;
 }
 
