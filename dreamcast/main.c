@@ -1464,7 +1464,8 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
     }
 }
 
-// linux/audio.c
+// dreamcast/audio.c
+extern void dc_audio_init(void);
 extern void pc_audio_frame(void);
 extern void pc_audio_report(void);
 
@@ -1513,6 +1514,9 @@ int main(int argc, char **argv) {
     sHostThread.priority = 10;
     __osRunningThread = &sHostThread;
     gfx_window_init(N64_SCREEN_W, N64_SCREEN_H, WINDOW_SCALE);
+    // Bring AICA up now, well before init_game produces the first PCM, so the SPU
+    // firmware handshake completes before any snd_stream_start (dreamcast/audio.c).
+    dc_audio_init();
     thread3_main(0);
     return 0;
 }

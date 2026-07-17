@@ -940,10 +940,38 @@ static void replay_list(int list, unsigned char (*buf)[32], int count) {
     pvr_list_finish();
 }
 
+// ---------------------------------------------------------------------------
+// FPS measurement (for the on-screen profiler overlay; see thread3_main.c)
+// ---------------------------------------------------------------------------
+static float sFps = 0.0f;
+static uint64_t sLastFrameUs = 0;
+
+// Smoothed frames-per-second, measured from the wall-clock interval between
+// rendered frames. Exposed to game code (thread3_main.c) which draws it via the
+// debug-text font.
+float pc_get_fps(void) {
+    return sFps;
+}
+
+static void fps_tick(void) {
+    uint64_t now = timer_us_gettime64();
+
+    if (sLastFrameUs != 0) {
+        uint64_t dt = now - sLastFrameUs;
+        if (dt > 0) {
+            float inst = 1000000.0f / (float) dt;
+            // Exponential moving average so the readout is steady, not jittery.
+            sFps = (sFps == 0.0f) ? inst : (sFps * 0.9f + inst * 0.1f);
+        }
+    }
+    sLastFrameUs = now;
+}
+
 void gfx_frame_end(void) {
     if (!sInScene) {
         return;
     }
+    fps_tick();
     pvr_list_finish(); // TR
 
     // Neither OP nor PT was opened this frame, so opening them now is legal — the

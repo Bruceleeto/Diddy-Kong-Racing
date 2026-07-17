@@ -313,6 +313,17 @@ void main_game_loop(void) {
 
     // This is a good spot to place custom text if you want it to overlay it over ALL the
     // menus & gameplay.
+#ifdef TARGET_DC
+    // Profiler: FPS readout in the center-left, drawn with the debug small font.
+    // pc_get_fps() lives in dreamcast/gfx.c and reflects real rendered-frame cadence.
+    {
+        extern float pc_get_fps(void);
+        s32 fps10 = (s32) (pc_get_fps() * 10.0f + 0.5f);
+        set_render_printf_position(16, 108);
+        set_render_printf_colour(255, 255, 0, 255);
+        render_printf("FPS %d.%d", fps10 / 10, fps10 % 10);
+    }
+#endif
 
     sound_update_queue(sLogicUpdateRate);
     debug_text_print(&gCurrDisplayList);

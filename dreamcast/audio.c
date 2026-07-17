@@ -146,32 +146,55 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t left, uintptr_t right, si
 // aisetnextbuf.c — all dropped from the build, they only poke MMIO)
 // ---------------------------------------------------------------------------
 
-// Called once from amCreateAudioMgr with OUTPUT_RATE. The manager derives its
-// whole frame-size schedule from the value we return, so it must be the rate we
-// actually pace (and now play) against. We also bring AICA up here; failure is
-// non-fatal — the build just stays silent.
-s32 osAiSetFrequency(u32 frequency) {
-    (void) frequency;
-    sReady = 1;
+// Bring AICA up. MUST be called early (from main(), before the game starts
+// producing audio) — snd_stream_init() uploads the AICA firmware and gives it
+// ~10ms to boot, and only once the SPU has validated its command queue is it
+// legal to issue snd_stream_start(). Doing this lazily from osAiSetFrequency
+// (which runs mid-init_game, right before the first frame of PCM) raced the
+// handshake and tripped KOS's "Queue is not yet valid" assert. Failure here is
+// non-fatal: the build just stays silent-but-paced.
+void dc_audio_init(void) {
+    if (sAudioOk) {
+        return;
+    }
+    ring_init(0);
+    ring_init(1);
 
-    if (!sAudioOk) {
-        ring_init(0);
-        ring_init(1);
+    if (snd_stream_init() != 0) {
+        printf("DC Audio: snd_stream_init failed; running silent\n");
+        return;
+    }
 
-        if (snd_stream_init() == 0) {
-            sStream = snd_stream_alloc(NULL, SND_STREAM_BUFSIZE);
-            if (sStream != SND_STREAM_INVALID) {
-                snd_stream_set_callback_direct(sStream, audio_cb);
-                snd_stream_volume(sStream, 255);
-                sAudioOk = 1;
-            } else {
-                printf("DC Audio: snd_stream_alloc failed; running silent\n");
-            }
-        } else {
-            printf("DC Audio: snd_stream_init failed; running silent\n");
+    // snd_init() only gives the SPU ~10ms to boot its firmware, which is not
+    // enough here: the queue is still invalid afterwards and the first AICA
+    // command asserts ("Queue is not yet valid"). Busy-wait a generous margin on
+    // the microsecond timer — this does not depend on the scheduler and cannot
+    // return early (unlike thd_sleep). We ALSO avoid issuing any AICA command
+    // from here (no snd_stream_volume): snd_stream_alloc touches only SH4 memory,
+    // so the first real AICA traffic is snd_stream_start() on the first frame of
+    // PCM, seconds later — by which point the queue is long valid.
+    {
+        uint64_t deadline = timer_us_gettime64() + 100000; // 100ms
+        while (timer_us_gettime64() < deadline) {
         }
     }
 
+    sStream = snd_stream_alloc(NULL, SND_STREAM_BUFSIZE);
+    if (sStream == SND_STREAM_INVALID) {
+        printf("DC Audio: snd_stream_alloc failed; running silent\n");
+        return;
+    }
+    snd_stream_set_callback_direct(sStream, audio_cb);
+    sAudioOk = 1;
+}
+
+// Called once from amCreateAudioMgr with OUTPUT_RATE. The manager derives its
+// whole frame-size schedule from the value we return, so it must be the rate we
+// actually pace (and now play) against. AICA is brought up separately and earlier
+// by dc_audio_init(); here we just mark audio live.
+s32 osAiSetFrequency(u32 frequency) {
+    (void) frequency;
+    sReady = 1;
     return (s32) DC_AUDIO_RATE;
 }
 
@@ -209,6 +232,8 @@ void osAiSetNextBuffer(void *buf, u32 size) {
         if (!sStreamStarted) {
             sStreamStarted = 1;
             snd_stream_start(sStream, DC_AUDIO_RATE, 1 /* stereo */);
+            // Safe to talk to AICA now the stream is live and the queue is valid.
+            snd_stream_volume(sStream, 255);
         }
     }
 }
