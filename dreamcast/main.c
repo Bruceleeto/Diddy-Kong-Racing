@@ -96,7 +96,7 @@ s32 pc_retrace_wait(void) {
 
 #define GFX_MAX_VERTS 64    // the RSP's internal vertex array
 #define GFX_MAX_DEPTH 16    // display-list recursion guard
-#define GFX_MAX_TRI_VERTS 65536
+#define GFX_MAX_TRI_VERTS 8192
 
 // A vertex in clip space — post-matrix, pre-divide. Kept unprojected because
 // near-plane clipping has to interpolate here, before the divide by w (a vertex
@@ -217,7 +217,7 @@ static s16 sFogMul = 0;
 static s16 sFogOfs = 0;
 
 #define GFX_MAX_TEXTURES 1024
-#define GFX_MAX_TEX_TEXELS (512 * 512)
+#define GFX_MAX_TEX_TEXELS (256 * 256)
 
 typedef struct {
     u32 timg;

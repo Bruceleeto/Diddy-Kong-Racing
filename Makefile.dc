@@ -61,7 +61,7 @@ INCLUDES_REIMPL := \
 
 INCLUDES := -I include/libc $(INCLUDES_REIMPL)
 
-OPT      ?= -Os
+OPT      ?= -O3
 
 BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-std=gnu23 \
@@ -237,7 +237,6 @@ LIBULTRA_FILES := \
 	libultra/src/libc/ll.c \
 	libultra/src/libc/llcvt.c \
 	libultra/src/libc/rmonPrintf.c \
-	libultra/src/libc/string.c \
 	libultra/src/libc/xldtob.c \
 	libultra/src/libc/xlitob.c \
 	libultra/src/libc/xprintf.c \
@@ -269,13 +268,14 @@ O_FILES := $(addprefix $(BUILD)/,$(SRC_FILES:.c=.o) $(LIBULTRA_FILES:.c=.o))
 D_FILES := $(O_FILES:.o=.d)
 
 TARGET := dkracing.elf
+MAP    := $(TARGET:.elf=.map)
 
 .PHONY: all clean
 
 all: $(TARGET)
 
 $(TARGET): $(O_FILES)
-	$(CC) $(O_FILES) -o $(TARGET) $(LIBS)
+	$(CC) $(O_FILES) -o $(TARGET) -s -Wl,-Map,$(MAP) $(LIBS)
 
 $(BUILD)/dreamcast/%.o: dreamcast/%.c
 	@mkdir -p $(dir $@)
@@ -286,6 +286,6 @@ $(BUILD)/%.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf $(BUILD) $(TARGET)
+	rm -rf $(BUILD) $(TARGET) $(MAP)
 
 -include $(D_FILES)
