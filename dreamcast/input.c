@@ -2,10 +2,7 @@
 
 #include <kos.h>
 
-// The CONT_* button bits from include/PR/os_cont.h, repeated here because this
-// file cannot include the N64 headers (see input.h). These are the N64 side; the
-// KOS CONT_* masks below (CONT_A etc.) are the Dreamcast pad and come from
-// <dc/maple/controller.h>.
+
 #define BTN_A 0x8000
 #define BTN_B 0x4000
 #define BTN_Z 0x2000

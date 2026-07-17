@@ -1,35 +1,5 @@
-// Dreamcast audio backend — real AICA output via KOS snd_stream.
-//
-// This is the ONLY platform-specific audio file. Everything above it — the
-// libultra ALSynth sequencer/synthesizer, the audio manager, the (M3)
-// command-list interpreter (pc_audio_submit in src/audiomgr.c) — is portable C
-// and produces real interleaved stereo s16 PCM at 22050 Hz. This file takes the
-// PCM handed to osAiSetNextBuffer and feeds it to the AICA through a KOS sound
-// stream; earlier milestones threw it away ("silent but correctly paced").
-//
-// Two independent jobs live here, deliberately kept separate:
-//
-//   1. Pacing (unchanged from the silent build). The audio manager runs a
-//      frame-size feedback loop: __amHandleFrameMsg recomputes how many samples
-//      to synthesize each frame from osAiGetLength(). That loop is stable and is
-//      NOT tied to real hardware — it models a virtual output queue by byte count
-//      (sQueued) drained one video frame at a time in pc_audio_frame(). We leave
-//      it exactly as it was so synthesis keeps producing ~1 frame of audio per
-//      tick regardless of what AICA is doing.
-//
-//   2. Output (new). osAiSetNextBuffer deinterleaves each produced frame into two
-//      per-channel ring buffers; a KOS snd_stream direct callback pulls from them
-//      to fill AICA's SPU buffers, and pc_audio_frame() polls the stream once per
-//      video frame. If AICA init fails we simply never start the stream and the
-//      build degrades to the old silent-but-paced behaviour — the game still runs.
-//
-// The ring is bounded (RING_BYTES/ch). Synthesis is paced to roughly the output
-// rate and AICA consumes at exactly the output rate, so the two stay balanced;
-// transient over/underruns drop/zero a little audio and self-correct rather than
-// stalling anything.
-
 #include <kos.h>
-#include <stddef.h> // wchar_t, before <dc/sound/stream.h> pulls <inttypes.h>
+#include <stddef.h> 
 #include <dc/sound/stream.h>
 #include <stdio.h>
 #include <string.h>
@@ -141,10 +111,6 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t left, uintptr_t right, si
     return size_req;
 }
 
-// ---------------------------------------------------------------------------
-// AI shims (replacing libultra/src/io/ai.c, aigetlen.c, aisetfreq.c,
-// aisetnextbuf.c — all dropped from the build, they only poke MMIO)
-// ---------------------------------------------------------------------------
 
 // Bring AICA up. MUST be called early (from main(), before the game starts
 // producing audio) — snd_stream_init() uploads the AICA firmware and gives it

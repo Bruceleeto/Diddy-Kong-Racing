@@ -1,8 +1,3 @@
-// OS reimplementation stubs for the PC build.
-// Modeled on the OoT DC port's src/linux/reimpl.c — same names and behavior
-// where the two games needed the same symbol; DKR-specific ones added at the
-// bottom of each section.
-
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -57,9 +52,7 @@ u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
 // The LUT is an array of big-endian u32s — byteswapped once at load. Asset
 // *contents* are left big-endian; each parse site gets fixed as it comes up.
 // ---------------------------------------------------------------------------
-// On Dreamcast the assets are served from the host over dcload, which KOS mounts
-// at /pc (the machine dc-tool runs on). On the PC build they sit in the repo's
-// assets/ dir, read relative to the launch cwd.
+
 #ifdef TARGET_DC
 #define ASSET_DIR "/pc/assets/"
 #else

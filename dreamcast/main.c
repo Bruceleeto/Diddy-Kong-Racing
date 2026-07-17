@@ -2,38 +2,15 @@
 #include <ultra64.h>
 #include <structs.h>
 #include <f3ddkr.h>
-
+#include <time.h>
 #include "gfx.h"
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
-// main_game_loop() forever-loop. Called directly on the host thread, same as
-// the OoT DC port calling Main()/Graph_ThreadEntry directly — the N64 boot
-// chain (mainproc -> thread1 -> thread3) is skipped entirely, so the libultra
-// thread machinery is never needed.
+// main_game_loop() forever-loop. Called directly on the host thread.
 void thread3_main(void *unused);
 
-// libultra code asks about "the current thread" (osGetThreadPri(NULL) etc.).
-// There is no thread system on PC, so the host thread poses as one: thread 3
-// at its real priority.
 extern OSThread *__osRunningThread;
 static OSThread sHostThread;
-
-// ---------------------------------------------------------------------------
-// Frame pacing — stands in for the VI retrace interrupt. The return value is
-// the game's logic update rate: the number of retrace periods this frame covers,
-// which obj_update() uses directly as its physics timestep.
-//
-// It must be STABLE, not merely accurate. Retail fb_update() (src/video.c)
-// commits to a rate (gVideoDeltaTime, initialised to LOGIC_30FPS = 2) and
-// *blocks* to pad a fast frame out to it, only lowering the rate after 20
-// consecutive frames disagree. Returning the raw measured period count instead
-// lets the timestep oscillate 1,2,1,1,2 with wall-clock noise, and integrating
-// physics with a jittering timestep makes everything visibly shake in place.
-//
-// So: pace to the same 30Hz cadence vanilla runs at, and only report more
-// periods if we genuinely ran slow.
-// ---------------------------------------------------------------------------
-#include <time.h>
 
 #define PC_RETRACE_NSEC (1000000000ll / 60)
 #define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
@@ -78,18 +55,6 @@ s32 pc_retrace_wait(void) {
     return periods;
 }
 
-// ---------------------------------------------------------------------------
-// F3DDKR HLE renderer — untextured, vertex-shaded.
-//
-// gfxtask_run_xbus (src/rcp_dkr.c) hands us the display list the RSP would have
-// run. This interprets the geometry half of the microcode the way the RSP does
-// — matrix slots, vertex loads, billboarding, G_TRIN polygons — transforms to
-// clip space, perspective divides, maps through the viewport, and hands the
-// triangles to the host GL layer (linux/gfx.c), shaded from their vertex
-// colours. Everything RDP-side (textures, combiners, blenders, rectangles) is
-// ignored for now.
-// ---------------------------------------------------------------------------
-
 #define N64_SCREEN_W 320
 #define N64_SCREEN_H 240
 #define WINDOW_SCALE 3
@@ -108,14 +73,6 @@ typedef struct {
     u8 r, g, b, a;
 } GfxVertex;
 
-// ---------------------------------------------------------------------------
-// RDP texture state. DKR uses the stock texture commands (gDPLoadTextureBlock
-// and friends), which arrive as G_SETTIMG (where the image is) + G_SETTILE (how
-// to read it) + G_SETTILESIZE (how big it is) + G_LOADTLUT (palette, for CI).
-// TMEM is not emulated: at draw time we decode straight from the image address
-// the display list last pointed at, which is what every N64 HLE renderer does
-// and works because the game's textures are laid out linearly in RAM.
-// ---------------------------------------------------------------------------
 
 // Clip anything closer than this. The N64 clips against w, and w is the
 // camera-space depth, so this is the near plane in world units.
@@ -185,17 +142,6 @@ static u16 sTileUls = 0;   //               the tile's origin within the image
 static u16 sTileUlt = 0;
 static u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
 
-// RDP colour state. Only the 2D path reads these: the triangles get their colour
-// from the vertices, but a rectangle has no vertex colours, so its colour comes
-// entirely from the combiner and these registers.
-// G_SETGEOMETRYMODE / G_CLEARGEOMETRYMODE. This is the RSP half of the depth
-// state, and DKR drives it directly: material_set() toggles z-compare per material
-// with gSPSetGeometryMode(G_ZBUFFER), not through othermode. The RSP only emits
-// depth coordinates when G_ZBUFFER is set, so it gates the RDP's Z_CMP/Z_UPD — no
-// geometry mode, no depth, whatever the render mode says.
-//
-// Seeded with what rendermode_reset() (src/textures_sprites.c) sets, so a frame
-// that draws before its first geometry-mode command still gets a z-buffer.
 #define GFX_GEOMETRY_MODE_INIT (G_SHADE | G_SHADING_SMOOTH | G_ZBUFFER)
 static u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
 
@@ -211,7 +157,7 @@ static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
 // Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
 // FogData system its fog-changer objects drive. gSPFogPosition packs a multiplier
 // and an offset into one G_MOVEWORD, and the RSP turns them into a per-vertex fade
-// factor; gDPSetFogColor is the colour that factor fades towards.
+// factor; gDPSetFogColor is the colour that factor fades towards. 
 static u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
 static s16 sFogMul = 0;
 static s16 sFogOfs = 0;
@@ -234,29 +180,7 @@ static s32 sTexCacheCount = 0;
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
-/**
- * Drop every cached texture decoded out of the memory being freed.
- *
- * The cache is keyed on the RAM address a texture was decoded from, and the game
- * recycles those addresses: the textures of a level it has unloaded are handed
- * straight back out to the next one. Without this, a new texture landing on an
- * old address with the same format and size hits the stale entry and draws the
- * previous level's pixels — and the cache, never evicting, fills up and starts
- * refusing to decode anything at all.
- *
- * This takes the freed slot's whole *range*, not just its base address, and that
- * matters: an earlier version compared against the base and therefore matched
- * nothing, ever. A texture's pixels begin at `tex + 1` — past its TextureHeader —
- * and its palette sits at another offset again (`tex_palette_id`), so no cache
- * entry is ever keyed on an allocation's base. The invalidation silently did
- * nothing, which is exactly the two symptoms you would predict: stale textures
- * after a level change, then everything untextured once the cache hit its cap.
- *
- * Called from mempool_free_addr() (src/memory.c), the choke point every free in
- * the game passes through, so a texture's GL object dies exactly when the memory
- * behind it does. The palette is checked too: a CI texture decoded against a
- * freed TLUT is just as stale.
- */
+
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
     u32 lo = (u32) addr;
     u32 hi = lo + (u32) size;
@@ -404,15 +328,7 @@ static void unswizzle_rows(const u8 *src, u8 *dst, u8 siz, s32 rowBytes, s32 hei
     // The swizzle exchanges the 32-bit halves of each 64-bit TMEM word, so it is
     // a ^4 on the byte address *within TMEM*. For 4/8/16-bit texels, TMEM holds
     // the image exactly as RAM does and the ^4 carries straight over.
-    //
-    // 32-bit texels do not: the RDP splits them across two TMEM banks, red/green
-    // in the low one and blue/alpha in the high (which is why the GBI computes
-    // their line with G_IM_SIZ_32b_LINE_BYTES = 2, not 4). Each bank therefore
-    // holds 2 bytes per texel, so a ^4 in bank-local address space exchanges
-    // *pairs* of texels — texel ^ 2 — which in the linear 4-byte-per-texel RAM
-    // image we decode from is a ^8. Using ^4 here instead scrambles the texels
-    // singly rather than in pairs: still recognisable, subtly wrong. That was the
-    // static banana.
+    
     s32 unit = (siz == G_IM_SIZ_32b) ? 8 : 4;
     s32 total = rowBytes * height;
     s32 y, b;
@@ -749,31 +665,7 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
     }
 }
 
-/**
- * Push the RDP's render mode — the low half of othermode — at the host.
- *
- * DKR never sets this inline: material_set() (src/textures_sprites.c) DMAs in a
- * two-command display list per material, a gsDPSetCombineLERP and a
- * gsDPSetOtherMode, and the render mode is the low word of the latter. So this
- * runs once per G_TRIN, which is once per material batch.
- *
- * The render-mode bits sit at their final positions within othermode-low (the
- * field starts at G_MDSFT_RENDERMODE, which is where AA_EN's 0x8 comes from), so
- * they can be tested against sOtherModeL directly.
- *
- * The blender proper (the GBL_c1/c2 muxes) is still not modelled — everything
- * goes through one fixed src-alpha blend. What is modelled is the part that was
- * doing visible damage: depth compare, depth write, decal offset and alpha
- * compare.
- */
-/**
- * G_TF_POINT vs. G_TF_BILERP, from othermode-H. The game point-samples its font
- * and most of its UI art and bilerps the world; filtering everything, as we used
- * to, blurs the text and — because the filter taps reach outside the glyph —
- * drags colour in from whatever the wrap mode puts there.
- *
- * Applies to whatever texture is currently bound, so call this after binding.
- */
+
 static void apply_texture_filter(void) {
     u32 filt = sOtherModeH & (3 << G_MDSFT_TEXTFILT);
 
@@ -1464,7 +1356,6 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
     }
 }
 
-// dreamcast/audio.c
 extern void dc_audio_init(void);
 extern void pc_audio_frame(void);
 extern void pc_audio_report(void);
@@ -1514,8 +1405,7 @@ int main(int argc, char **argv) {
     sHostThread.priority = 10;
     __osRunningThread = &sHostThread;
     gfx_window_init(N64_SCREEN_W, N64_SCREEN_H, WINDOW_SCALE);
-    // Bring AICA up now, well before init_game produces the first PCM, so the SPU
-    // firmware handshake completes before any snd_stream_start (dreamcast/audio.c).
+    // Bring AICA up now, well before init_game produces the first PCM.
     dc_audio_init();
     thread3_main(0);
     return 0;
