@@ -226,6 +226,15 @@
 
 /* Cause register exception codes */
 
+/*
+ * R4300 Cause-register exception codes: the value that sits in bits 2..6 of the
+ * MIPS Cause register. Nothing outside this header uses them, and there is no
+ * R4300 on a host target — while the SH4 arch headers KOS drags in do define
+ * their own EXC_CODE, which collides. Leaving these out on TARGET_PC is what
+ * lets a translation unit include both <ultra64.h> and KOS headers.
+ */
+#ifndef TARGET_PC
+
 #define	EXC_CODE(x)	((x)<<2)
 
 /* Hardware exception codes */
@@ -247,6 +256,8 @@
 #define	EXC_FPE		EXC_CODE(15)	/* Floating Point Exception */
 #define	EXC_WATCH	EXC_CODE(23)	/* Watchpoint reference */
 #define	EXC_VCED	EXC_CODE(31)	/* Virt. Coherency on data read */
+
+#endif /* !TARGET_PC */
 
 /* C0_PRID Defines */
 #define	C0_IMPMASK	0xff00

@@ -3,6 +3,7 @@
 #include <structs.h>
 #include <f3ddkr.h>
 #include <time.h>
+#include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
 
 // KOS uptime in ns (dreamcast/reimpl.c). Declared here rather than via
@@ -73,6 +74,20 @@ typedef struct {
     f32 clip[4];
     f32 u, v; // texel coords, filled in per-triangle from the Triangle's UVs
     u8 r, g, b, a;
+
+    // The perspective divide + viewport map, computed once at G_VTX time rather
+    // than three-times-per-triangle in push_tri. This is where the RSP does it
+    // too: it transforms and projects the vertex when the vertex command loads
+    // it, and the triangle commands afterwards only reference the result. Since
+    // display lists reuse each vertex across two or three triangles, doing it
+    // here rather than per-corner is a straight win.
+    //
+    // `projected` is set only when the vertex is in front of the near plane;
+    // clip_edge's freshly-interpolated vertices leave it clear and get projected
+    // on demand. It doubles as the near-plane test — it holds exactly when
+    // clip[3] >= GFX_NEAR_W.
+    f32 sx, sy, sz, sw, sfog;
+    u8 projected;
 } GfxVertex;
 
 
@@ -233,6 +248,8 @@ static void mtx_to_float(const Mtx *m, f32 out[4][4]) {
  * billboarding — add the anchor's clip coordinates, then perspective divide and
  * map through the viewport.
  */
+static void project_into(GfxVertex *v);
+
 static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
     const f32 (*m)[4] = sMatrices[sCurMatrix];
     f32 x = v->x, y = v->y, z = v->z;
@@ -253,6 +270,8 @@ static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
     // mutually exclusive with fog in material_set(): the RSP keeps vertex alpha in
     // the fog slot.
     dst->a = v->a;
+
+    project_into(dst);
 }
 
 static void handle_vertex(u32 w0, u32 w1) {
@@ -522,26 +541,34 @@ static u32 texture_current(void) {
  */
 static void combiner_eval(const f32 shade[4], u8 out[4], u8 sec[3]);
 
-static void project(const GfxVertex *v, GfxTriVert *out) {
-    f32 invW = 1.0f / v->clip[3];
+/**
+ * The geometric half: perspective divide, viewport map and fog. Depends only on
+ * RSP state (matrices, viewport, fog registers, geometry mode), all of which is
+ * settled by the time the vertex is loaded — so this is what gets hoisted to
+ * G_VTX time and cached in the GfxVertex.
+ *
+ * w is guaranteed >= GFX_NEAR_W by every caller, which is what makes the fsrra
+ * reciprocal safe (it is defined for positive inputs only).
+ */
+static void project_geom(const GfxVertex *v, f32 *sx, f32 *sy, f32 *sz, f32 *sw, f32 *sfog) {
+    f32 invW = shz_invf_fsrra(v->clip[3]);
+    f32 ndcZ = v->clip[2] * invW;
 
-    out->x = (v->clip[0] * invW * sVpScaleX) + sVpTransX;
-    out->y = sVpTransY - (v->clip[1] * invW * sVpScaleY);
+    *sx = (v->clip[0] * invW * sVpScaleX) + sVpTransX;
+    *sy = sVpTransY - (v->clip[1] * invW * sVpScaleY);
     // Negated so nearer geometry gets the smaller depth under GL_LESS.
-    out->z = -(v->clip[2] * invW);
+    *sz = -ndcZ;
     // Kept so the host layer can restore the homogeneous position and get
     // perspective-correct texturing out of the fixed-function pipeline. The near
     // clip guarantees this is >= GFX_NEAR_W, so it is safe to multiply back by.
-    out->w = v->clip[3];
-    out->u = v->u;
-    out->v = v->v;
+    *sw = v->clip[3];
 
     // Fog: the RSP's own formula, ndc_z * mul + ofs, clamped to a byte. The
     // geometry mode gates it — material_set() sets and clears G_FOG per material,
     // and clears it whenever a material wants vertex alpha instead, because the
     // RSP keeps the fog factor in the shade-alpha slot.
     if (sGeometryMode & G_FOG) {
-        f32 fog = ((v->clip[2] * invW) * (f32) sFogMul) + (f32) sFogOfs;
+        f32 fog = (ndcZ * (f32) sFogMul) + (f32) sFogOfs;
 
         if (fog < 0.0f) {
             fog = 0.0f;
@@ -549,10 +576,43 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
         if (fog > 255.0f) {
             fog = 255.0f;
         }
-        out->fog = fog / 255.0f;
+        *sfog = fog * (1.0f / 255.0f);
     } else {
-        out->fog = 0.0f;
+        *sfog = 0.0f;
     }
+}
+
+/** Cache the projection into the vertex, or mark it as behind the near plane. */
+static void project_into(GfxVertex *v) {
+    if (v->clip[3] >= GFX_NEAR_W) {
+        project_geom(v, &v->sx, &v->sy, &v->sz, &v->sw, &v->sfog);
+        v->projected = TRUE;
+    } else {
+        v->projected = FALSE;
+    }
+}
+
+/**
+ * Turn a clip-space vertex plus its per-triangle UVs into an output vertex.
+ * Takes the cached projection when there is one; only vertices manufactured by
+ * clip_edge have to be projected here.
+ *
+ * The combiner is deliberately *not* hoisted with the geometry: it is RDP state,
+ * not RSP state, so it can legitimately change between the G_VTX that loads a
+ * vertex and the G_TRIN that draws with it.
+ */
+static void project(const GfxVertex *v, GfxTriVert *out) {
+    if (v->projected) {
+        out->x = v->sx;
+        out->y = v->sy;
+        out->z = v->sz;
+        out->w = v->sw;
+        out->fog = v->sfog;
+    } else {
+        project_geom(v, &out->x, &out->y, &out->z, &out->w, &out->fog);
+    }
+    out->u = v->u;
+    out->v = v->v;
 
     // Run the combiner on this vertex's shade. The texture unit modulates the
     // texel in afterwards, so what comes out here is everything the RDP would
@@ -567,10 +627,10 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
         u8 lit[4];
         u8 unlit[3];
 
-        shade[0] = v->r / 255.0f;
-        shade[1] = v->g / 255.0f;
-        shade[2] = v->b / 255.0f;
-        shade[3] = v->a / 255.0f;
+        shade[0] = v->r * (1.0f / 255.0f);
+        shade[1] = v->g * (1.0f / 255.0f);
+        shade[2] = v->b * (1.0f / 255.0f);
+        shade[3] = v->a * (1.0f / 255.0f);
         combiner_eval(shade, lit, unlit);
 
         out->r = lit[0];
@@ -627,6 +687,10 @@ static void clip_edge(const GfxVertex *a, const GfxVertex *b, GfxVertex *out) {
     out->g = (u8) (a->g + ((f32) (b->g - a->g) * t));
     out->b = (u8) (a->b + ((f32) (b->b - a->b) * t));
     out->a = (u8) (a->a + ((f32) (b->a - a->a) * t));
+
+    // Brand new clip-space position — nothing cached applies to it. project()
+    // will compute the projection for this one on the spot.
+    out->projected = FALSE;
 }
 
 /**
@@ -639,6 +703,15 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
     GfxVertex poly[4];
     s32 numOut = 0;
     s32 i;
+
+    // Nothing crosses the near plane, which is the overwhelmingly common case:
+    // emit straight from the loaded vertices instead of staging the triangle
+    // through poly[]. `projected` holds exactly when clip[3] >= GFX_NEAR_W, so
+    // this is the same test the loop below makes.
+    if (v0->projected && v1->projected && v2->projected) {
+        push_tri(v0, v1, v2, cull);
+        return;
+    }
 
     in[0] = v0;
     in[1] = v1;
@@ -731,21 +804,25 @@ static void handle_polygon(u32 w0, u32 w1) {
     sTriVertCount = 0;
 
     for (i = 0; i < count; i++) {
-        GfxVertex v[3];
+        // The UVs are the only per-triangle part of a vertex, so write them into
+        // the loaded vertices in place and pass those along, rather than taking a
+        // copy of each GfxVertex per corner. The copy only existed to carry the
+        // UVs, and it costs more now that the struct also caches the projection.
+        // Overwriting is safe because emit_triangle consumes them before the next
+        // iteration touches them again.
+        GfxVertex *a = &sVerts[tris[i].vi0 % GFX_MAX_VERTS];
+        GfxVertex *b = &sVerts[tris[i].vi1 % GFX_MAX_VERTS];
+        GfxVertex *c = &sVerts[tris[i].vi2 % GFX_MAX_VERTS];
 
-        v[0] = sVerts[tris[i].vi0 % GFX_MAX_VERTS];
-        v[1] = sVerts[tris[i].vi1 % GFX_MAX_VERTS];
-        v[2] = sVerts[tris[i].vi2 % GFX_MAX_VERTS];
-
-        v[0].u = tris[i].uv0.u * invTexW;
-        v[0].v = tris[i].uv0.v * invTexH;
-        v[1].u = tris[i].uv1.u * invTexW;
-        v[1].v = tris[i].uv1.v * invTexH;
-        v[2].u = tris[i].uv2.u * invTexW;
-        v[2].v = tris[i].uv2.v * invTexH;
+        a->u = tris[i].uv0.u * invTexW;
+        a->v = tris[i].uv0.v * invTexH;
+        b->u = tris[i].uv1.u * invTexW;
+        b->v = tris[i].uv1.v * invTexH;
+        c->u = tris[i].uv2.u * invTexW;
+        c->v = tris[i].uv2.v * invTexH;
 
         // DKR marks culling per triangle: BACKFACE_DRAW means double-sided.
-        emit_triangle(&v[0], &v[1], &v[2], !(tris[i].flags & BACKFACE_DRAW));
+        emit_triangle(a, b, c, !(tris[i].flags & BACKFACE_DRAW));
     }
 
     apply_render_mode();

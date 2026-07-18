@@ -80,7 +80,13 @@ extern "C" {
 
 /* byte string operations */
 
-#ifndef MODERN_CC
+/*
+ * The N64 SDK spells these with `int` lengths. A host libc spells them with
+ * `size_t` (newlib's <strings.h>, which anything including <string.h> drags in),
+ * and the two declarations conflict — so on a host target take the size_t form
+ * and agree with the platform.
+ */
+#if !defined(MODERN_CC) && !defined(TARGET_PC)
 extern void     bcopy(const void *, void *, int);
 extern int      bcmp(const void *, const void *, int);
 extern void     bzero(void *, int);
