@@ -42,7 +42,6 @@ OPT      ?= -O3
 
 BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-std=gnu23 \
-	-fno-builtin \
 	-fno-common \
 	-fno-strict-aliasing \
 	-funsigned-char \
@@ -107,7 +106,6 @@ SRC_FILES := \
 	src/thread30_bgload.c \
 	src/thread3_main.c \
 	src/tracks.c \
-	src/unused_string.c \
 	src/vehicle_bluey.c \
 	src/vehicle_bubbler.c \
 	src/vehicle_rocket.c \
