@@ -70,30 +70,36 @@ s32 pc_retrace_wait(void) {
 // near-plane clipping has to interpolate here, before the divide by w (a vertex
 // behind the camera has w <= 0, and dividing by it is exactly the garbage the
 // clip exists to prevent).
+// Field order is deliberate: everything project() reads on the common path is
+// packed at the front, so a vertex costs one 32-byte line to shade instead of
+// picking fields out of two. clip[] is only touched when a triangle actually
+// crosses the near plane, so it goes at the back with the other cold data.
 typedef struct {
-    f32 clip[4];
-    f32 u, v; // texel coords, filled in per-triangle from the Triangle's UVs
-    u8 r, g, b, a;
-
     // The perspective divide + viewport map, computed once at G_VTX time rather
     // than three-times-per-triangle in push_tri. This is where the RSP does it
     // too: it transforms and projects the vertex when the vertex command loads
     // it, and the triangle commands afterwards only reference the result. Since
     // display lists reuse each vertex across two or three triangles, doing it
     // here rather than per-corner is a straight win.
-    //
-    // `projected` is set only when the vertex is in front of the near plane;
-    // clip_edge's freshly-interpolated vertices leave it clear and get projected
-    // on demand. It doubles as the near-plane test — it holds exactly when
-    // clip[3] >= GFX_NEAR_W.
-    f32 sx, sy, sz, sw, sfog;
-    u8 projected;
-} GfxVertex;
+    // `sw` doubles as the "is this projected" flag, which is what gets the hot
+    // set to exactly 32 bytes rather than 33. A projected vertex always has
+    // sw == clip[3] >= GFX_NEAR_W (1.0f), so zero is a value it can never
+    // legitimately take, and project_into/clip_edge store 0.0f to mean "behind
+    // the near plane, nothing cached". Use VERTEX_PROJECTED() to read it.
+    f32 sx, sy, sz, sw, sfog; // 20
+    f32 u, v;                 // 28 — per-triangle, written by handle_polygon
+    u8 r, g, b, a;            // 32 — shade
+
+    f32 clip[4]; // cold: only the clip path reads this
+} __attribute__((aligned(32))) GfxVertex;
 
 
 // Clip anything closer than this. The N64 clips against w, and w is the
 // camera-space depth, so this is the near plane in world units.
 #define GFX_NEAR_W 1.0f
+
+// Whether a vertex carries a cached projection. See GfxVertex.sw.
+#define VERTEX_PROJECTED(v) ((v)->sw != 0.0f)
 
 // Which screen-space winding is a front face. Screen y runs downwards here, so
 // this is the opposite sign from the y-up convention. If the world renders
@@ -105,6 +111,10 @@ static u32 sGfxFrameCount = 0;
 static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
 static s32 sCurMatrix = 0;
 static s32 sBillboard = FALSE;
+
+// Layout is load-bearing — see GfxVertex. Assert it rather than trust it.
+_Static_assert(sizeof(GfxTriVert) == 32, "GfxTriVert must be exactly one SH4 cache line");
+_Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields must fit one cache line");
 
 static GfxVertex sVerts[GFX_MAX_VERTS];
 static s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
@@ -596,9 +606,8 @@ static void project_geom(const GfxVertex *v, f32 *sx, f32 *sy, f32 *sz, f32 *sw,
 static void project_into(GfxVertex *v) {
     if (v->clip[3] >= GFX_NEAR_W) {
         project_geom(v, &v->sx, &v->sy, &v->sz, &v->sw, &v->sfog);
-        v->projected = TRUE;
     } else {
-        v->projected = FALSE;
+        v->sw = 0.0f; // behind the near plane — nothing cached
     }
 }
 
@@ -612,7 +621,7 @@ static void project_into(GfxVertex *v) {
  * vertex and the G_TRIN that draws with it.
  */
 static void project(const GfxVertex *v, GfxTriVert *out) {
-    if (v->projected) {
+    if (VERTEX_PROJECTED(v)) {
         out->x = v->sx;
         out->y = v->sy;
         out->z = v->sz;
@@ -709,7 +718,7 @@ static void clip_edge(const GfxVertex *a, const GfxVertex *b, GfxVertex *out) {
 
     // Brand new clip-space position — nothing cached applies to it. project()
     // will compute the projection for this one on the spot.
-    out->projected = FALSE;
+    out->sw = 0.0f;
 }
 
 /**
@@ -725,9 +734,9 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
 
     // Nothing crosses the near plane, which is the overwhelmingly common case:
     // emit straight from the loaded vertices instead of staging the triangle
-    // through poly[]. `projected` holds exactly when clip[3] >= GFX_NEAR_W, so
-    // this is the same test the loop below makes.
-    if (v0->projected && v1->projected && v2->projected) {
+    // through poly[]. A cached projection exists exactly when
+    // clip[3] >= GFX_NEAR_W, so this is the same test the loop below makes.
+    if (VERTEX_PROJECTED(v0) && VERTEX_PROJECTED(v1) && VERTEX_PROJECTED(v2)) {
         push_tri(v0, v1, v2, cull);
         return;
     }

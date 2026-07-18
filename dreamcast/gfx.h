@@ -26,7 +26,7 @@ typedef struct {
     float u, v;
     float fog;
     unsigned char r, g, b, a;
-} GfxTriVert;
+} __attribute__((aligned(32))) GfxTriVert;
 
 // Opens the window and GL context. `width`/`height` are the N64 framebuffer
 // size the interpreter draws in; the window is that times `scale`.
