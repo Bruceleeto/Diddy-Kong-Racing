@@ -544,15 +544,12 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]);
 static void combiner_classify(void);
 static u8 clamp_u8(f32 v);
 
-// How the current batch's combiner collapses; see combiner_classify().
-typedef enum {
-    CC_GENERAL,
-    CC_CONST,
-    CC_SHADE
-} CcClass;
-
-static CcClass sCcClass = CC_GENERAL;
-static u8 sCcConst[4];
+// How the current batch's combiner collapses, per channel; see
+// combiner_classify(). sCcFast means every channel is either passthrough or a
+// constant, so project() can skip the mux entirely.
+static u8 sCcPass[4];  // 1 = this channel is the shade, unchanged
+static u8 sCcConst[4]; // otherwise, the constant it always produces
+static s32 sCcFast;
 
 /**
  * The geometric half: perspective divide, viewport map and fog. Depends only on
@@ -627,56 +624,38 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
     out->u = v->u;
     out->v = v->v;
 
-    // Run the combiner on this vertex's shade. The texture unit modulates the
-    // texel in afterwards, so what comes out here is everything the RDP would
-    // have computed *around* the texel: the environment blend, the prim colour,
-    // and the prim/vertex alpha that drives every fade in the game.
-    // 3D geometry stays on a plain texel * colour modulate, so what it wants is
-    // the combiner with the texel taken as white. Shade varies per vertex here, so
-    // the texel-blend the 2D path uses is not available: its constant is per-draw
-    // state, not per-vertex.
-    switch (sCcClass) {
-        case CC_CONST:
-            // Shade is not an input: every vertex in the batch gets the colour
-            // combiner_classify() already worked out.
-            out->r = sCcConst[0];
-            out->g = sCcConst[1];
-            out->b = sCcConst[2];
-            out->a = sCcConst[3];
-            break;
+    // The colour the RDP would have computed *around* the texel: the environment
+    // blend, the prim colour, and the prim/vertex alpha behind every fade in the
+    // game. The texture unit modulates the real texel in afterwards, so the
+    // combiner runs here with the texel taken as white.
+    //
+    // Which of the two paths below applies was settled once for the whole batch;
+    // see combiner_classify().
+    if (sCcFast) {
+        // Every channel is either the shade straight through or a per-batch
+        // constant, so the whole mux collapses to four selects. Passthrough is
+        // spelled byte -> float -> clamp_u8, the same round trip the general path
+        // makes, so the quantisation is identical rather than merely close.
+        out->r = sCcPass[0] ? clamp_u8(v->r * (1.0f / 255.0f)) : sCcConst[0];
+        out->g = sCcPass[1] ? clamp_u8(v->g * (1.0f / 255.0f)) : sCcConst[1];
+        out->b = sCcPass[2] ? clamp_u8(v->b * (1.0f / 255.0f)) : sCcConst[2];
+        out->a = sCcPass[3] ? clamp_u8(v->a * (1.0f / 255.0f)) : sCcConst[3];
+    } else {
+        // At least one channel genuinely mixes shade with something else. Run the
+        // real thing. Only the lit half is wanted — see combiner_eval_lit.
+        f32 shade[4];
+        u8 lit[4];
 
-        case CC_SHADE:
-            // Plain texel * shade. The combiner would hand back exactly the
-            // shade it was given, so quantise the vertex colour and skip it.
-            // Spelled the same way the combiner spells it (byte -> float ->
-            // clamp_u8) so the rounding is identical to the general path.
-            out->r = clamp_u8(v->r * (1.0f / 255.0f));
-            out->g = clamp_u8(v->g * (1.0f / 255.0f));
-            out->b = clamp_u8(v->b * (1.0f / 255.0f));
-            out->a = clamp_u8(v->a * (1.0f / 255.0f));
-            break;
+        shade[0] = v->r * (1.0f / 255.0f);
+        shade[1] = v->g * (1.0f / 255.0f);
+        shade[2] = v->b * (1.0f / 255.0f);
+        shade[3] = v->a * (1.0f / 255.0f);
+        combiner_eval_lit(shade, lit);
 
-        default: {
-            // Run the combiner on this vertex's shade. The texture unit modulates
-            // the texel in afterwards, so what comes out here is everything the RDP
-            // would have computed *around* the texel: the environment blend, the
-            // prim colour, and the prim/vertex alpha that drives every fade in the
-            // game. Only the lit half is wanted — see combiner_eval_lit.
-            f32 shade[4];
-            u8 lit[4];
-
-            shade[0] = v->r * (1.0f / 255.0f);
-            shade[1] = v->g * (1.0f / 255.0f);
-            shade[2] = v->b * (1.0f / 255.0f);
-            shade[3] = v->a * (1.0f / 255.0f);
-            combiner_eval_lit(shade, lit);
-
-            out->r = lit[0];
-            out->g = lit[1];
-            out->b = lit[2];
-            out->a = lit[3];
-            break;
-        }
+        out->r = lit[0];
+        out->g = lit[1];
+        out->b = lit[2];
+        out->a = lit[3];
     }
 }
 
@@ -1116,25 +1095,25 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
 // ---------------------------------------------------------------------------
 // Per-batch combiner classification.
 //
-// The mux, the prim colour and the env colour are all constant for a whole draw
-// batch; only shade varies from vertex to vertex. So most combiners collapse to
-// something far cheaper than running the mux per vertex, and which one applies
-// can be settled once, when the batch starts:
+// Running the mux per vertex was measured at ~29ms a frame — by far the largest
+// single cost in the renderer. But the mux, the prim colour and the env colour
+// are all constant for a whole draw batch; only shade varies. So for most
+// batches each output channel is one of just two things:
 //
-//   CC_CONST   — the result does not depend on shade at all. Evaluate once and
-//                hand every vertex the same colour.
-//   CC_SHADE   — the result *is* the shade, i.e. a plain texel * shade modulate,
-//                which is what DKR's 3D geometry uses almost everywhere. Skip
-//                the combiner and quantise the vertex colour directly.
-//   CC_GENERAL — anything else. Run the combiner per vertex, as before.
+//   passthrough — the channel *is* the shade. A plain texel * shade modulate,
+//                 which is what DKR's 3D geometry uses almost everywhere.
+//   constant    — the channel never varies with shade, so evaluate it once.
 //
-// Classification is functional, not a mux pattern-match: evaluate the real
-// combiner on two probe shades and look at what comes out. That cannot
-// misclassify a combiner it does not recognise — an unrecognised one simply
-// fails both tests and lands in CC_GENERAL.
+// When every channel is one of those the combiner collapses to four selects and
+// need not run at all. Anything else falls back to the real mux, per vertex.
 //
-// The probes are byte values, not arbitrary floats, so the comparison happens in
-// the same 0..255 quantisation the output uses.
+// Classifying per channel rather than per batch is the whole point: DKR's 3D
+// materials are texel * shade on RGB but take alpha from PRIM or ENV to drive
+// fades, so an all-or-nothing test rejects exactly the batches worth catching.
+//
+// The test is functional, not a mux pattern-match — evaluate the real combiner
+// on probe shades and look at what comes out. An unrecognised combiner cannot be
+// misclassified; it simply fails both tests and takes the slow path.
 // ---------------------------------------------------------------------------
 // The state the classification is valid for. Any change and it is recomputed.
 static u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
@@ -1179,25 +1158,23 @@ static void combiner_classify(void) {
     }
     combiner_eval_lit(shade, c);
 
-    // Three very different shades in, the same colour out: shade is not an input.
-    if (a[0] == b[0] && a[1] == b[1] && a[2] == b[2] && a[3] == b[3] && a[0] == c[0] && a[1] == c[1] &&
-        a[2] == c[2] && a[3] == c[3]) {
-        sCcClass = CC_CONST;
-        for (i = 0; i < 4; i++) {
+    // Classify each channel on its own. Doing this all-or-nothing was the bug:
+    // DKR's 3D materials are texel * shade on RGB but take alpha from PRIM or ENV
+    // for fades, so a single non-passthrough channel used to drop the whole batch
+    // onto the slow path — which is every batch that matters.
+    sCcFast = TRUE;
+    for (i = 0; i < 4; i++) {
+        if (a[i] == probeA[i] && b[i] == probeB[i] && c[i] == probeC[i]) {
+            sCcPass[i] = TRUE; // shade in, same shade out
+            sCcConst[i] = 0;
+        } else if (a[i] == b[i] && a[i] == c[i]) {
+            sCcPass[i] = FALSE; // never varies with shade
             sCcConst[i] = a[i];
+        } else {
+            sCcFast = FALSE; // genuinely mixes shade with something else
+            break;
         }
-        return;
     }
-
-    // Shade in, the same shade out, every time: a straight passthrough.
-    if (a[0] == probeA[0] && a[1] == probeA[1] && a[2] == probeA[2] && a[3] == probeA[3] && b[0] == probeB[0] &&
-        b[1] == probeB[1] && b[2] == probeB[2] && b[3] == probeB[3] && c[0] == probeC[0] && c[1] == probeC[1] &&
-        c[2] == probeC[2] && c[3] == probeC[3]) {
-        sCcClass = CC_SHADE;
-        return;
-    }
-
-    sCcClass = CC_GENERAL;
 }
 
 /**

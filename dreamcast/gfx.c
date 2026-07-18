@@ -69,7 +69,6 @@ static int sScisDirtyPt = 1;
 static int sScisDirtyOp = 1;
 
 static pvr_poly_hdr_t sHdr __attribute__((aligned(32)));
-static pvr_dr_state_t sDrState;
 
 // Punch-through recording. Headers, vertices and user-clip commands are all one
 // 32-byte TA word, so a batch is recorded as the exact word stream it would have
@@ -912,6 +911,14 @@ static void fps_tick(void) {
         }
     }
     sLastFrameUs = now;
+ 
+    {
+        static unsigned int frames = 0;
+
+        if ((++frames % 120u) == 0u) {
+            printf("fps: %d.%d\n", (int) sFps, ((int) (sFps * 10.0f)) % 10);
+        }
+    }
 }
 
 void gfx_frame_end(void) {
