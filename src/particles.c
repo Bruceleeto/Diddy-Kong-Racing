@@ -7,6 +7,7 @@
 #include "textures_sprites.h"
 #include "tracks.h"
 #include <ultra64.h>
+#include "pc_swap.h"
 
 /************ .rodata ************/
 
@@ -300,7 +301,7 @@ static void pc_swap_particle_descriptor(ParticleDescriptor *d) {
 
 static void pc_swap_particle_behaviour(ParticleBehaviour *b) {
     pc_swap32p(&b->flags);
-    pc_swap32_buf(&b->emitterPos, 12);
+    PC_SWAP32_AT(b, emitterPos, 12);
     pc_swap32p(&b->sourceDistance);
     pc_swap16_range(&b->sourceRotation, 3);
     pc_swap16p(&b->maxParticlesFromSamePos);
@@ -308,7 +309,7 @@ static void pc_swap_particle_behaviour(ParticleBehaviour *b) {
     pc_swap16_range(&b->emissionDirection, 3);
     pc_swap16p(&b->maxParticlesInSameDir);
     pc_swap16_range(&b->emissionDirAngularVelocity, 3);
-    pc_swap32_buf(&b->velocityModifier, 12);
+    PC_SWAP32_AT(b, velocityModifier, 12);
     pc_swap32p(&b->emissionSpeed);
     pc_swap16p(&b->spawnInterval);
     pc_swap16p(&b->burstCount);
@@ -322,7 +323,7 @@ static void pc_swap_particle_behaviour(ParticleBehaviour *b) {
     pc_swap16_range(&b->sourceDirRange, 3);
     pc_swap16_range(&b->emissionDirRange, 3);
     pc_swap32p(&b->emissionSpeedRange);
-    pc_swap32_buf(&b->velocityModifierRange, 12);
+    PC_SWAP32_AT(b, velocityModifierRange, 12);
     pc_swap16_range(&b->rotationRange, 3);
     pc_swap16_range(&b->angularVelocityRange, 3);
     pc_swap32p(&b->scaleRange);

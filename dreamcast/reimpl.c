@@ -33,14 +33,14 @@ u64 rspF3DDKRDataFifoStart[1] = { 0 };
 // Becomes the real asset LUT/data location once the PC asset loader exists.
 u8 __ASSETS_LUT_START[1] = { 0 };
 u8 __ASSETS_LUT_END[1] = { 0 };
-u8 __ROM_END[1] = { 0 }; // cheat-menu checksum bound
+u8 *__ROM_END; // cheat-menu checksum bound
 u8 *main_BSS_START[1] = { 0 };
 
 // N64: the main heap is [end of BSS .. RAM_END], carved out by the linker.
 // PC: a static pool. memory.c's "ramEnd - (s32)&gMainMemoryPool" sizing math
 // still needs TARGET_PC surgery to use this pool's real size instead.
-u8 gMainMemoryPool[3 * 1024 * 1024] __attribute__((aligned(16)));
-u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
+// Storage lives in memory.c, which has MemoryPoolSlot in scope; its size
+// comes from -DPC_MAIN_POOL_BYTES in the platform makefile.
 
 // ---------------------------------------------------------------------------
 // Asset "DMA" — the DKR equivalent of the OoT port's DmaMgr_DmaRomToRam.
@@ -310,11 +310,11 @@ s32 osPfsReFormat(void *pfs, void *mq, s32 channel) {
     return PC_PFS_ERR_NOPACK;
 }
 
-s32 osPfsFindFile(void *pfs, u16 companyCode, u32 gameCode, u16 *gameName, u16 *extName, s32 *fileNo) {
+s32 osPfsFindFile(void *pfs, u16 companyCode, u32 gameCode, u8 *gameName, u8 *extName, s32 *fileNo) {
     return PC_PFS_ERR_NOPACK;
 }
 
-s32 osPfsDeleteFile(void *pfs, u16 companyCode, u32 gameCode, u16 *gameName, u16 *extName) {
+s32 osPfsDeleteFile(void *pfs, u16 companyCode, u32 gameCode, u8 *gameName, u8 *extName) {
     return PC_PFS_ERR_NOPACK;
 }
 
@@ -322,7 +322,7 @@ s32 osPfsChecker(void *pfs) {
     return PC_PFS_ERR_NOPACK;
 }
 
-s32 osPfsAllocateFile(void *pfs, u16 companyCode, u32 gameCode, u16 *gameName, u16 *extName, s32 size, s32 *fileNo) {
+s32 osPfsAllocateFile(void *pfs, u16 companyCode, u32 gameCode, u8 *gameName, u8 *extName, s32 size, s32 *fileNo) {
     return PC_PFS_ERR_NOPACK;
 }
 
@@ -407,13 +407,17 @@ void osMapTLBRdb(void) {}
 // ---------------------------------------------------------------------------
 // Exception / hardware-interrupt plumbing (was exceptasm.s data)
 // ---------------------------------------------------------------------------
-u32 __osExceptionPreamble[1] = { 0 };
+typedef struct {
+    unsigned int inst1;
+    unsigned int inst2;
+    unsigned int inst3;
+    unsigned int inst4;
+} __osExceptionVector;
+__osExceptionVector __osExceptionPreamble[1] = { { 0, 0, 0, 0 } };
 
-struct __osHwInt {
-    s32 (*handler)(void);
-    void *stackEnd;
-};
-struct __osHwInt __osHwIntTable[8] = { 0 };
+// Pre-2.0J layout (both PC targets build VERSION_G): a plain array of
+// handlers, with no stack frame.
+s32 (*__osHwIntTable[8])(void) = { 0 };
 
 // ---------------------------------------------------------------------------
 // Thread context switching (was exceptasm.s code).

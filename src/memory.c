@@ -24,6 +24,15 @@ s32 gFreeQueueTimer;
  * Starts at 0x8012D3F0. Ends at 0x80400000. Contains 1600 allocation slots.
  * Official Name: mmInit
  */
+#ifdef TARGET_PC
+// N64 carves the main pool out of "everything past BSS"; there is no such
+// region on a host, so back it with a static array sized by the platform
+// makefile. Defined here rather than in the port layer because this is where
+// MemoryPoolSlot is in scope, which keeps the type matching its declaration.
+MemoryPoolSlot gMainMemoryPool[PC_MAIN_POOL_BYTES / sizeof(MemoryPoolSlot)] __attribute__((aligned(16)));
+u32 gMainMemoryPoolSize = sizeof(gMainMemoryPool);
+#endif
+
 void mempool_init_main(void) {
     s32 ramEnd;
 
@@ -39,7 +48,7 @@ void mempool_init_main(void) {
         // of RAM" — the N64 ramEnd arithmetic is meaningless against a host
         // address.
         extern u32 gMainMemoryPoolSize;
-        mempool_init(&gMainMemoryPool, gMainMemoryPoolSize, MAIN_POOL_SLOT_COUNT);
+        mempool_init(gMainMemoryPool, gMainMemoryPoolSize, MAIN_POOL_SLOT_COUNT);
     }
 #else
     mempool_init(&gMainMemoryPool, ramEnd - (s32) (&gMainMemoryPool), MAIN_POOL_SLOT_COUNT);

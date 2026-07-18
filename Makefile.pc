@@ -35,7 +35,8 @@ DEFINES := \
 	-DNON_MATCHING \
 	-DBUILD_VERSION=VERSION_G \
 	-DBUILD_VERSION_STRING=\"2.0G\" \
-	-D_MIPS_SZLONG=32
+	-D_MIPS_SZLONG=32 \
+	-DPC_MAIN_POOL_BYTES='(16 * 1024 * 1024)'
 
 # linux/ (platform code) compiles WITHOUT -I include/libc: those headers are N64
 # stubs that shadow the real system libc (their stdio.h only declares sprintf).
