@@ -9,6 +9,7 @@
 #include "libultra/src/audio/seqchannel.h"
 #include "sched.h"
 #include "types.h"
+#include "pc_swap.h"
 
 /************ .data ************/
 
@@ -255,8 +256,8 @@ void audio_init(OSSched *sc) {
     // the real load below — it happens before alSeqFileNew (which does the full
     // swap) ever sees the file, so it needs its own. This temp buffer is thrown
     // away right after, so the swap in alSeqFileNew is not a double-swap.
-    pc_swap16_buf(&gSequenceTable->revision, sizeof(s16));
-    pc_swap16_buf(&gSequenceTable->seqCount, sizeof(s16));
+    PC_SWAP16_AT(gSequenceTable, revision, sizeof(s16));
+    PC_SWAP16_AT(gSequenceTable, seqCount, sizeof(s16));
 #endif
 
     seqfSize = (gSequenceTable->seqCount) * 8 + 4;

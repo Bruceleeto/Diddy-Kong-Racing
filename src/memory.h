@@ -89,7 +89,14 @@ typedef struct StackInfo {
 // This variable doesn't truly exist in memory.
 // It's just defined as the end of BSS, and it's 
 // symbol needs to be in the undefined syms place.
+#ifdef TARGET_PC
+// PC backs this with a real static array (see the port's reimpl.c), so it is
+// declared as one — an incomplete-bound array is compatible with that
+// definition, where the N64 scalar linker-symbol spelling is not.
+extern MemoryPoolSlot gMainMemoryPool[];
+#else
 extern MemoryPoolSlot gMainMemoryPool;
+#endif
 
 void mempool_init_main(void);
 MemoryPoolSlot *mempool_new_sub(s32 poolDataSize, s32 numSlots);

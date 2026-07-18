@@ -24,6 +24,7 @@
 #include "types.h"
 #include "video.h"
 #include "weather.h"
+#include "pc_swap.h"
 
 #ifdef TARGET_PC
 // Big-endian asset offset tables (helper in linux/reimpl.c).
@@ -42,20 +43,20 @@ _Static_assert(__builtin_offsetof(LevelHeader, weatherEnable) == 0x90, "LevelHea
 _Static_assert(__builtin_offsetof(LevelHeader, unkBA) == 0xBA, "LevelHeader layout drifted from N64");
 
 static void pc_swap_level_header(LevelHeader *header) {
-    pc_swap32_buf(&header->course_height, 4);
-    pc_swap16_buf(&header->geometry, 16);         // geometry..fogB, 8 x s16
-    pc_swap16_buf(&header->instruments, 2);
-    pc_swap16_buf(&header->waveSineHeight0, 2);
-    pc_swap16_buf(&header->waveSineHeight1, 12);  // waveSineHeight1..waveTexID, 6 x s16
-    pc_swap16_buf(&header->waveViewDist, 2);
+    PC_SWAP32_AT(header, course_height, 4);
+    PC_SWAP16_AT(header, geometry, 16);         // geometry..fogB, 8 x s16
+    PC_SWAP16_AT(header, instruments, 2);
+    PC_SWAP16_AT(header, waveSineHeight0, 2);
+    PC_SWAP16_AT(header, waveSineHeight1, 12);  // waveSineHeight1..waveTexID, 6 x s16
+    PC_SWAP16_AT(header, waveViewDist, 2);
     pc_swap32_buf(header->unk74, 0x1C);           // 7 misc-asset indices
-    pc_swap16_buf(&header->weatherEnable, 4);     // weatherEnable, weatherType
-    pc_swap16_buf(&header->weatherVelX, 6);       // weatherVelX/Y/Z
-    pc_swap32_buf(&header->unkA4, 4);             // texture id
-    pc_swap16_buf(&header->unkA8, 4);             // unkA8, unkAA
-    pc_swap32_buf(&header->pulseLightData, 4);    // misc-asset index
-    pc_swap16_buf(&header->unkB0, 2);
-    pc_swap16_buf(&header->unkBA, 2);
+    PC_SWAP16_AT(header, weatherEnable, 4);     // weatherEnable, weatherType
+    PC_SWAP16_AT(header, weatherVelX, 6);       // weatherVelX/Y/Z
+    PC_SWAP32_AT(header, unkA4, 4);             // texture id
+    PC_SWAP16_AT(header, unkA8, 4);             // unkA8, unkAA
+    PC_SWAP32_AT(header, pulseLightData, 4);    // misc-asset index
+    PC_SWAP16_AT(header, unkB0, 2);
+    PC_SWAP16_AT(header, unkBA, 2);
 }
 #endif
 

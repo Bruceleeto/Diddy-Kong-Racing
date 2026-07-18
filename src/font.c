@@ -6,6 +6,7 @@
 #include "menu.h"
 #include "textures_sprites.h"
 #include "video.h"
+#include "pc_swap.h"
 
 /************ .data ************/
 
@@ -160,7 +161,7 @@ void load_fonts(void) {
         pc_swap32_buf(fontAssetData, 4);
         fonts = (FontData *) (fontAssetData + 1);
         for (i = 0; i < (s32) *fontAssetData; i++) {
-            pc_swap16_buf(&fonts[i].x, 8); // x, y, charWidth, charHeight
+            PC_SWAP16_AT(&fonts[i], x, 8); // x, y, charWidth, charHeight
             pc_swap16_buf(fonts[i].textureID, sizeof(fonts[i].textureID));
         }
     }

@@ -10,6 +10,7 @@
 #include "racer.h"
 #include "textures_sprites.h"
 #include "tracks.h"
+#include "pc_swap.h"
 
 #define MODEL_LOADED_MAX 70
 
@@ -102,16 +103,16 @@ static void pc_swap_object_model(ObjectModel *mdl) {
 
     // Header: offsets that become pointers, counts, sizes.
     pc_swap32_buf(mdl, 0xC); // textures, vertices, triangles
-    pc_swap32_buf(&mdl->attachPoints, 4);
-    pc_swap16_buf(&mdl->numberOfAttachPoints, 4); // numberOfAttachPoints, unk1A
-    pc_swap32_buf(&mdl->collisionSpheres, 4);
-    pc_swap16_buf(&mdl->collisionSpheresSize, 10); // collisionSpheresSize..numberOfBatches
-    pc_swap32_buf(&mdl->fileSize, 4);
-    pc_swap32_buf(&mdl->batches, 4);
-    pc_swap32_buf(&mdl->unk3C, 4);
-    pc_swap16_buf(&mdl->numberOfAnimations, 4); // numberOfAnimations, numberOfAnimatedVertices
-    pc_swap32_buf(&mdl->animatedVertexIndices, 4);
-    pc_swap16_buf(&mdl->hasAnimatedTexture, 2);
+    PC_SWAP32_AT(mdl, attachPoints, 4);
+    PC_SWAP16_AT(mdl, numberOfAttachPoints, 4); // numberOfAttachPoints, unk1A
+    PC_SWAP32_AT(mdl, collisionSpheres, 4);
+    PC_SWAP16_AT(mdl, collisionSpheresSize, 10); // collisionSpheresSize..numberOfBatches
+    PC_SWAP32_AT(mdl, fileSize, 4);
+    PC_SWAP32_AT(mdl, batches, 4);
+    PC_SWAP32_AT(mdl, unk3C, 4);
+    PC_SWAP16_AT(mdl, numberOfAnimations, 4); // numberOfAnimations, numberOfAnimatedVertices
+    PC_SWAP32_AT(mdl, animatedVertexIndices, 4);
+    PC_SWAP16_AT(mdl, hasAnimatedTexture, 2);
 
     // Arrays, still offsets here — swap via the model base.
     for (i = 0; i < mdl->numberOfTextures; i++) {
@@ -121,12 +122,12 @@ static void pc_swap_object_model(ObjectModel *mdl) {
         pc_swap16_buf(&((Vertex *) ((u8 *) mdl + (uintptr_t) mdl->vertices))[i], 6); // x, y, z
     }
     for (i = 0; i < mdl->numberOfTriangles; i++) {
-        pc_swap16_buf(&((Triangle *) ((u8 *) mdl + (uintptr_t) mdl->triangles))[i].uv0, 12); // uv0/uv1/uv2
+        PC_SWAP16_AT(&((Triangle *) ((u8 *) mdl + (uintptr_t) mdl->triangles))[i], uv0, 12); // uv0/uv1/uv2
     }
     for (i = 0; i < mdl->numberOfBatches + 1; i++) { // +1: sentinel entry
         TriangleBatchInfo *batch = &((TriangleBatchInfo *) ((u8 *) mdl + (uintptr_t) mdl->batches))[i];
-        pc_swap16_buf(&batch->verticesOffset, 4); // verticesOffset, facesOffset
-        pc_swap32_buf(&batch->flags, 4);
+        PC_SWAP16_AT(batch, verticesOffset, 4); // verticesOffset, facesOffset
+        PC_SWAP32_AT(batch, flags, 4);
     }
     pc_swap16_buf((u8 *) mdl + (uintptr_t) mdl->attachPoints, mdl->numberOfAttachPoints * 2);
     pc_swap16_buf((u8 *) mdl + (uintptr_t) mdl->collisionSpheres, mdl->collisionSpheresSize * 2);

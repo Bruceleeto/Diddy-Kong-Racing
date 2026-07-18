@@ -16,7 +16,8 @@ DEFINES := \
 	-DNON_MATCHING \
 	-DBUILD_VERSION=VERSION_G \
 	-DBUILD_VERSION_STRING=\"2.0G\" \
-	-D_MIPS_SZLONG=32
+	-D_MIPS_SZLONG=32 \
+	-DPC_MAIN_POOL_BYTES='(3 * 1024 * 1024)'
 
 
 INCLUDES_REIMPL := \
@@ -46,12 +47,20 @@ BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-fno-strict-aliasing \
 	-funsigned-char \
 	-fwrapv \
-	-MMD -MP
+	-ffast-math \
+	-ffp-contract=fast \
+	-mfsrra \
+	-mfsca
+BASE_CFLAGS += -MMD -MP
+
+# LTO defers codegen to link time, so the link line has to repeat the codegen
+# flags or the compile-time ones are silently dropped.
+LTO_FLAGS := $(OPT) $(filter -f%,$(BASE_CFLAGS)) $(filter -m%,$(BASE_CFLAGS))
 CFLAGS        := $(BASE_CFLAGS) $(INCLUDES)
 CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 
 # KOS pulls in its own libm/newlib via kos-cc; no SDL/GL on Dreamcast.
-LIBS := -lm
+LIBS := -lsh4zam -lm
 
 # Every game-code source file, individually.
 SRC_FILES := \
@@ -163,6 +172,7 @@ LIBULTRA_FILES := \
 	libultra/src/audio/synsetvol.c \
 	libultra/src/audio/synstartvoice.c \
 	libultra/src/audio/synstopvoice.c \
+	libultra/src/debug/assert.c \
 	libultra/src/debug/kdebugserver.c \
 	libultra/src/gu/mtxutil.c \
 	libultra/src/gu/perspective.c \
@@ -247,7 +257,7 @@ MAP    := $(TARGET:.elf=.map)
 all: $(TARGET)
 
 $(TARGET): $(O_FILES)
-	$(CC) $(O_FILES) -o $(TARGET) -s -Wl,-Map,$(MAP) $(LIBS)
+	$(CC) $(LTO_FLAGS) $(O_FILES) -o $(TARGET) -s -Wl,-Map,$(MAP) $(LIBS)
 
 $(BUILD)/dreamcast/%.o: dreamcast/%.c
 	@mkdir -p $(dir $@)

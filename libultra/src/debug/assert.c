@@ -1,6 +1,7 @@
 #include "os.h"
 #include "PRinternal/osint.h"
 #include "osint_debug.h"
+#include "assert.h"
 
 
 /************ .rodata ************/

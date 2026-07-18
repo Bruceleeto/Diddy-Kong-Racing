@@ -39,6 +39,9 @@ extern "C" {
 
 #else
 
+#ifdef TARGET_PC
+#define __assert __n64_assert
+#endif
 extern void __assert(const char *, const char *, int);
 #ifdef __ANSI_CPP__
 #define assert(EX)  ((EX)?((void)0):__assert( # EX , __FILE__, __LINE__))

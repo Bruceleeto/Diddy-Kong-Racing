@@ -39,6 +39,7 @@
 #include "video.h"
 #include "waves.h"
 #include "weather.h"
+#include "pc_swap.h"
 
 #define OBJECT_MAP_SIZE 0x3000
 #define MAX_CHECKPOINTS 60
@@ -785,7 +786,7 @@ void allocate_object_pools(void) {
                            "Object_Boost layout drifted from N64");
             for (n = 0; n < NUMBER_OF_CHARACTERS; n++) {
                 pc_swap32_buf(&boost[n], 0x6C);        // car/hovercraft/flying boost data, 27 x f32
-                pc_swap16_buf(&boost[n].spriteId, 4);  // spriteId, textureId
+                PC_SWAP16_AT(&boost[n], spriteId, 4);  // spriteId, textureId
             }
         }
     }
@@ -987,11 +988,11 @@ static void pc_swap_loaded_object_header(ObjectHeader *header) {
     s32 i;
 
     pc_swap32_buf(header, 0x10);            // unk0, shadowScale, unk8, scale
-    pc_swap32_buf(&header->modelIds, 0x10); // 4 offset words (modelIds..objectParticles)
-    pc_swap32_buf(&header->unk24, 4);       // unk24 offset (pad20 skipped)
-    pc_swap32_buf(&header->shadeAmbient, 8);
-    pc_swap16_buf(&header->flags, 10);       // flags..unk38
-    pc_swap16_buf(&header->shadeAngleY, 20); // shadeAngleY..unk50
+    PC_SWAP32_AT(header, modelIds, 0x10); // 4 offset words (modelIds..objectParticles)
+    PC_SWAP32_AT(header, unk24, 4);       // unk24 offset (pad20 skipped)
+    PC_SWAP32_AT(header, shadeAmbient, 8);
+    PC_SWAP16_AT(header, flags, 10);       // flags..unk38
+    PC_SWAP16_AT(header, shadeAngleY, 20); // shadeAngleY..unk50
 
     // Pointed-to arrays, still offsets here — swap via the header base.
     pc_swap32_buf((u8 *) header + (uintptr_t) header->modelIds, header->numberOfModelIds * 4);
@@ -1000,8 +1001,8 @@ static void pc_swap_loaded_object_header(ObjectHeader *header) {
                   header->particleCount * sizeof(ObjHeaderParticleEntry));
     for (i = 0; i < header->numLightSources; i++) {
         ObjectHeader24 *light = &((ObjectHeader24 *) ((u8 *) header + (uintptr_t) header->unk24))[i];
-        pc_swap16_buf(&light->unk6, 2);
-        pc_swap16_buf(&light->homeX, 12); // homeX/Y/Z, radius, unk14, unk16
+        PC_SWAP16_AT(light, unk6, 2);
+        PC_SWAP16_AT(light, homeX, 12); // homeX/Y/Z, radius, unk14, unk16
     }
 }
 #endif
@@ -1094,68 +1095,68 @@ static void pc_swap_spawn_entry_fields(u8 *entryBytes) {
 
     switch (behavior) {
         case BHV_RACER:
-            pc_swap16_buf(&entry->racer.angleZ, 8); // angleZ/X/Y, playerIndex
+            PC_SWAP16_AT(entry, racer.angleZ, 8); // angleZ/X/Y, playerIndex
             break;
         case BHV_FISH:
-            pc_swap16_buf(&entry->fish.unk8, 2);
+            PC_SWAP16_AT(entry, fish.unk8, 2);
             break;
         case BHV_AUDIO:
-            pc_swap16_buf(&entry->audio.soundId, 4); // soundId, range
+            PC_SWAP16_AT(entry, audio.soundId, 4); // soundId, range
             break;
         case BHV_AUDIO_LINE:
         case BHV_AUDIO_LINE_2:
-            pc_swap16_buf(&entry->audioLine.soundID, 2);
-            pc_swap16_buf(&entry->audioLine.unkE, 2);
+            PC_SWAP16_AT(entry, audioLine.soundID, 2);
+            PC_SWAP16_AT(entry, audioLine.unkE, 2);
             break;
         case BHV_FOG_CHANGER:
-            pc_swap16_buf(&entry->fogChanger.near, 6); // near, far, switchTimer
+            PC_SWAP16_AT(entry, fogChanger.near, 6); // near, far, switchTimer
             break;
         case BHV_TEXTURE_SCROLL:
-            pc_swap16_buf(&entry->texScroll.textureIndex, 2);
+            PC_SWAP16_AT(entry, texScroll.textureIndex, 2);
             break;
         case BHV_LIGHT_RGBA:
-            pc_swap16_buf(&entry->rgbaLighting.radius, 14); // radius..unk1A
+            PC_SWAP16_AT(entry, rgbaLighting.radius, 14); // radius..unk1A
             break;
         case BHV_WEATHER:
-            pc_swap16_buf(&entry->weather.radius, 8); // radius..unkE
-            pc_swap16_buf(&entry->weather.unk12, 2);
+            PC_SWAP16_AT(entry, weather.radius, 8); // radius..unkE
+            PC_SWAP16_AT(entry, weather.unk12, 2);
             break;
         case BHV_LENS_FLARE:
-            pc_swap16_buf(&entry->lensFlare.angleX, 4); // angleX, angleY
+            PC_SWAP16_AT(entry, lensFlare.angleX, 4); // angleX, angleY
             break;
         case BHV_LENS_FLARE_SWITCH:
-            pc_swap16_buf(&entry->lensFlareSwitch.radius, 2);
+            PC_SWAP16_AT(entry, lensFlareSwitch.radius, 2);
             break;
         case BHV_CHARACTER_FLAG:
-            pc_swap16_buf(&entry->characterFlag.angleZ, 8); // angleZ, radius, angleY, playerIndex
+            PC_SWAP16_AT(entry, characterFlag.angleZ, 8); // angleZ, radius, angleY, playerIndex
             break;
         case BHV_ANIMATION:
-            pc_swap16_buf(&entry->animation.objectIdToSpawn, 4); // objectIdToSpawn, animationStartDelay
-            pc_swap16_buf(&entry->animation.pauseFrameCount, 2);
+            PC_SWAP16_AT(entry, animation.objectIdToSpawn, 4); // objectIdToSpawn, animationStartDelay
+            PC_SWAP16_AT(entry, animation.pauseFrameCount, 2);
             break;
         case BHV_WAVE_GENERATOR:
-            pc_swap16_buf(&entry->waveGenerator.waveSize, 6); // waveSize, unkC, unkE
+            PC_SWAP16_AT(entry, waveGenerator.waveSize, 6); // waveSize, unkC, unkE
             break;
         case BHV_WAVE_POWER:
-            pc_swap16_buf(&entry->wavePower.radius, 6); // radius, power, divisor
+            PC_SWAP16_AT(entry, wavePower.radius, 6); // radius, power, divisor
             break;
         case BHV_BUTTERFLY:
-            pc_swap16_buf(&entry->butterfly.unk8, 2);
+            PC_SWAP16_AT(entry, butterfly.unk8, 2);
             break;
         case BHV_MIDI_FADE_POINT:
-            pc_swap16_buf(&entry->midiFadePoint.unk8, 4); // unk8, unkA
+            PC_SWAP16_AT(entry, midiFadePoint.unk8, 4); // unk8, unkA
             break;
         case BHV_MIDI_CHANNEL_SET:
-            pc_swap16_buf(&entry->midichset.unk8, 2);
+            PC_SWAP16_AT(entry, midichset.unk8, 2);
             break;
         case BHV_BUBBLER:
-            pc_swap16_buf(&entry->bubbler.particleDensity, 2);
+            PC_SWAP16_AT(entry, bubbler.particleDensity, 2);
             break;
         case BHV_RANGE_TRIGGER:
-            pc_swap16_buf(&entry->rangeTrigger.radius, 4); // radius, particleFlags
+            PC_SWAP16_AT(entry, rangeTrigger.radius, 4); // radius, particleFlags
             break;
         case BHV_FROG:
-            pc_swap16_buf(&entry->frog.homeRadius, 2);
+            PC_SWAP16_AT(entry, frog.homeRadius, 2);
             break;
     }
 }

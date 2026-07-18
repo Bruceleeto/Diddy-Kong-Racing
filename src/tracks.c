@@ -25,6 +25,7 @@
 #include "video.h"
 #include "waves.h"
 #include "weather.h"
+#include "pc_swap.h"
 
 // Maximum size for a level model is 522.5 KiB
 #define LEVEL_MODEL_MAX_SIZE 0x82A00
@@ -2851,14 +2852,14 @@ _Static_assert(sizeof(BspTreeNode) == 8, "BspTreeNode layout drifted from N64");
 
 static void pc_swap_level_model_header(LevelModel *mdl) {
     pc_swap32_buf(mdl, 0x18);                   // textures..segmentsBspTree offsets
-    pc_swap16_buf(&mdl->numberOfTextures, 8);   // counts (4 x s16)
-    pc_swap32_buf(&mdl->minimapSpriteIndex, 4);
-    pc_swap16_buf(&mdl->minimapRotation, 4);    // minimapRotation, unk26
-    pc_swap32_buf(&mdl->minimapXScale, 8);      // f32 scales
-    pc_swap16_buf(&mdl->minimapOffsetXAdv1, 8); // 4 x s16 offsets
-    pc_swap32_buf(&mdl->minimapColor, 4);
-    pc_swap16_buf(&mdl->lowerXBounds, 12);      // 6 x s16 bounds
-    pc_swap32_buf(&mdl->modelSize, 4);
+    PC_SWAP16_AT(mdl, numberOfTextures, 8);   // counts (4 x s16)
+    PC_SWAP32_AT(mdl, minimapSpriteIndex, 4);
+    PC_SWAP16_AT(mdl, minimapRotation, 4);    // minimapRotation, unk26
+    PC_SWAP32_AT(mdl, minimapXScale, 8);      // f32 scales
+    PC_SWAP16_AT(mdl, minimapOffsetXAdv1, 8); // 4 x s16 offsets
+    PC_SWAP32_AT(mdl, minimapColor, 4);
+    PC_SWAP16_AT(mdl, lowerXBounds, 12);      // 6 x s16 bounds
+    PC_SWAP32_AT(mdl, modelSize, 4);
 }
 
 static void pc_swap_level_segment_headers(LevelModel *mdl) {
@@ -2867,20 +2868,20 @@ static void pc_swap_level_segment_headers(LevelModel *mdl) {
     for (k = 0; k < mdl->numberOfSegments; k++) {
         LevelModelSegment *seg = &mdl->segments[k];
         pc_swap32_buf(seg, 0x1C);                 // 7 pointer/offset words
-        pc_swap16_buf(&seg->numberOfVertices, 6); // vertex/triangle/batch counts
-        pc_swap16_buf(&seg->unk28, 2);
-        pc_swap32_buf(&seg->unk2C, 4);
-        pc_swap16_buf(&seg->unk30, 4); // unk30, unk32
-        pc_swap32_buf(&seg->unk34, 4);
-        pc_swap16_buf(&seg->unk38, 2);
-        pc_swap32_buf(&seg->unk3C, 4);
+        PC_SWAP16_AT(seg, numberOfVertices, 6); // vertex/triangle/batch counts
+        PC_SWAP16_AT(seg, unk28, 2);
+        PC_SWAP32_AT(seg, unk2C, 4);
+        PC_SWAP16_AT(seg, unk30, 4); // unk30, unk32
+        PC_SWAP32_AT(seg, unk34, 4);
+        PC_SWAP16_AT(seg, unk38, 2);
+        PC_SWAP32_AT(seg, unk3C, 4);
     }
     pc_swap16_buf(mdl->segmentsBoundingBoxes, mdl->numberOfSegments * sizeof(LevelModelSegmentBoundingBox));
     // BSP interior nodes: one fewer than there are segments (leaves).
     for (k = 0; k < mdl->numberOfSegments - 1; k++) {
         BspTreeNode *node = &mdl->segmentsBspTree[k];
-        pc_swap16_buf(&node->leftNode, 4); // leftNode, rightNode
-        pc_swap16_buf(&node->splitValue, 2);
+        PC_SWAP16_AT(node, leftNode, 4); // leftNode, rightNode
+        PC_SWAP16_AT(node, splitValue, 2);
     }
     // Texture table: first word of each entry is the texture index that
     // generate_track feeds to load_texture; the rest are u8s.
@@ -2896,12 +2897,12 @@ static void pc_swap_level_segment_contents(LevelModelSegment *seg) {
         pc_swap16_buf(&seg->vertices[i], 6); // x, y, z; r/g/b/a are u8
     }
     for (i = 0; i < seg->numberOfTriangles; i++) {
-        pc_swap16_buf(&seg->triangles[i].uv0, 12); // uv0/uv1/uv2, 6 x s16; flags/indices are u8
+        PC_SWAP16_AT(&seg->triangles[i], uv0, 12); // uv0/uv1/uv2, 6 x s16; flags/indices are u8
     }
     for (i = 0; i < seg->numberOfBatches + 1; i++) { // +1: sentinel entry
         TriangleBatchInfo *b = &seg->batches[i];
-        pc_swap16_buf(&b->verticesOffset, 4); // verticesOffset, facesOffset
-        pc_swap32_buf(&b->flags, 4);
+        PC_SWAP16_AT(b, verticesOffset, 4); // verticesOffset, facesOffset
+        PC_SWAP32_AT(b, flags, 4);
     }
     // One facet-planes entry (4 x u16 plane indices) per triangle.
     for (i = 0; i < seg->numberOfTriangles; i++) {

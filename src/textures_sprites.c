@@ -6,6 +6,7 @@
 #include "memory.h"
 #include "tracks.h"
 #include <ultra64.h>
+#include "pc_swap.h"
 
 #define MAX_NUM_TEXTURES 700
 #define MAX_NUM_SPRITES 100
@@ -475,8 +476,8 @@ _Static_assert(__builtin_offsetof(SpriteAsset, anchor) == 0x04, "SpriteAsset lay
 _Static_assert(__builtin_offsetof(SpriteAsset, frameTexOffsets) == 0x0C, "SpriteAsset layout drifted from N64");
 
 static void pc_swap_texture_header(TextureHeader *tex) {
-    pc_swap16_buf(&tex->flags, 4);         // flags, ciPaletteOffset
-    pc_swap16_buf(&tex->numOfTextures, 6); // numOfTextures, frameAdvanceDelay, textureSize
+    PC_SWAP16_AT(tex, flags, 4);         // flags, ciPaletteOffset
+    PC_SWAP16_AT(tex, numOfTextures, 6); // numOfTextures, frameAdvanceDelay, textureSize
 }
 
 static void pc_swap_sprite_asset(SpriteAsset *spriteAsset) {
