@@ -50,7 +50,8 @@ BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-ffast-math \
 	-ffp-contract=fast \
 	-mfsrra \
-	-mfsca
+	-mfsca \
+	-flto
 BASE_CFLAGS += -MMD -MP
 
 # LTO defers codegen to link time, so the link line has to repeat the codegen
