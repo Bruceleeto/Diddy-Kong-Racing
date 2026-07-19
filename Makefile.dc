@@ -19,6 +19,14 @@ DEFINES := \
 	-D_MIPS_SZLONG=32 \
 	-DPC_MAIN_POOL_BYTES='(3 * 1024 * 1024)'
 
+# Seed the RAM-backed EEPROM with the 100%-completion image in
+# include/eeprom_preset.h (slots 1 and 2 complete) instead of erased 0xFF.
+# On by default; disable with: make -f Makefile.dc EEPROM_PRESET_100=0
+EEPROM_PRESET_100 ?= 1
+ifeq ($(EEPROM_PRESET_100),1)
+DEFINES += -DEEPROM_PRESET_100
+endif
+
 
 INCLUDES_REIMPL := \
 	-I . \

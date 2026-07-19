@@ -268,17 +268,52 @@ void osContGetReadData(PCContPad *pads) {
     input_host_read(&pads[0].button, &pads[0].stick_x, &pads[0].stick_y);
 }
 
+// EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks. Backed by RAM, so writes
+// survive the session but not a reboot. Build with -DEEPROM_PRESET_100 to seed
+// it from a 100%-completion image instead of erased 0xFF.
+#define PC_EEPROM_BLOCKS 64
+#define PC_EEPROM_BYTES (PC_EEPROM_BLOCKS * 8)
+
+#ifdef EEPROM_PRESET_100
+#include "eeprom_preset.h"
+#endif
+
+static u8 gEeprom[PC_EEPROM_BYTES];
+static s32 gEepromReady = 0;
+
+static void eeprom_init(void) {
+    if (gEepromReady) {
+        return;
+    }
+    gEepromReady = 1;
+#ifdef EEPROM_PRESET_100
+    memcpy(gEeprom, gEepromPreset, PC_EEPROM_BYTES);
+#else
+    memset(gEeprom, 0xFF, PC_EEPROM_BYTES); // erased
+#endif
+}
+
 s32 osEepromProbe(void *mq) {
+    eeprom_init();
     return 1; // EEPROM_TYPE_4K — present
 }
 
 s32 osEepromRead(void *mq, u8 address, u8 *buffer) {
-    memset(buffer, 0xFF, 8); // erased EEPROM block
+    eeprom_init();
+    if (address >= PC_EEPROM_BLOCKS) {
+        memset(buffer, 0xFF, 8);
+        return 0;
+    }
+    memcpy(buffer, &gEeprom[address * 8], 8);
     return 0;
 }
 
 s32 osEepromWrite(void *mq, u8 address, u8 *buffer) {
-    return 0; // accepted, not persisted (yet)
+    eeprom_init();
+    if (address < PC_EEPROM_BLOCKS) {
+        memcpy(&gEeprom[address * 8], buffer, 8);
+    }
+    return 0; // accepted, not persisted to VMU (yet)
 }
 
 s32 osPfsInit(void *mq, void *pfs, s32 channel) {
