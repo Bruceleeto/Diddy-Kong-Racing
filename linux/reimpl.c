@@ -209,11 +209,12 @@ float __libm_qnan_f = __builtin_nanf("");
 // SI bus — controllers, EEPROM saves, controller paks, rumble.
 // The N64 talks to all of these through PIF-RAM DMA over the Serial Interface
 // (the libultra cont*/pfs*/eeprom*/motor files, dropped from the PC build).
-// Constructive lies instead: one controller in port 0 with neutral input, an
-// erased EEPROM (game falls back to creating default saves), and no
-// controller paks / rumble paks plugged in anywhere.
-// TODO: real host input (this is where it plugs in) and EEPROM persisted to a
-// save file on disk.
+// Constructive lies instead: an erased EEPROM (game falls back to creating
+// default saves) and no controller paks / rumble paks plugged in anywhere.
+// Controllers are real: the ports the host reports (input_host_port_mask) are
+// presented as connected and polled individually, which is what lets a second
+// player join at character select and unlock split screen.
+// TODO: EEPROM persisted to a save file.
 // ---------------------------------------------------------------------------
 #define PC_CONT_TYPE_NORMAL 0x0005
 #define PC_CONT_NO_RESPONSE 0x8
@@ -236,13 +237,15 @@ typedef struct {
 extern s32 osSendMesg(void *mq, void *msg, s32 flags);
 
 s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
+    u32 mask = input_host_port_mask();
     s32 i;
 
-    *bitpattern = 1; // controller in port 0 only
+    *bitpattern = (u8) (mask & 0xF);
     for (i = 0; i < PC_MAXCONTROLLERS; i++) {
-        status[i].type = (i == 0) ? PC_CONT_TYPE_NORMAL : 0;
+        s32 present = (mask >> i) & 1;
+        status[i].type = present ? PC_CONT_TYPE_NORMAL : 0;
         status[i].status = 0;
-        status[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
+        status[i].error = present ? 0 : PC_CONT_NO_RESPONSE;
     }
     return 0;
 }
@@ -254,16 +257,25 @@ s32 osContStartReadData(void *mq) {
 }
 
 void osContGetReadData(PCContPad *pads) {
+    // Re-read the mask every poll rather than trusting the one osContInit saw,
+    // so a pad plugged in after boot still reaches the game. joypad.c reads all
+    // four pads unconditionally, so filling them here is all a second player
+    // needs to be able to join at character select.
+    u32 mask = input_host_port_mask();
     s32 i;
 
     for (i = 0; i < PC_MAXCONTROLLERS; i++) {
         pads[i].button = 0;
         pads[i].stick_x = 0;
         pads[i].stick_y = 0;
-        pads[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
-    }
 
-    input_host_read(&pads[0].button, &pads[0].stick_x, &pads[0].stick_y);
+        if ((mask >> i) & 1) {
+            pads[i].error = 0;
+            input_host_read(i, &pads[i].button, &pads[i].stick_x, &pads[i].stick_y);
+        } else {
+            pads[i].error = PC_CONT_NO_RESPONSE;
+        }
+    }
 }
 
 // EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks. Backed by RAM, so writes

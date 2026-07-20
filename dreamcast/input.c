@@ -18,13 +18,31 @@
 #define BTN_CLEFT 0x0002
 #define BTN_CRIGHT 0x0001
 
+// The game only ever looks at four ports (MAXCONTROLLERS).
+#define MAX_PORTS 4
+
 // Full deflection on the N64 stick.
 #define STICK_MAX 80
 
 // A DC analog trigger past this (0..255) counts as a digital press.
 #define TRIG_THRESHOLD 64
 
-void input_host_read(unsigned short *button, signed char *stickX, signed char *stickY) {
+// maple_enum_type() indexes the controllers it finds, not the physical ports:
+// a pad in port C with port B empty enumerates as controller 1. That is what we
+// want — players fill N64 ports in the order their pads are plugged in.
+unsigned int input_host_port_mask(void) {
+    unsigned int mask = 0;
+    int i;
+
+    for (i = 0; i < MAX_PORTS; i++) {
+        if (maple_enum_type(i, MAPLE_FUNC_CONTROLLER) != NULL) {
+            mask |= 1u << i;
+        }
+    }
+    return mask;
+}
+
+void input_host_read(int port, unsigned short *button, signed char *stickX, signed char *stickY) {
     maple_device_t *cont;
     cont_state_t *st;
     unsigned short buttons = 0;
@@ -34,7 +52,11 @@ void input_host_read(unsigned short *button, signed char *stickX, signed char *s
     *stickX = 0;
     *stickY = 0;
 
-    cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    if (port < 0 || port >= MAX_PORTS) {
+        return;
+    }
+
+    cont = maple_enum_type(port, MAPLE_FUNC_CONTROLLER);
     if (cont == NULL) {
         return; // no pad plugged in — report neutral
     }
