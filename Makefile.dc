@@ -30,13 +30,12 @@ INCLUDES_REIMPL := \
 	-I src/hasm \
 	-I libultra \
 	-I libultra/src/gu \
-	-I libultra/src/libc \
 	-I libultra/src/io \
 	-I libultra/src/sc \
 	-I libultra/src/audio \
 	-I libultra/src/os
 
-INCLUDES := -I include/libc $(INCLUDES_REIMPL)
+INCLUDES := $(INCLUDES_REIMPL)
 
 OPT      ?= -O3
 
@@ -44,6 +43,7 @@ BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-std=gnu23 \
 	-fno-common \
 	-fno-strict-aliasing \
+	-Wno-int-conversion \
 	-funsigned-char \
 	-fwrapv \
 	-ffast-math \
@@ -256,7 +256,7 @@ MAP    := $(TARGET:.elf=.map)
 all: $(TARGET)
 
 $(TARGET): $(O_FILES)
-	$(CC) $(LTO_FLAGS) $(O_FILES) -o $(TARGET) -s -Wl,-Map,$(MAP) $(LIBS)
+	$(CC) $(LTO_FLAGS) $(O_FILES) -o $(TARGET) -Wl,-Map,$(MAP) $(LIBS)
 
 $(BUILD)/dreamcast/%.o: dreamcast/%.c
 	@mkdir -p $(dir $@)

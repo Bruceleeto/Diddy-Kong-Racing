@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sh4zam/shz_sh4zam.h>
+
 // ---------------------------------------------------------------------------
 // State mirrored from the gfx.h setters
 // ---------------------------------------------------------------------------
@@ -153,6 +155,8 @@ static void ta_commit(void *p) {
 // Init / teardown
 // ---------------------------------------------------------------------------
 
+static void* pvr_ta_sq_addr;
+
 void gfx_window_init(int width, int height, int scale) {
     pvr_init_params_t params = {
         // OP, OP_MOD, TR, TR_MOD, PT. The PT bin has to be open for the
@@ -185,6 +189,8 @@ void gfx_window_init(int width, int height, int scale) {
 
     // Set after pvr_init so it cannot be clobbered by it.
     *((volatile unsigned int *) PVR_PT_ALPHA_REF) = PT_ALPHA_REF_VALUE;
+
+    pvr_ta_sq_addr = (void *)SQ_MASK_DEST(PVR_TA_INPUT);
 
     sPvrReady = 1;
 }
@@ -290,7 +296,9 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
         free(tmp);
         return 0;
     }
+
     pvr_txr_load(tmp, vram, (uint32) (pw * ph * 2)); // plain copy, non-twiddled
+
     free(tmp);
 
     sTextures[slot].data = vram;
@@ -501,7 +509,7 @@ static int scissor_needs_exact_clip(void) {
 }
 
 static inline float vert_invw(const GfxTriVert *v) {
-    return (v->w > 1e-6f) ? (1.0f / v->w) : 1.0e6f;
+    return shz_invf_fsrra(v->w); //(v->w > 1e-6f) ? (1.0f / v->w) : 1.0e6f;
 }
 
 static inline unsigned char clamp_u8(float f) {
@@ -523,7 +531,7 @@ static void clip_lerp(GfxTriVert *out, const GfxTriVert *a, const GfxTriVert *b,
     float ia = vert_invw(a);
     float ib = vert_invw(b);
     float iw = ia + s * (ib - ia);
-    float w = (iw > 1e-9f) ? (1.0f / iw) : a->w;
+    float w = shz_invf_fsrra(iw); //(iw > 1e-9f) ? (1.0f / iw) : a->w;
 
 #define PERSP(fa, fb) ((((fa) * ia) + s * (((fb) * ib) - ((fa) * ia))) * w)
     out->x = a->x + s * (b->x - a->x);
@@ -566,7 +574,7 @@ static int clip_poly_plane(const GfxTriVert *in, int n, GfxTriVert *out, int axi
         }
         if (ina != inb) {
             float d = cb - ca;
-            float s = (d != 0.0f) ? ((bound - ca) / d) : 0.0f;
+            float s = (d != 0.0f) ? shz_divf((bound - ca), d) : 0.0f;
 
             if (s < 0.0f) s = 0.0f;
             if (s > 1.0f) s = 1.0f;
@@ -678,7 +686,7 @@ static inline unsigned int pack_argb(unsigned char a, unsigned char r, unsigned 
 static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) {
     pvr_vertex_t *v = (pvr_vertex_t *) ta_target();
     float w = s->w;
-    float invw = (w > 1e-6f) ? (1.0f / w) : 1.0e6f;
+    float invw = shz_invf_fsrra(w); //(w > 1e-6f) ? (1.0f / w) : 1.0e6f;
 
     if (sDepthOffset) {
         invw *= 1.003f; // nudge decals toward the viewer
@@ -832,21 +840,20 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
     // which costs nothing at ~24 batches a frame and keeps the TR cache honest —
     // sHdrDirty still means "TR's copy is stale" and only the TR path clears it.
     if (sRoute == ROUTE_PT) {
-        compile_header_for(PVR_LIST_PT_POLY, &ptHdr);
-        hdrSrc = &ptHdr;
+        hdrDst = (pvr_poly_hdr_t*)ta_target();
+        compile_header_for(PVR_LIST_PT_POLY, hdrDst);
+        ta_commit(hdrDst);
     } else if (sRoute == ROUTE_OP) {
-        compile_header_for(PVR_LIST_OP_POLY, &ptHdr);
-        hdrSrc = &ptHdr;
+        hdrDst = (pvr_poly_hdr_t*)ta_target();
+        compile_header_for(PVR_LIST_OP_POLY, hdrDst);
+        ta_commit(hdrDst);
     } else {
         if (sHdrDirty) {
             compile_header();
             sHdrDirty = 0;
         }
-        hdrSrc = &sHdr;
+        shz_sq_memcpy32_1(pvr_ta_sq_addr, &sHdr);
     }
-    hdrDst = (pvr_poly_hdr_t *) ta_target();
-    *hdrDst = *hdrSrc;
-    ta_commit(hdrDst);
 
     // GL_TRIANGLES -> one 3-vertex PVR strip per triangle (3rd vertex EOL).
     for (i = 0; i + 3 <= count; i += 3) {
@@ -877,12 +884,7 @@ static void replay_list(int list, unsigned char (*buf)[32], int count) {
         return;
     }
     pvr_list_begin(list);
-    for (i = 0; i < count; i++) {
-        unsigned char *d = (unsigned char *) pvr_dr_target(sDrState);
-
-        memcpy(d, buf[i], 32);
-        pvr_dr_commit(d);
-    }
+    shz_sq_memcpy32_xmtrx(pvr_ta_sq_addr, buf, count * 32);
     pvr_list_finish();
 }
 

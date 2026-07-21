@@ -28,7 +28,7 @@ SnowGfxData gWeatherPresets[3] = {
 };
 
 SnowPosData *gSnowPhysics = NULL;
-SnowGfxData gSnowGfx = { NULL, 0, { NULL }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+SnowGfxData gSnowGfx = { NULL, 0, { 0 }, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 Vertex *gSnowVerts = NULL;
 s32 gSnowVertCount = 0;

@@ -13,6 +13,8 @@
 #include "racer.h"
 #include "types.h"
 
+#include <sh4zam/shz_sh4zam.h>
+
 /************ .data ************/
 
 u8 gVehicleSounds = TRUE;
@@ -333,7 +335,7 @@ void racer_sound_car(Object *obj, u32 buttonsPressed, u32 buttonsHeld, s32 ticks
 
     // Start or stop the brake sound based on conditions
     if ((gSoundRacerObj->unk10 != NULL || gSoundRacerObj->unk14 != NULL || !(buttonsHeld & B_BUTTON) ||
-         gSoundRacerObj->velocity > -0.1 || gSoundRacerObj->vehicleID == VEHICLE_LOOPDELOOP) &&
+         gSoundRacerObj->velocity > -0.1f || gSoundRacerObj->vehicleID == VEHICLE_LOOPDELOOP) &&
         gRacerSound->brakeSound != NULL) {
         sndp_stop(gRacerSound->brakeSound);
         gRacerSound->brakeSound = NULL;
@@ -426,7 +428,7 @@ void racer_sound_hovercraft(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsH
     angleSine = sins_f(angle);
     angleSine = ABSF(angleSine);
     if (!check_if_showing_cutscene_camera() && get_race_countdown() == 0) {
-        lateralSpeedPitch = (gRacerSound->pitchLateralSpeedScale * angleSine * speed) / 15.0;
+        lateralSpeedPitch = (gRacerSound->pitchLateralSpeedScale * angleSine * speed) / 15.0f;
     } else {
         lateralSpeedPitch = 0.0f;
     }
@@ -434,8 +436,8 @@ void racer_sound_hovercraft(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsH
     if (!race_starting()) {
         gRacerSound->thrustPitch = 0.0f;
     }
-    if (speed > 10.0) {
-        speed -= 10.0;
+    if (speed > 10.0f) {
+        speed -= 10.0f;
     } else {
         speed = 0.0f;
     }
@@ -444,20 +446,20 @@ void racer_sound_hovercraft(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsH
     // Only applies when speed is above 10, i.e. near maximum.
     // Otherwise, the bonus fades out gradually.
     //!@Delta: This entire block is not timing correct.
-    if (speed != 0.0 && gSoundRacerObj->bananas != 0) {
+    if (speed != 0.0f && gSoundRacerObj->bananas != 0) {
         if (gSoundRacerObj->bananas <= 10) {
             bananas = gSoundRacerObj->bananas;
         } else {
             bananas = 10;
         }
-        if (gRacerSound->bananaPitch < 0.05 * bananas) {
-            gRacerSound->bananaPitch += (0.05 * bananas) / (bananas * 64);
-        } else if (gRacerSound->bananaPitch > 0.05 * bananas) {
-            gRacerSound->bananaPitch = 0.05 * bananas;
+        if (gRacerSound->bananaPitch < 0.05f * bananas) {
+            gRacerSound->bananaPitch += (0.05f * bananas) / (bananas * 64);
+        } else if (gRacerSound->bananaPitch > 0.05f * bananas) {
+            gRacerSound->bananaPitch = 0.05f * bananas;
         }
         targetPitch += gRacerSound->bananaPitch;
     } else {
-        gRacerSound->bananaPitch *= 0.95;
+        gRacerSound->bananaPitch *= 0.95f;
         targetPitch += gRacerSound->bananaPitch;
     }
 
@@ -475,8 +477,8 @@ void racer_sound_hovercraft(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsH
     // Smoothly interpolate pitch and clamp to maximum.
     // The max pitch value is 0x7FFF / 5000.0 (~6.5534), but its origin is unclear.
     gRacerSound->basePitch[0] += (targetPitch - gRacerSound->basePitch[0]) / 8;
-    if (gRacerSound->basePitch[0] > (0x7FFF / 5000.0)) {
-        gRacerSound->basePitch[0] = (0x7FFF / 5000.0); // 6.5534
+    if (gRacerSound->basePitch[0] > (0x7FFF / 5000.0f)) {
+        gRacerSound->basePitch[0] = (0x7FFF / 5000.0f); // 6.5534
     }
 
     // Convert pitch to volume by interpolating between control points.
@@ -573,8 +575,8 @@ void racer_sound_plane(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsHeld, 
     targetPitch += temp + temp2;
 
     // Apply additional pitch if speed exceeds 10.
-    if (speed > 10.0) {
-        speed -= 10.0;
+    if (speed > 10.0f) {
+        speed -= 10.0f;
     } else {
         speed = 0.0f;
     }
@@ -583,26 +585,26 @@ void racer_sound_plane(Object *obj, UNUSED u32 buttonsPressed, u32 buttonsHeld, 
     // Apply pitch bonus from collected bananas: +0.05 per banana.
     // Only applies when speed is above 10, i.e. near maximum.
     // Otherwise, the bonus fades out gradually.
-    if (speed != 0.0 && gSoundRacerObj->bananas != 0) {
+    if (speed != 0.0f && gSoundRacerObj->bananas != 0) {
         if (gSoundRacerObj->bananas <= 10) {
             bananas = gSoundRacerObj->bananas;
         } else {
             bananas = 10;
         }
-        if (gRacerSound->bananaPitch < 0.05 * bananas) {
-            gRacerSound->bananaPitch += (0.05 * bananas) / (bananas * 64);
-        } else if (gRacerSound->bananaPitch > 0.05 * bananas) {
-            gRacerSound->bananaPitch = 0.05 * bananas;
+        if (gRacerSound->bananaPitch < 0.05f * bananas) {
+            gRacerSound->bananaPitch += (0.05f * bananas) / (bananas * 64);
+        } else if (gRacerSound->bananaPitch > 0.05f * bananas) {
+            gRacerSound->bananaPitch = 0.05f * bananas;
         }
         targetPitch += gRacerSound->bananaPitch;
     } else {
-        gRacerSound->bananaPitch *= 0.95;
+        gRacerSound->bananaPitch *= 0.95f;
         targetPitch += gRacerSound->bananaPitch;
     }
     gRacerSound->basePitch[0] += (targetPitch - gRacerSound->basePitch[0]) / 8;
 
-    if (gRacerSound->basePitch[0] > 0x7FFF / 5000.0) {
-        gRacerSound->basePitch[0] = 0x7FFF / 5000.0; // 6.5534
+    if (gRacerSound->basePitch[0] > 0x7FFF / 5000.0f) {
+        gRacerSound->basePitch[0] = 0x7FFF / 5000.0f; // 6.5534
     }
     gRacerSound->basePitch[1] = 1.0f;
     gRacerSound->baseVolume[1] = 0;
@@ -753,7 +755,7 @@ void racer_sound_doppler_effect(Object *observerObj, Camera *camera, Object *sou
 
         // Now things get weird...
         // First, convert the base pitch to cents (logarithmic scale).
-        cents = log(gRacerSound->basePitch[0]) * 1731.23404; // 1200 / ln(2)
+        cents = shz_logf(gRacerSound->basePitch[0]) * 1731.23404f; // 1200 / ln(2)
 
         // Then scale the cents using (70 + v) / (70 - v), which is incorrect.
         // Cents are logarithmic and shouldn't be scaled like this.
@@ -768,10 +770,10 @@ void racer_sound_doppler_effect(Object *observerObj, Camera *camera, Object *sou
         gRacerSound->dopplerPitch *= obsVelRatio;
 
         // Clamp the Doppler pitch shift to ±0.8
-        if (gRacerSound->dopplerPitch > 0.8) {
-            gRacerSound->dopplerPitch = 0.8;
-        } else if (gRacerSound->dopplerPitch < -0.8) {
-            gRacerSound->dopplerPitch = -0.8;
+        if (gRacerSound->dopplerPitch > 0.8f) {
+            gRacerSound->dopplerPitch = 0.8f;
+        } else if (gRacerSound->dopplerPitch < -0.8f) {
+            gRacerSound->dopplerPitch = -0.8f;
         }
         gRacerSound->prevDistance[observerRacer->playerIndex] = distance;
     }
@@ -844,7 +846,7 @@ void racer_sound_update_all(Object **racerObjs, s32 numRacers, Camera *cameras, 
             // The lower the intensity, the louder the idle sound.
             // This is only applied when there are 1 or 2 players to avoid excessive sound generation.
             if (gRacerSound->engine_intensity < 70 && gRacerSound->engineIdleSound != 0 && numCameras <= 2 &&
-                volumeMult != 0.0 && !(gRacerSound->soundDisabled[0] & 1)) {
+                volumeMult != 0.0f && !(gRacerSound->soundDisabled[0] & 1)) {
 
                 idle_intensity = gRacerSound->engine_intensity / 70.0f;
                 volume =
@@ -877,13 +879,13 @@ void racer_sound_update_all(Object **racerObjs, s32 numRacers, Camera *cameras, 
             }
 
             // Start or stop engine sounds based on current conditions.
-            for (j = 0; j < 2 && gRacerSound->soundId[j] != 0 && volumeMult != 0.0; j++) {
+            for (j = 0; j < 2 && gRacerSound->soundId[j] != 0 && volumeMult != 0.0f; j++) {
                 volume = gRacerSound->baseVolume[j] * volumeMult;
 
                 //!@bug bananaPitch is added twice.
                 pitch = gRacerSound->basePitch[j] + gRacerSound->bananaPitch + gRacerSound->enginePitch +
                         gRacerSound->dopplerPitch;
-                if (pitch < 0.05) {
+                if (pitch < 0.05f) {
                     pitch = 0.05f;
                 }
 
@@ -971,7 +973,7 @@ void racer_sound_update_all(Object **racerObjs, s32 numRacers, Camera *cameras, 
                         }
 
                         // All background sounds are played at 80% of the computed volume.
-                        backgroundVolume *= 0.8;
+                        backgroundVolume *= 0.8f;
 
                         // Store sound parameters for the camera that hears it the loudest.
                         if (gRacerSound->backgroundVolume < backgroundVolume) {
@@ -984,7 +986,7 @@ void racer_sound_update_all(Object **racerObjs, s32 numRacers, Camera *cameras, 
                                 racer_sound_doppler_effect(racerObjs[i], NULL, racerObjs[j], tickDelta);
                             }
                             gRacerSound->backgroundPitch = gRacerSound->basePitch[0] + gRacerSound->dopplerPitch;
-                            if (gRacerSound->backgroundPitch < 0.05) {
+                            if (gRacerSound->backgroundPitch < 0.05f) {
                                 gRacerSound->backgroundPitch = 0.05f;
                             }
                         }
@@ -1123,29 +1125,4 @@ UNUSED void racer_sound_disable(void) {
  */
 UNUSED u8 racer_sound_check(void) {
     return gVehicleSounds;
-}
-
-/**
- * Returns the natural logarithm of the given argument.
- * Uses a Maclaurin series expansion for the inverse hyperbolic tangent (artanh) for the calculation.
- */
-f32 log(f32 x) {
-    f32 prev_sum;
-    f32 x_squared;
-    f32 power;
-    f32 sum;
-    s32 n;
-
-    sum = 0.0f;
-    prev_sum = -1.0f;
-    x = (x - 1.0f) / (1.0f + x);
-    power = x;
-    x_squared = x * x;
-    // sum = sum(x^n/n)
-    for (n = 1; (sum - prev_sum) > 0.001; n += 2) {
-        prev_sum = sum;
-        sum += power / n; // power = x^n
-        power *= x_squared;
-    }
-    return sum * 2;
 }

@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <sh4zam/shz_sh4zam.h>
+
 typedef int16_t s16;
 typedef int32_t s32;
 typedef uint8_t u8;
@@ -75,9 +77,9 @@ static void ring_write(int n, const void *src, u32 count) {
     }
     idx = r->head & mask;
     first = MIN(count, r->cap - idx);
-    memcpy(r->buf + idx, src, first);
+    shz_memcpy(r->buf + idx, src, first);
     if (count - first) {
-        memcpy(r->buf, (const u8 *) src + first, count - first);
+        shz_memcpy(r->buf, (const u8 *) src + first, count - first);
     }
     r->head += count;
 }
@@ -94,9 +96,9 @@ static void ring_read(int n, void *dst, u32 count) {
     }
     idx = r->tail & mask;
     first = MIN(count, r->cap - idx);
-    memcpy(dst, r->buf + idx, first);
+    shz_memcpy(dst, r->buf + idx, first);
     if (count - first) {
-        memcpy((u8 *) dst + first, r->buf, count - first);
+        shz_memcpy((u8 *) dst + first, r->buf, count - first);
     }
     r->tail += count;
 }
