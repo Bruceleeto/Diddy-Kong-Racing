@@ -86,7 +86,6 @@ typedef struct VehicleSoundAsset {
 void racer_sound_update(Object *obj, u32 buttonsPressed, u32 buttonsHeld, s32 ticksDelta);
 void racer_sound_free(Object *obj);
 void racer_sound_doppler_effect(Object *observerObj, Camera *camera, Object *sourceObj, s32 tickDelta);
-f32 log(f32 x);
 VehicleSoundData *racer_sound_init(s32 characterId, s32 vehicleId);
 void racer_sound_car(Object *obj, u32 buttonsPressed, u32 buttonsHeld, s32 ticksDelta);
 void racer_sound_hovercraft(Object *, u32 buttonsPressed, u32 buttonsHeld, s32 tickDelta);

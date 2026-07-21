@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <kos.h>
+#include <sh4zam/shz_sh4zam.h>
 
 #include "input.h"
 
@@ -169,7 +170,7 @@ void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
         if ((u32) numBytes > sAssetLutSize) {
             numBytes = sAssetLutSize;
         }
-        memcpy((void *) (uintptr_t) ramAddress, sAssetLut, numBytes);
+        shz_memcpy((void *) (uintptr_t) ramAddress, sAssetLut, numBytes);
         return;
     }
 
@@ -181,7 +182,7 @@ void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
                         sAssetsBinSize);
                 numBytes = sAssetsBinSize - offset;
             }
-            memcpy((void *) (uintptr_t) ramAddress, sAssetsBin + offset, numBytes);
+            shz_memcpy((void *) (uintptr_t) ramAddress, sAssetsBin + offset, numBytes);
             return;
         }
     }

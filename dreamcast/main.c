@@ -3,6 +3,7 @@
 #include <structs.h>
 #include <f3ddkr.h>
 #include <time.h>
+#include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
 
@@ -108,7 +109,7 @@ typedef struct {
 
 static u32 sGfxFrameCount = 0;
 
-static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
+alignas(32) static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
 static s32 sCurMatrix = 0;
 static s32 sBillboard = FALSE;
 
@@ -261,16 +262,12 @@ static void mtx_to_float(const Mtx *m, f32 out[4][4]) {
 static void project_into(GfxVertex *v);
 
 static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
-    const f32 (*m)[4] = sMatrices[sCurMatrix];
-    f32 x = v->x, y = v->y, z = v->z;
-    s32 i;
+    SHZ_ALIASING shz_vec4_t* out = (SHZ_ALIASING shz_vec4_t*)dst->clip;
 
-    for (i = 0; i < 4; i++) {
-        dst->clip[i] = (m[0][i] * x) + (m[1][i] * y) + (m[2][i] * z) + m[3][i];
-        if (anchor != NULL) {
-            dst->clip[i] += anchor[i];
-        }
-    }
+    *out = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+
+    if(anchor)
+        *out = shz_vec4_add(*out, *(SHZ_ALIASING shz_vec4_t*)anchor);
 
     dst->r = v->r;
     dst->g = v->g;
@@ -305,6 +302,7 @@ static void handle_vertex(u32 w0, u32 w1) {
         sVertexBase = count;
     }
 
+    shz_xmtrx_load_4x4((shz_mat4x4_t*)&sMatrices[sCurMatrix]);
     for (i = 0; i < count && dstIdx + i < GFX_MAX_VERTS; i++) {
         // Billboarded vertices are sprite-space offsets from vertex 0, the
         // anchor pushed just before the billboard matrix.
@@ -703,7 +701,7 @@ static void push_tri(const GfxVertex *a, const GfxVertex *b, const GfxVertex *c,
  * position, which is what the RSP's own clipper does.
  */
 static void clip_edge(const GfxVertex *a, const GfxVertex *b, GfxVertex *out) {
-    f32 t = (GFX_NEAR_W - a->clip[3]) / (b->clip[3] - a->clip[3]);
+    f32 t = shz_divf(GFX_NEAR_W - a->clip[3], b->clip[3] - a->clip[3]);
     s32 i;
 
     for (i = 0; i < 4; i++) {
@@ -824,8 +822,9 @@ static void handle_polygon(u32 w0, u32 w1) {
     if (texture != 0) {
         // UVs are S10.5 texel coordinates (32 = one texel), so normalising is a
         // divide by 32 and then by the texture's size.
-        invTexW = 1.0f / (32.0f * (f32) sTileWidth);
-        invTexH = 1.0f / (32.0f * (f32) sTileHeight);
+
+        invTexW = shz_invf_fsrra(32.0f * (f32) sTileWidth);
+        invTexH = shz_invf_fsrra(32.0f * (f32) sTileHeight);
     }
 
     // Each G_TRIN is one material batch, so it becomes one draw call.
@@ -1613,7 +1612,15 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     pc_audio_report();
 }
 
+static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
+    (void)addr;
+    (void)btns;
+    arch_exit();
+}
+
 int main(int argc, char **argv) {
+    cont_btn_callback(0, CONT_RESET_BUTTONS, cont_reset_btn_callback_);
+
     printf("=== DKR PC ===\n");
     sHostThread.id = 3;
     sHostThread.priority = 10;

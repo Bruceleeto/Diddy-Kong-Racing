@@ -1,6 +1,8 @@
 
 #include <string.h>
 
+#include <sh4zam/shz_sh4zam.h>
+
 typedef signed char s8;
 typedef signed short s16;
 typedef signed int s32;
@@ -41,19 +43,27 @@ typedef signed long long s64;
 
 #define DMEM_SIZE 4096
 
+#undef SHZ_PREFETCH
+#define SHZ_PREFETCH(ptr) asm("pref @%0" : : "r" (ptr))
+
 // ---------------------------------------------------------------------------
 // RSP state
 // ---------------------------------------------------------------------------
-static u8 sDmem[DMEM_SIZE];
+static struct {
+    alignas(32) u8 dmem[DMEM_SIZE];
 
-static u16 sIn, sOut, sCount;            // SETBUFF, no flags
-static u16 sDryRight, sWetLeft, sWetRight; // SETBUFF | A_AUX
-static s16 sVol[2];                      // [0]=left, [1]=right
-static s16 sTarget[2];
-static s32 sRate[2];
-static s16 sDry, sWet;
-static s16 sTable[512]; // ADPCM codebook, also POLEF coefficients
-static u32 sLoopAddr;
+    u16 in, out, count;              // SETBUFF, no flags
+    u16 dryRight, wetLeft, wetRight; // SETBUFF | A_AUX
+    s16 vol[2];                      // [0]=left, [1]=right
+    s16 target[2];
+    s32 rate[2];
+    s16 dry, wet;
+    u32 loopAddr;
+
+    alignas(32) float tableF[8][2][8];
+    alignas(32) s16 table[512]; // ADPCM codebook, also POLEF coefficients
+
+} rspa;
 
 // Identity "physical" addresses: osVirtualToPhysical is identity on the host, so a
 // DMA address in the command list is just a host pointer.
@@ -71,9 +81,19 @@ static s16 clamp16(s32 v) {
     return (s16) v;
 }
 
+static s16 clamp16f(float v) {
+    if (v < -32768.0f) {
+        return -32768;
+    }
+    if (v > 32767.0f) {
+        return 32767;
+    }
+    return (s16) v;
+}
+
 // DMEM is byte-addressed but every audio buffer in it is s16-aligned.
 static s16 *dmem16(u32 addr) {
-    return (s16 *) &sDmem[addr & (DMEM_SIZE - 2)];
+    return (s16 *) &rspa.dmem[addr & (DMEM_SIZE - 2)];
 }
 
 // ---------------------------------------------------------------------------
@@ -87,13 +107,13 @@ static void op_setbuff(u32 w0, u32 w1) {
         // The aux form reuses the three fields as three DMEM addresses — see
         // alMainBusPull: aSetBuffer(A_AUX, AL_MAIN_R_OUT, AL_AUX_L_OUT, AL_AUX_R_OUT).
         // The last one is NOT a count here.
-        sDryRight = w0 & 0xFFFF;
-        sWetLeft = (w1 >> 16) & 0xFFFF;
-        sWetRight = w1 & 0xFFFF;
+        rspa.dryRight = w0 & 0xFFFF;
+        rspa.wetLeft = (w1 >> 16) & 0xFFFF;
+        rspa.wetRight = w1 & 0xFFFF;
     } else {
-        sIn = w0 & 0xFFFF;
-        sOut = (w1 >> 16) & 0xFFFF;
-        sCount = w1 & 0xFFFF;
+        rspa.in = w0 & 0xFFFF;
+        rspa.out = (w1 >> 16) & 0xFFFF;
+        rspa.count = w1 & 0xFFFF;
     }
 }
 
@@ -104,15 +124,15 @@ static void op_setvol(u32 w0, u32 w1) {
     u16 r = w1 & 0xFFFF;
 
     if (flags & A_AUX) {
-        sDry = v;
-        sWet = (s16) r;
+        rspa.dry = v;
+        rspa.wet = (s16) r;
     } else if (flags & A_VOL) {
-        sVol[(flags & A_LEFT) ? 0 : 1] = v;
+        rspa.vol[(flags & A_LEFT) ? 0 : 1] = v;
     } else {
         // A_RATE: v is the envelope target, (t:r) the 16.16 per-sample step.
         s32 idx = (flags & A_LEFT) ? 0 : 1;
-        sTarget[idx] = v;
-        sRate[idx] = (s32) (((u32) t << 16) | r);
+        rspa.target[idx] = v;
+        rspa.rate[idx] = (s32) (((u32) t << 16) | r);
     }
 }
 
@@ -123,7 +143,7 @@ static void op_clearbuff(u32 w0, u32 w1) {
     if (addr + count > DMEM_SIZE) {
         count = DMEM_SIZE - addr;
     }
-    memset(&sDmem[addr], 0, count);
+    memset(&rspa.dmem[addr], 0, count);
 }
 
 static void op_dmemmove(u32 w0, u32 w1) {
@@ -134,27 +154,27 @@ static void op_dmemmove(u32 w0, u32 w1) {
     if (src + count > DMEM_SIZE || dst + count > DMEM_SIZE) {
         return;
     }
-    memmove(&sDmem[dst], &sDmem[src], count); // may overlap
+    shz_memmove(&rspa.dmem[dst], &rspa.dmem[src], count); // may overlap
 }
 
 static void op_loadbuff(u32 w1) {
-    u32 count = sCount;
+    u32 count = rspa.count;
 
-    if (sIn + count > DMEM_SIZE) {
-        count = DMEM_SIZE - sIn;
+    if (rspa.in + count > DMEM_SIZE) {
+        count = DMEM_SIZE - rspa.in;
     }
     // Raw bytes. ADPCM frames stay a byte stream; RAW16 was swapped in the asset
     // image already. See the header comment.
-    memcpy(&sDmem[sIn], rdram(w1), count);
+    shz_memcpy(&rspa.dmem[rspa.in], rdram(w1), count);
 }
 
 static void op_savebuff(u32 w1) {
-    u32 count = sCount;
+    u32 count = rspa.count;
 
-    if (sOut + count > DMEM_SIZE) {
-        count = DMEM_SIZE - sOut;
+    if (rspa.out + count > DMEM_SIZE) {
+        count = DMEM_SIZE - rspa.out;
     }
-    memcpy(rdram(w1), &sDmem[sOut], count);
+    shz_memcpy(rdram(w1), &rspa.dmem[rspa.out], count);
 }
 
 static void op_loadadpcm(u32 w0, u32 w1) {
@@ -169,87 +189,153 @@ static void op_loadadpcm(u32 w0, u32 w1) {
     if (entries > 512) {
         entries = 512;
     }
-    // Host-native: the codebook was swapped with the rest of ALADPCMBook, and the
-    // POLEF coefficients are computed at runtime.
-    for (i = 0; i < entries; i++) {
-        sTable[i] = src[i];
+
+    shz_memcpy(rspa.table, src, entries * sizeof(rspa.table[0]));
+
+    {
+        u32 fEntries = entries;
+        float *dstF = &rspa.tableF[0][0][0];
+
+        if (fEntries > (sizeof(rspa.tableF) / sizeof(float))) {
+            fEntries = sizeof(rspa.tableF) / sizeof(float);
+        }
+        for (i = 0; i < fEntries; i++) {
+            dstF[i] = (float) rspa.table[i] * (1.0f / 2048.0f);
+        }
     }
 }
 
-// A_MIXER: out += in * gain, saturating. gain is s16 (0x7fff == ~1.0).
+SHZ_NO_UNROLL_LOOPS
 static void op_mix(u32 w0, u32 w1) {
-    s16 gain = (s16) (w0 & 0xFFFF);
     u16 dmemi = (w1 >> 16) & 0xFFFF;
-    u16 dmemo = w1 & 0xFFFF;
     s16 *src = dmem16(dmemi);
-    s16 *dst = dmem16(dmemo);
-    s32 n = sCount >> 1; // bytes -> samples
-    s32 k;
+    SHZ_PREFETCH(src);
 
-    for (k = 0; k < n; k++) {
-        dst[k] = clamp16(dst[k] + (((s32) src[k] * (s32) gain) >> 15));
+    s16 gain = (s16) (w0 & 0xFFFF);
+    u16 dmemo = w1 & 0xFFFF;
+    s16 *dst = dmem16(dmemo);
+    s32 n = rspa.count >> 1; // bytes -> samples
+    float gainF = (float)gain * (1.0f / 32768.0f);
+
+    for (int k = 0; k < n; k += 8) {
+        SHZ_PREFETCH(dst);
+        float m0 = (float)src[0] * gainF;
+        float m1 = (float)src[1] * gainF;
+        float m2 = (float)src[2] * gainF;
+        float m3 = (float)src[3] * gainF;
+        float m4 = (float)src[4] * gainF;
+        float m5 = (float)src[5] * gainF;
+        float m6 = (float)src[6] * gainF;
+        float m7 = (float)src[7] * gainF;
+        src += 8;
+
+        m0 += (float)dst[0];
+        m1 += (float)dst[1];
+        m2 += (float)dst[2];
+        m3 += (float)dst[3];
+        m4 += (float)dst[4];
+        m5 += (float)dst[5];
+        m6 += (float)dst[6];
+        m7 += (float)dst[7];
+
+        SHZ_PREFETCH(src);
+        dst[0] = clamp16f(m0);
+        dst[1] = clamp16f(m1);
+        dst[2] = clamp16f(m2);
+        dst[3] = clamp16f(m3);
+        dst[4] = clamp16f(m4);
+        dst[5] = clamp16f(m5);
+        dst[6] = clamp16f(m6);
+        dst[7] = clamp16f(m7);
+        dst += 8;
     }
 }
 
 // A_INTERLEAVE: weave two mono buffers into stereo at `out`. Writes 2*count bytes
 // (alSavePull sets count to the MONO byte count, then re-sets it to count<<2 before
 // the SAVEBUFF that follows).
+SHZ_NO_UNROLL_LOOPS
 static void op_interleave(u32 w1) {
-    u16 leftAddr = (w1 >> 16) & 0xFFFF;
     u16 rightAddr = w1 & 0xFFFF;
-    const s16 *l = dmem16(leftAddr);
     const s16 *r = dmem16(rightAddr);
-    s16 *dst = dmem16(sOut);
-    s32 n = sCount >> 1; // samples per channel
+    SHZ_PREFETCH(r);
+
+    u16 leftAddr = (w1 >> 16) & 0xFFFF;
+    const s16 *l = dmem16(leftAddr);
+    u32 *dst = (u32 *) dmem16(rspa.out);
+    s32 n = rspa.count >> 1; // samples per channel
     s32 k;
 
-    for (k = 0; k < n; k++) {
-        dst[2 * k + 0] = l[k];
-        dst[2 * k + 1] = r[k];
+    for (k = 0; k < n; k += 8) {
+        SHZ_PREFETCH(l);
+        u32 lr0 = (u32) (u16) r[0] << 16;
+        u32 lr1 = (u32) (u16) r[1] << 16;
+        u32 lr2 = (u32) (u16) r[2] << 16;
+        u32 lr3 = (u32) (u16) r[3] << 16;
+        u32 lr4 = (u32) (u16) r[4] << 16;
+        u32 lr5 = (u32) (u16) r[5] << 16;
+        u32 lr6 = (u32) (u16) r[6] << 16;
+        u32 lr7 = (u32) (u16) r[7] << 16;
+        r += 8;
+
+        SHZ_PREFETCH(dst);
+        lr0 |= (u16) l[0];
+        lr1 |= (u16) l[1];
+        lr2 |= (u16) l[2];
+        lr3 |= (u16) l[3];
+        lr4 |= (u16) l[4];
+        lr5 |= (u16) l[5];
+        lr6 |= (u16) l[6];
+        lr7 |= (u16) l[7];
+        l += 8;
+
+        SHZ_PREFETCH(r);
+        dst[0] = lr0;
+        dst[1] = lr1;
+        dst[2] = lr2;
+        dst[3] = lr3;
+        dst[4] = lr4;
+        dst[5] = lr5;
+        dst[6] = lr6;
+        dst[7] = lr7;
+        dst += 8;
     }
 }
 
-// The RSP audio microcode's resampling filter: 64 phases of a 4-tap FIR. This is
-// the real thing, taken from the ucode (via sm64-port's mixer.c, which decodes the
-// same aspMain ABI we do). It replaces the linear interpolation this used to do —
-// linear is a cheap approximation that costs high-frequency aliasing, audible as
-// warble/grit on pitched notes.
-static const s16 sResampleTable[64][4] = {
-    {0x0c39, 0x66ad, 0x0d46, 0xffdf}, {0x0b39, 0x6696, 0x0e5f, 0xffd8},
-    {0x0a44, 0x6669, 0x0f83, 0xffd0}, {0x095a, 0x6626, 0x10b4, 0xffc8},
-    {0x087d, 0x65cd, 0x11f0, 0xffbf}, {0x07ab, 0x655e, 0x1338, 0xffb6},
-    {0x06e4, 0x64d9, 0x148c, 0xffac}, {0x0628, 0x643f, 0x15eb, 0xffa1},
-    {0x0577, 0x638f, 0x1756, 0xff96}, {0x04d1, 0x62cb, 0x18cb, 0xff8a},
-    {0x0435, 0x61f3, 0x1a4c, 0xff7e}, {0x03a4, 0x6106, 0x1bd7, 0xff71},
-    {0x031c, 0x6007, 0x1d6c, 0xff64}, {0x029f, 0x5ef5, 0x1f0b, 0xff56},
-    {0x022a, 0x5dd0, 0x20b3, 0xff48}, {0x01be, 0x5c9a, 0x2264, 0xff3a},
-    {0x015b, 0x5b53, 0x241e, 0xff2c}, {0x0101, 0x59fc, 0x25e0, 0xff1e},
-    {0x00ae, 0x5896, 0x27a9, 0xff10}, {0x0063, 0x5720, 0x297a, 0xff02},
-    {0x001f, 0x559d, 0x2b50, 0xfef4}, {0xffe2, 0x540d, 0x2d2c, 0xfee8},
-    {0xffac, 0x5270, 0x2f0d, 0xfedb}, {0xff7c, 0x50c7, 0x30f3, 0xfed0},
-    {0xff53, 0x4f14, 0x32dc, 0xfec6}, {0xff2e, 0x4d57, 0x34c8, 0xfebd},
-    {0xff0f, 0x4b91, 0x36b6, 0xfeb6}, {0xfef5, 0x49c2, 0x38a5, 0xfeb0},
-    {0xfedf, 0x47ed, 0x3a95, 0xfeac}, {0xfece, 0x4611, 0x3c85, 0xfeab},
-    {0xfec0, 0x4430, 0x3e74, 0xfeac}, {0xfeb6, 0x424a, 0x4060, 0xfeaf},
-    {0xfeaf, 0x4060, 0x424a, 0xfeb6}, {0xfeac, 0x3e74, 0x4430, 0xfec0},
-    {0xfeab, 0x3c85, 0x4611, 0xfece}, {0xfeac, 0x3a95, 0x47ed, 0xfedf},
-    {0xfeb0, 0x38a5, 0x49c2, 0xfef5}, {0xfeb6, 0x36b6, 0x4b91, 0xff0f},
-    {0xfebd, 0x34c8, 0x4d57, 0xff2e}, {0xfec6, 0x32dc, 0x4f14, 0xff53},
-    {0xfed0, 0x30f3, 0x50c7, 0xff7c}, {0xfedb, 0x2f0d, 0x5270, 0xffac},
-    {0xfee8, 0x2d2c, 0x540d, 0xffe2}, {0xfef4, 0x2b50, 0x559d, 0x001f},
-    {0xff02, 0x297a, 0x5720, 0x0063}, {0xff10, 0x27a9, 0x5896, 0x00ae},
-    {0xff1e, 0x25e0, 0x59fc, 0x0101}, {0xff2c, 0x241e, 0x5b53, 0x015b},
-    {0xff3a, 0x2264, 0x5c9a, 0x01be}, {0xff48, 0x20b3, 0x5dd0, 0x022a},
-    {0xff56, 0x1f0b, 0x5ef5, 0x029f}, {0xff64, 0x1d6c, 0x6007, 0x031c},
-    {0xff71, 0x1bd7, 0x6106, 0x03a4}, {0xff7e, 0x1a4c, 0x61f3, 0x0435},
-    {0xff8a, 0x18cb, 0x62cb, 0x04d1}, {0xff96, 0x1756, 0x638f, 0x0577},
-    {0xffa1, 0x15eb, 0x643f, 0x0628}, {0xffac, 0x148c, 0x64d9, 0x06e4},
-    {0xffb6, 0x1338, 0x655e, 0x07ab}, {0xffbf, 0x11f0, 0x65cd, 0x087d},
-    {0xffc8, 0x10b4, 0x6626, 0x095a}, {0xffd0, 0x0f83, 0x6669, 0x0a44},
-    {0xffd8, 0x0e5f, 0x6696, 0x0b39}, {0xffdf, 0x0d46, 0x66ad, 0x0c39}
+alignas(32) static const float sResampleTable[64][4] = {
+    {3129.0f, 26285.0f, 3398.0f, -33.0f}, {2873.0f, 26262.0f, 3679.0f, -40.0f},
+    {2628.0f, 26217.0f, 3971.0f, -48.0f}, {2394.0f, 26150.0f, 4276.0f, -56.0f},
+    {2173.0f, 26061.0f, 4592.0f, -65.0f}, {1963.0f, 25950.0f, 4920.0f, -74.0f},
+    {1764.0f, 25817.0f, 5260.0f, -84.0f}, {1576.0f, 25663.0f, 5611.0f, -95.0f},
+    {1399.0f, 25487.0f, 5974.0f, -106.0f}, {1233.0f, 25291.0f, 6347.0f, -118.0f},
+    {1077.0f, 25075.0f, 6732.0f, -130.0f}, {932.0f, 24838.0f, 7127.0f, -143.0f},
+    {796.0f, 24583.0f, 7532.0f, -156.0f}, {671.0f, 24309.0f, 7947.0f, -170.0f},
+    {554.0f, 24016.0f, 8371.0f, -184.0f}, {446.0f, 23706.0f, 8804.0f, -198.0f},
+    {347.0f, 23379.0f, 9246.0f, -212.0f}, {257.0f, 23036.0f, 9696.0f, -226.0f},
+    {174.0f, 22678.0f, 10153.0f, -240.0f}, {99.0f, 22304.0f, 10618.0f, -254.0f},
+    {31.0f, 21917.0f, 11088.0f, -268.0f}, {-30.0f, 21517.0f, 11564.0f, -280.0f},
+    {-84.0f, 21104.0f, 12045.0f, -293.0f}, {-132.0f, 20679.0f, 12531.0f, -304.0f},
+    {-173.0f, 20244.0f, 13020.0f, -314.0f}, {-210.0f, 19799.0f, 13512.0f, -323.0f},
+    {-241.0f, 19345.0f, 14006.0f, -330.0f}, {-267.0f, 18882.0f, 14501.0f, -336.0f},
+    {-289.0f, 18413.0f, 14997.0f, -340.0f}, {-306.0f, 17937.0f, 15493.0f, -341.0f},
+    {-320.0f, 17456.0f, 15988.0f, -340.0f}, {-330.0f, 16970.0f, 16480.0f, -337.0f},
+    {-337.0f, 16480.0f, 16970.0f, -330.0f}, {-340.0f, 15988.0f, 17456.0f, -320.0f},
+    {-341.0f, 15493.0f, 17937.0f, -306.0f}, {-340.0f, 14997.0f, 18413.0f, -289.0f},
+    {-336.0f, 14501.0f, 18882.0f, -267.0f}, {-330.0f, 14006.0f, 19345.0f, -241.0f},
+    {-323.0f, 13512.0f, 19799.0f, -210.0f}, {-314.0f, 13020.0f, 20244.0f, -173.0f},
+    {-304.0f, 12531.0f, 20679.0f, -132.0f}, {-293.0f, 12045.0f, 21104.0f, -84.0f},
+    {-280.0f, 11564.0f, 21517.0f, -30.0f}, {-268.0f, 11088.0f, 21917.0f, 31.0f},
+    {-254.0f, 10618.0f, 22304.0f, 99.0f}, {-240.0f, 10153.0f, 22678.0f, 174.0f},
+    {-226.0f, 9696.0f, 23036.0f, 257.0f}, {-212.0f, 9246.0f, 23379.0f, 347.0f},
+    {-198.0f, 8804.0f, 23706.0f, 446.0f}, {-184.0f, 8371.0f, 24016.0f, 554.0f},
+    {-170.0f, 7947.0f, 24309.0f, 671.0f}, {-156.0f, 7532.0f, 24583.0f, 796.0f},
+    {-143.0f, 7127.0f, 24838.0f, 932.0f}, {-130.0f, 6732.0f, 25075.0f, 1077.0f},
+    {-118.0f, 6347.0f, 25291.0f, 1233.0f}, {-106.0f, 5974.0f, 25487.0f, 1399.0f},
+    {-95.0f, 5611.0f, 25663.0f, 1576.0f}, {-84.0f, 5260.0f, 25817.0f, 1764.0f},
+    {-74.0f, 4920.0f, 25950.0f, 1963.0f}, {-65.0f, 4592.0f, 26061.0f, 2173.0f},
+    {-56.0f, 4276.0f, 26150.0f, 2394.0f}, {-48.0f, 3971.0f, 26217.0f, 2628.0f},
+    {-40.0f, 3679.0f, 26262.0f, 2873.0f}, {-33.0f, 3398.0f, 26285.0f, 3129.0f},
 };
-
-
 
 // ---------------------------------------------------------------------------
 // A_RESAMPLE — pitch shift, 4-tap polyphase (ucode-accurate).
@@ -265,41 +351,63 @@ static const s16 sResampleTable[64][4] = {
 //   [4]    the fractional phase
 // ---------------------------------------------------------------------------
 static void op_resample(u32 w0, u32 w1) {
+    const s16 *src = dmem16(rspa.in);
+    SHZ_PREFETCH(src);
+
     u8 flags = (w0 >> 16) & 0xFF;
     u32 pitch = (w0 & 0xFFFF) << 1; // 16.16 step per output sample
     s16 *state = rdram(w1);
-    const s16 *src = dmem16(sIn);
-    s16 *dst = dmem16(sOut);
-    s32 n = sCount >> 1; // output samples wanted
-    u32 accu;
+    s32 n = rspa.count >> 1; // output samples wanted
+    u32 accu, accu_shift;
     s16 hist[4];
     s32 pos = 0; // window start in the virtual stream (hist, then src)
     s32 k;
 
     if (flags & A_INIT) {
-        memset(hist, 0, sizeof(hist));
+        shz_memset2_16(hist, 0);
         accu = 0;
     } else {
-        memcpy(hist, &state[0], sizeof(hist));
+        shz_memcpy2_16(hist, &state[0]);
         accu = (u16) state[4];
     }
 
-    // The virtual input stream is the 4 history samples followed by the DMEM input
-    // buffer, so the filter window is continuous across command lists.
+    s16 *dst = dmem16(rspa.out);
+    SHZ_PREFETCH(dst);
+
 #define RESAMPLE_TAP(i) (((i) < 4) ? hist[i] : src[(i) - 4])
 
-    for (k = 0; k < n; k++) {
-        const s16 *tbl = sResampleTable[accu >> 10]; // 64 phases
-        s32 sample = ((RESAMPLE_TAP(pos + 0) * tbl[0] + 0x4000) >> 15) +
-                     ((RESAMPLE_TAP(pos + 1) * tbl[1] + 0x4000) >> 15) +
-                     ((RESAMPLE_TAP(pos + 2) * tbl[2] + 0x4000) >> 15) +
-                     ((RESAMPLE_TAP(pos + 3) * tbl[3] + 0x4000) >> 15);
-
-        dst[k] = clamp16(sample);
+    for (k = 0; k < n && pos < 4; k++) {
+        const float *tbl = sResampleTable[accu >> 10]; // 64 phases
+       // SHZ_PREFETCH(tbl);
 
         accu += pitch;
         pos += accu >> 16;
         accu &= 0xFFFF;
+
+        float sample = shz_dot8f((float) RESAMPLE_TAP(pos + 0), (float) RESAMPLE_TAP(pos + 1),
+                                  (float) RESAMPLE_TAP(pos + 2), (float) RESAMPLE_TAP(pos + 3),
+                                  tbl[0], tbl[1], tbl[2], tbl[3])
+                        * (1.0f / 32768.0f);
+
+        dst[k] = clamp16f(sample);
+    }
+
+
+    SHZ_PREFETCH(dst);
+
+    for (; k < n; k++) {
+        const s16 *tap = &src[pos - 4];
+        //SHZ_PREFETCH(tap);
+        const float *tbl = sResampleTable[accu >> 10]; // 64 phases
+        accu += pitch;
+        pos += accu >> 16;
+        accu &= 0xFFFF;
+
+        float sample = shz_dot8f((float) tap[0], (float) tap[1], (float) tap[2], (float) tap[3],
+                                  tbl[0], tbl[1], tbl[2], tbl[3])
+                        * (1.0f / 32768.0f);
+
+        dst[k] = clamp16f(sample);
     }
 
     // Carry the window and the phase into the next command list.
@@ -310,6 +418,57 @@ static void op_resample(u32 w0, u32 w1) {
 
 #undef RESAMPLE_TAP
 }
+
+static const float sNybblesF[256][2] __attribute__((aligned(32))) = {
+    { 0.0f, 0.0f },   { 0.0f, 1.0f },   { 0.0f, 2.0f },   { 0.0f, 3.0f },   { 0.0f, 4.0f },   { 0.0f, 5.0f },
+    { 0.0f, 6.0f },   { 0.0f, 7.0f },   { 0.0f, -8.0f },  { 0.0f, -7.0f },  { 0.0f, -6.0f },  { 0.0f, -5.0f },
+    { 0.0f, -4.0f },  { 0.0f, -3.0f },  { 0.0f, -2.0f },  { 0.0f, -1.0f },  { 1.0f, 0.0f },   { 1.0f, 1.0f },
+    { 1.0f, 2.0f },   { 1.0f, 3.0f },   { 1.0f, 4.0f },   { 1.0f, 5.0f },   { 1.0f, 6.0f },   { 1.0f, 7.0f },
+    { 1.0f, -8.0f },  { 1.0f, -7.0f },  { 1.0f, -6.0f },  { 1.0f, -5.0f },  { 1.0f, -4.0f },  { 1.0f, -3.0f },
+    { 1.0f, -2.0f },  { 1.0f, -1.0f },  { 2.0f, 0.0f },   { 2.0f, 1.0f },   { 2.0f, 2.0f },   { 2.0f, 3.0f },
+    { 2.0f, 4.0f },   { 2.0f, 5.0f },   { 2.0f, 6.0f },   { 2.0f, 7.0f },   { 2.0f, -8.0f },  { 2.0f, -7.0f },
+    { 2.0f, -6.0f },  { 2.0f, -5.0f },  { 2.0f, -4.0f },  { 2.0f, -3.0f },  { 2.0f, -2.0f },  { 2.0f, -1.0f },
+    { 3.0f, 0.0f },   { 3.0f, 1.0f },   { 3.0f, 2.0f },   { 3.0f, 3.0f },   { 3.0f, 4.0f },   { 3.0f, 5.0f },
+    { 3.0f, 6.0f },   { 3.0f, 7.0f },   { 3.0f, -8.0f },  { 3.0f, -7.0f },  { 3.0f, -6.0f },  { 3.0f, -5.0f },
+    { 3.0f, -4.0f },  { 3.0f, -3.0f },  { 3.0f, -2.0f },  { 3.0f, -1.0f },  { 4.0f, 0.0f },   { 4.0f, 1.0f },
+    { 4.0f, 2.0f },   { 4.0f, 3.0f },   { 4.0f, 4.0f },   { 4.0f, 5.0f },   { 4.0f, 6.0f },   { 4.0f, 7.0f },
+    { 4.0f, -8.0f },  { 4.0f, -7.0f },  { 4.0f, -6.0f },  { 4.0f, -5.0f },  { 4.0f, -4.0f },  { 4.0f, -3.0f },
+    { 4.0f, -2.0f },  { 4.0f, -1.0f },  { 5.0f, 0.0f },   { 5.0f, 1.0f },   { 5.0f, 2.0f },   { 5.0f, 3.0f },
+    { 5.0f, 4.0f },   { 5.0f, 5.0f },   { 5.0f, 6.0f },   { 5.0f, 7.0f },   { 5.0f, -8.0f },  { 5.0f, -7.0f },
+    { 5.0f, -6.0f },  { 5.0f, -5.0f },  { 5.0f, -4.0f },  { 5.0f, -3.0f },  { 5.0f, -2.0f },  { 5.0f, -1.0f },
+    { 6.0f, 0.0f },   { 6.0f, 1.0f },   { 6.0f, 2.0f },   { 6.0f, 3.0f },   { 6.0f, 4.0f },   { 6.0f, 5.0f },
+    { 6.0f, 6.0f },   { 6.0f, 7.0f },   { 6.0f, -8.0f },  { 6.0f, -7.0f },  { 6.0f, -6.0f },  { 6.0f, -5.0f },
+    { 6.0f, -4.0f },  { 6.0f, -3.0f },  { 6.0f, -2.0f },  { 6.0f, -1.0f },  { 7.0f, 0.0f },   { 7.0f, 1.0f },
+    { 7.0f, 2.0f },   { 7.0f, 3.0f },   { 7.0f, 4.0f },   { 7.0f, 5.0f },   { 7.0f, 6.0f },   { 7.0f, 7.0f },
+    { 7.0f, -8.0f },  { 7.0f, -7.0f },  { 7.0f, -6.0f },  { 7.0f, -5.0f },  { 7.0f, -4.0f },  { 7.0f, -3.0f },
+    { 7.0f, -2.0f },  { 7.0f, -1.0f },  { -8.0f, 0.0f },  { -8.0f, 1.0f },  { -8.0f, 2.0f },  { -8.0f, 3.0f },
+    { -8.0f, 4.0f },  { -8.0f, 5.0f },  { -8.0f, 6.0f },  { -8.0f, 7.0f },  { -8.0f, -8.0f }, { -8.0f, -7.0f },
+    { -8.0f, -6.0f }, { -8.0f, -5.0f }, { -8.0f, -4.0f }, { -8.0f, -3.0f }, { -8.0f, -2.0f }, { -8.0f, -1.0f },
+    { -7.0f, 0.0f },  { -7.0f, 1.0f },  { -7.0f, 2.0f },  { -7.0f, 3.0f },  { -7.0f, 4.0f },  { -7.0f, 5.0f },
+    { -7.0f, 6.0f },  { -7.0f, 7.0f },  { -7.0f, -8.0f }, { -7.0f, -7.0f }, { -7.0f, -6.0f }, { -7.0f, -5.0f },
+    { -7.0f, -4.0f }, { -7.0f, -3.0f }, { -7.0f, -2.0f }, { -7.0f, -1.0f }, { -6.0f, 0.0f },  { -6.0f, 1.0f },
+    { -6.0f, 2.0f },  { -6.0f, 3.0f },  { -6.0f, 4.0f },  { -6.0f, 5.0f },  { -6.0f, 6.0f },  { -6.0f, 7.0f },
+    { -6.0f, -8.0f }, { -6.0f, -7.0f }, { -6.0f, -6.0f }, { -6.0f, -5.0f }, { -6.0f, -4.0f }, { -6.0f, -3.0f },
+    { -6.0f, -2.0f }, { -6.0f, -1.0f }, { -5.0f, 0.0f },  { -5.0f, 1.0f },  { -5.0f, 2.0f },  { -5.0f, 3.0f },
+    { -5.0f, 4.0f },  { -5.0f, 5.0f },  { -5.0f, 6.0f },  { -5.0f, 7.0f },  { -5.0f, -8.0f }, { -5.0f, -7.0f },
+    { -5.0f, -6.0f }, { -5.0f, -5.0f }, { -5.0f, -4.0f }, { -5.0f, -3.0f }, { -5.0f, -2.0f }, { -5.0f, -1.0f },
+    { -4.0f, 0.0f },  { -4.0f, 1.0f },  { -4.0f, 2.0f },  { -4.0f, 3.0f },  { -4.0f, 4.0f },  { -4.0f, 5.0f },
+    { -4.0f, 6.0f },  { -4.0f, 7.0f },  { -4.0f, -8.0f }, { -4.0f, -7.0f }, { -4.0f, -6.0f }, { -4.0f, -5.0f },
+    { -4.0f, -4.0f }, { -4.0f, -3.0f }, { -4.0f, -2.0f }, { -4.0f, -1.0f }, { -3.0f, 0.0f },  { -3.0f, 1.0f },
+    { -3.0f, 2.0f },  { -3.0f, 3.0f },  { -3.0f, 4.0f },  { -3.0f, 5.0f },  { -3.0f, 6.0f },  { -3.0f, 7.0f },
+    { -3.0f, -8.0f }, { -3.0f, -7.0f }, { -3.0f, -6.0f }, { -3.0f, -5.0f }, { -3.0f, -4.0f }, { -3.0f, -3.0f },
+    { -3.0f, -2.0f }, { -3.0f, -1.0f }, { -2.0f, 0.0f },  { -2.0f, 1.0f },  { -2.0f, 2.0f },  { -2.0f, 3.0f },
+    { -2.0f, 4.0f },  { -2.0f, 5.0f },  { -2.0f, 6.0f },  { -2.0f, 7.0f },  { -2.0f, -8.0f }, { -2.0f, -7.0f },
+    { -2.0f, -6.0f }, { -2.0f, -5.0f }, { -2.0f, -4.0f }, { -2.0f, -3.0f }, { -2.0f, -2.0f }, { -2.0f, -1.0f },
+    { -1.0f, 0.0f },  { -1.0f, 1.0f },  { -1.0f, 2.0f },  { -1.0f, 3.0f },  { -1.0f, 4.0f },  { -1.0f, 5.0f },
+    { -1.0f, 6.0f },  { -1.0f, 7.0f },  { -1.0f, -8.0f }, { -1.0f, -7.0f }, { -1.0f, -6.0f }, { -1.0f, -5.0f },
+    { -1.0f, -4.0f }, { -1.0f, -3.0f }, { -1.0f, -2.0f }, { -1.0f, -1.0f }
+};
+
+static const float sShiftF[16] __attribute__((aligned(32))) = {
+    1.0f,    2.0f,    4.0f,     8.0f,    16.0f,   32.0f,   64.0f,   128.0f,
+    256.0f,  512.0f,  1024.0f,  2048.0f, 4096.0f, 8192.0f, 16384.0f, 32768.0f
+};
 
 // ---------------------------------------------------------------------------
 // A_ADPCM — Nintendo 4-bit ADPCM, 16 samples per 9-byte frame.
@@ -323,91 +482,225 @@ static void op_resample(u32 w0, u32 w1) {
 // fixed format and not ours to choose.
 // ---------------------------------------------------------------------------
 static void op_adpcm(u32 w0, u32 w1) {
+    s16 *dst = dmem16(rspa.out);
+    SHZ_PREFETCH(dst);
+
     u8 flags = (w0 >> 16) & 0xFF;
     s16 *state = rdram(w1);
-    const u8 *src = &sDmem[sIn];
-    s16 *dst = dmem16(sOut);
-    s32 outSamples = sCount >> 1;
-    s16 hist[16];
-    s32 produced = 0;
 
-    if (flags & A_INIT) {
-        memset(hist, 0, sizeof(hist));
-    } else if (flags & A_LOOP) {
-        memcpy(hist, rdram(sLoopAddr), sizeof(hist)); // loop-point context, from the bank
-    } else {
-        memcpy(hist, state, sizeof(hist));
-    }
+    if (flags & A_INIT)
+        shz_memset2_16(dst, 0);
+    else if (flags & A_LOOP)
+        shz_memcpy2_16(dst, rdram(rspa.loopAddr)); // loop-point context, from the bank
+    else
+        shz_memcpy2_16(dst, state);
 
-    // ABI contract (see alAdpcmPull): the OUTPUT buffer starts with the 16
-    // history samples, and decoded frames follow them. The SDK's delivered
-    // pointer is `outp + lastsam*2` (mid-frame: the leftover samples are
-    // re-delivered out of this block) or `outp + 32` (frame-aligned) — it is
-    // NEVER just `outp`. Omitting this block shears every voice's output by
-    // 16..32 bytes every frame, which is audible as constant broadband hash.
-    memcpy(dst, hist, sizeof(hist));
+    const u8 *src = &rspa.dmem[rspa.in];
+    SHZ_PREFETCH(src);
+
+    s32 outSamples = rspa.count >> 1;
     dst += 16;
 
-    // The two most recently decoded samples carry the prediction across frames (and
-    // across command lists, via `state`).
     {
-        s32 l1 = hist[15];
-        s32 l2 = hist[14];
+        float l1 = (float)dst[-1];
+        float l2 = (float)dst[-2];
 
-        while (produced < outSamples) {
-            u8 header = *src++;
-            s32 scale = header >> 4;
-            s32 predIdx = header & 0xF;
-            // order 2 => 16 coefficients per predictor: book1[8] then book2[8].
-            const s16 *book1 = &sTable[predIdx * 16];
-            const s16 *book2 = &sTable[predIdx * 16 + 8];
-            s32 residual[16];
-            s16 frame[16];
-            s32 i, j, k, half;
+#pragma GCC unroll 1
+        while(outSamples > 0) {
+            const u8 header = *src++;
+            const s32 scale = header >> 4;
+            const s32 predIdx = header & 0xF;
+            const float shift = sShiftF[scale];
+            float residual[16];
 
-            // 16 packed 4-bit residuals, sign-extended and scaled by 2^scale.
-            for (i = 0; i < 16; i++) {
-                u8 byte = src[i >> 1];
-                s32 nibble = (i & 1) ? (byte & 0xF) : (byte >> 4);
+            SHZ_PREFETCH(sNybblesF[*src]);
 
-                if (nibble > 7) {
-                    nibble -= 16;
-                }
-                residual[i] = nibble << scale;
+            // order 2 => 8 taps per predictor per book.
+            const float *book1 = rspa.tableF[predIdx][0];
+            const float *book2 = rspa.tableF[predIdx][1];
+
+#pragma GCC unroll 1
+            for(int i = 0; i < 3; i++) {
+                const u8 byte0 = src[i];
+                const u8 byte1 = src[4 + i];
+
+                SHZ_PREFETCH(sNybblesF[byte1]);
+                residual[i * 2 + 0] = sNybblesF[byte0][0] * shift;
+                residual[i * 2 + 1] = sNybblesF[byte0][1] * shift;
+
+                SHZ_PREFETCH(sNybblesF[src[i + 1]]);
+                residual[8 + i * 2 + 0] = sNybblesF[byte1][0] * shift;
+                residual[8 + i * 2 + 1] = sNybblesF[byte1][1] * shift;
+            }
+            {
+                const u8 byte0 = src[3];
+                const u8 byte1 = src[4 + 3];
+
+                SHZ_PREFETCH(sNybblesF[byte1]);
+                residual[3 * 2 + 0] = sNybblesF[byte0][0] * shift;
+                residual[3 * 2 + 1] = sNybblesF[byte0][1] * shift;
+
+                SHZ_PREFETCH(book1);
+                residual[8 + 3 * 2 + 0] = sNybblesF[byte1][0] * shift;
+                residual[8 + 3 * 2 + 1] = sNybblesF[byte1][1] * shift;
             }
             src += 8;
 
-            // VADPCM proper: each 8-sample half is an order-2 prediction from the
-            // previous two OUTPUT samples, convolved with the codebook, plus the
-            // contribution of the residuals already decoded within this half. It is
-            // not a 2-tap IIR — the codebook rows are 8 taps deep.
-            for (half = 0; half < 2; half++) {
-                for (j = 0; j < 8; j++) {
-                    s32 acc = (s32) book1[j] * l2 + (s32) book2[j] * l1;
+            shz_xmtrx_load_cols_4x4((const SHZ_ALIASING shz_vec4_t*)book1,
+                                    (const SHZ_ALIASING shz_vec4_t*)book2,
+                                    (const SHZ_ALIASING shz_vec4_t*)&book1[4],
+                                    (const SHZ_ALIASING shz_vec4_t*)&book2[4]);
 
-                    for (k = 0; k < j; k++) {
-                        acc += (s32) book2[j - k - 1] * residual[half * 8 + k];
-                    }
-                    acc = (acc >> 11) + residual[half * 8 + j];
-                    frame[half * 8 + j] = clamp16(acc);
+#pragma GCC unroll 1
+            for(int half = 0; half < 2; half++) {
+                shz_vec4_t acc[2];
+                SHZ_ALIASING float *accf = (SHZ_ALIASING float *)acc;
+                const float *res = &residual[half * 8];
+
+                acc [0]  = shz_xmtrx_transform_vec4(shz_vec4_init(l2, l1, 0.0f, 0.0f));
+                accf[0] += res[0];
+                accf[1] += res[1];
+                accf[2] += res[2];
+                accf[3] += res[3];
+
+                acc [1]  = shz_xmtrx_transform_vec4(shz_vec4_init(0.0f, 0.0f, l2, l1));
+                accf[4] += res[4];
+                accf[5] += res[5];
+                accf[6] += res[6];
+                accf[7] += res[7];
+
+                {
+                    register float fr0 asm("fr0") = 1.0f;
+                    register float fr1 asm("fr1") = res[0];
+                    register float fr2 asm("fr2") = res[1];
+                    register float fr3 asm("fr3") = res[2];
+
+                    register float fr4 asm("fr4") = accf[2];
+                    register float fr5 asm("fr5") = book2[1];
+                    register float fr6 asm("fr6") = book2[0];
+                    register float fr7 asm("fr7") = 0.0f;
+
+                    register float fr8  asm("fr8");
+                    register float fr9  asm("fr9");
+                    register float fr10 asm("fr10");
+                    register float fr11 asm("fr11");
+
+                    fr8  = accf[7];
+                    fr9  = book2[6];
+                    fr10 = book2[5];
+                    fr11 = book2[4];
+
+                    asm volatile("fipr fv0, fv4"
+                        : "+f" (fr7)
+                        : "f" (fr0), "f" (fr1), "f" (fr2), "f" (fr3),
+                          "f" (fr4), "f" (fr5), "f" (fr6));
+
+                    fr4 = accf[3];
+                    fr5 = book2[2];
+                    fr6 = book2[1];
+
+                    asm volatile("fipr fv0, fv8"
+                        : "+f" (fr11)
+                        : "f" (fr0), "f" (fr1), "f" (fr2), "f" (fr3),
+                          "f" (fr8), "f" (fr9), "f" (fr10));
+
+                    accf[2] = fr7;
+                    fr7 = book2[0];
+                    fr8 = accf[4];
+                    fr9 = book2[3];
+                    fr10 = book2[2];
+
+                    asm volatile("fipr fv0, fv4\n"
+                        : "+f" (fr7)
+                        : "f" (fr0), "f" (fr1), "f" (fr2), "f" (fr3),
+                          "f" (fr4), "f" (fr5), "f" (fr6));
+
+                    accf[7] = fr11;
+                    fr11 = book2[1];
+                    fr4 = accf[5];
+                    fr5 = book2[4];
+                    fr6 = book2[3];
+
+                    asm volatile("fipr fv0, fv8"
+                        : "+f" (fr11)
+                        : "f" (fr0), "f" (fr1), "f" (fr2), "f" (fr3),
+                          "f" (fr8), "f" (fr9), "f" (fr10));
+
+                    accf[3] = fr7;
+                    fr7 = book2[2];
+                    fr8 = accf[6];
+                    fr9 = book2[5];
+                    fr10 = book2[4];
+
+                    asm volatile("fipr fv0, fv4\n"
+                        : "+f" (fr7)
+                        : "f" (fr0), "f" (fr1), "f" (fr2), "f" (fr3),
+                          "f" (fr4), "f" (fr5), "f" (fr6));
+
+                    accf[4] = fr11;
+                    fr11 = book2[3];
+                    fr4 = res[3];
+                    fr5 = res[4];
+                    fr6 = res[5];
+
+                    asm volatile("fipr fv0, fv8"
+                        : "+f" (fr11)
+                        : "f" (fr0), "f" (fr1), "f" (fr2), "f" (fr3),
+                          "f" (fr8), "f" (fr9), "f" (fr10));
+
+                    accf[5] = fr7;
+                    fr7 = res[6];
+                    fr8 = book2[3];
+                    fr9 = book2[2];
+                    fr10 = book2[1];
+                    accf[6] = fr11;
+                    fr11 = book2[0];
+                    fr0 = book2[2];
+
+                    asm volatile("fipr fv4, fv8"
+                        : "+f" (fr11)
+                        : "f" (fr4), "f" (fr5), "f" (fr6), "f" (fr7),
+                          "f" (fr8), "f" (fr9), "f" (fr10));
+
+                    fr1 = book2[1];
+                    fr2 = book2[0];
+                    fr3 = 0.0f;
+
+                    asm volatile("fipr fv4, fv0"
+                        : "+f" (fr3)
+                        : "f" (fr4), "f" (fr5), "f" (fr6), "f" (fr7),
+                          "f" (fr0), "f" (fr1), "f" (fr2));
+
+                    accf[7] += fr11;
+                    accf[6] += fr3;
                 }
-                l2 = frame[half * 8 + 6];
-                l1 = frame[half * 8 + 7];
+
+                SHZ_PREFETCH(dst);
+
+                accf[1] += book2[0] * res[0];
+                accf[5] += (book2[1] * res[3]) + (book2[0] * res[4]);
+                accf[4] += (book2[0] * res[3]);
+
+                *dst++ = clamp16f(accf[0]);
+                *dst++ = clamp16f(accf[1]);
+                *dst++ = clamp16f(accf[2]);
+                *dst++ = clamp16f(accf[3]);
+                *dst++ = clamp16f(accf[4]);
+                *dst++ = clamp16f(accf[5]);
+
+                SHZ_PREFETCH(src);
+
+                l2 = (float)clamp16f(accf[6]);
+                *dst++ = l2;
+                l1 = (float)clamp16f(accf[7]);
+                *dst++ = l1;
             }
 
-            // Whole frames, always — the emitter places buffers on 32-byte frame
-            // boundaries ((nframes+1)<<5 in alAdpcmPull) and consumes partial
-            // frames via the history block above, so writing past outSamples up
-            // to the frame edge is expected, not an overrun.
-            for (i = 0; i < 16; i++) {
-                dst[produced + i] = frame[i];
-            }
-            produced += 16;
-            memcpy(hist, frame, sizeof(hist));
+            outSamples -= 16;
         }
     }
 
-    memcpy(state, hist, sizeof(hist)); // carry into the next command list
+    shz_memcpy2_16(state, dst - 16); // carry into the next command list
 }
 
 // ---------------------------------------------------------------------------
@@ -427,28 +720,42 @@ static void op_adpcm(u32 w0, u32 w1) {
 //   [6..7] rate L (16.16)      [8..9] rate R
 //   [10]   dry                 [11]   wet
 // ---------------------------------------------------------------------------
+static void ramp_update(s32 *volAccu, const s32 *target, const s32 *rate) {
+    s32 i;
+
+    for (i = 0; i < 2; i++) {
+        if (rate[i] == 0) {
+            continue; // steady volume: hold it, don't snap to the target
+        }
+        volAccu[i] += rate[i] >> 3;
+        if (rate[i] > 0 ? (volAccu[i] >> 16) > target[i] : (volAccu[i] >> 16) < target[i]) {
+            volAccu[i] = target[i] << 16;
+        }
+    }
+}
+
 static void op_envmixer(u32 w0, u32 w1) {
     u8 flags = (w0 >> 16) & 0xFF;
     s16 *state = rdram(w1);
-    const s16 *src = dmem16(sIn);
-    s16 *dryL = dmem16(sOut);
-    s16 *dryR = dmem16(sDryRight);
-    s16 *wetL = dmem16(sWetLeft);
-    s16 *wetR = dmem16(sWetRight);
-    s32 n = sCount >> 1;
+    const s16 *src = dmem16(rspa.in);
+    s16 *dryL = dmem16(rspa.out);
+    s16 *dryR = dmem16(rspa.dryRight);
+    s16 *wetL = dmem16(rspa.wetLeft);
+    s16 *wetR = dmem16(rspa.wetRight);
+    s32 n = rspa.count >> 1;
     s32 volAccu[2];
     s32 target[2], rate[2], dry, wet;
     s32 k;
 
     if (flags & A_INIT) {
-        volAccu[0] = (s32) sVol[0] << 16;
-        volAccu[1] = (s32) sVol[1] << 16;
-        target[0] = sTarget[0];
-        target[1] = sTarget[1];
-        rate[0] = sRate[0];
-        rate[1] = sRate[1];
-        dry = sDry;
-        wet = sWet;
+        volAccu[0] = (s32) rspa.vol[0] << 16;
+        volAccu[1] = (s32) rspa.vol[1] << 16;
+        target[0] = rspa.target[0];
+        target[1] = rspa.target[1];
+        rate[0] = rspa.rate[0];
+        rate[1] = rspa.rate[1];
+        dry = rspa.dry;
+        wet = rspa.wet;
     } else {
         volAccu[0] = ((s32) (u16) state[0] << 16) | (u16) state[1];
         volAccu[1] = ((s32) (u16) state[2] << 16) | (u16) state[3];
@@ -460,43 +767,33 @@ static void op_envmixer(u32 w0, u32 w1) {
         wet = state[11];
     }
 
-    for (k = 0; k < n; k++) {
-        s32 s = src[k];
-        s32 vl = volAccu[0] >> 16;
-        s32 vr = volAccu[1] >> 16;
-        s32 l = (s * vl) >> 15;
-        s32 r = (s * vr) >> 15;
+    if (flags & A_AUX) {
+        for (k = 0; k < n; k++) {
+            s32 s = src[k];
+            s32 vl = volAccu[0] >> 16;
+            s32 vr = volAccu[1] >> 16;
+            s32 l = (s * vl) >> 15;
+            s32 r = (s * vr) >> 15;
 
-        dryL[k] = clamp16(dryL[k] + ((l * dry) >> 15));
-        dryR[k] = clamp16(dryR[k] + ((r * dry) >> 15));
-        if (flags & A_AUX) {
+            dryL[k] = clamp16(dryL[k] + ((l * dry) >> 15));
+            dryR[k] = clamp16(dryR[k] + ((r * dry) >> 15));
             wetL[k] = clamp16(wetL[k] + ((l * wet) >> 15));
             wetR[k] = clamp16(wetR[k] + ((r * wet) >> 15));
+
+            ramp_update(volAccu, target, rate);
         }
+    } else {
+        for (k = 0; k < n; k++) {
+            s32 s = src[k];
+            s32 vl = volAccu[0] >> 16;
+            s32 vr = volAccu[1] >> 16;
+            s32 l = (s * vl) >> 15;
+            s32 r = (s * vr) >> 15;
 
-        // Ramp toward the target, PER SAMPLE, at rate/8.
-        //
-        // The rate is a signed 16.16 step per 8-SAMPLE GROUP (see _getRate() in
-        // env.c: (tgt - vol) / count, times 8; _getVol() mirrors it as
-        // `ivol += r * samples / 8`). Two wrong ways to apply it, both audible:
-        // stepping the full rate every sample ramps 8x too fast (notes cut out
-        // early), and stepping it once per group turns every fast attack/release
-        // into a 2.75kHz staircase — a click every 8 samples, which en masse
-        // sounds like static. The ucode interpolates inside the group (sm64-port's
-        // envmixer computes all 8 per-sample volumes); rate>>3 per sample is the
-        // same slope, smooth, and clamped at the target either way.
-        {
-            s32 i;
+            dryL[k] = clamp16(dryL[k] + ((l * dry) >> 15));
+            dryR[k] = clamp16(dryR[k] + ((r * dry) >> 15));
 
-            for (i = 0; i < 2; i++) {
-                if (rate[i] == 0) {
-                    continue; // steady volume: hold it, don't snap to the target
-                }
-                volAccu[i] += rate[i] >> 3;
-                if (rate[i] > 0 ? (volAccu[i] >> 16) > target[i] : (volAccu[i] >> 16) < target[i]) {
-                    volAccu[i] = target[i] << 16;
-                }
-            }
+            ramp_update(volAccu, target, rate);
         }
     }
 
@@ -527,10 +824,10 @@ static void op_polef(u32 w0, u32 w1) {
     u8 flags = (w0 >> 16) & 0xFF;
     s16 gain = (s16) (w0 & 0xFFFF);
     s16 *state = rdram(w1);
-    s16 *src = dmem16(sIn);
-    s16 *dst = dmem16(sOut);
-    s32 fc = sTable[8];
-    s32 n = sCount >> 1;
+    s16 *src = dmem16(rspa.in);
+    s16 *dst = dmem16(rspa.out);
+    s32 fc = rspa.table[8];
+    s32 n = rspa.count >> 1;
     s32 y1;
     s32 k;
 
@@ -591,7 +888,7 @@ void pc_audio_hle_run(void *cmdList, s32 cmdLen, void *outBuf, s32 frameSamples)
                 op_loadadpcm(w0, w1);
                 break;
             case A_SETLOOP:
-                sLoopAddr = w1;
+                rspa.loopAddr = w1;
                 break;
             case A_ADPCM:
                 op_adpcm(w0, w1);
