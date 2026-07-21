@@ -104,7 +104,15 @@ f32 gCameraRelPosStackZ[CAMERA_MODEL_STACK_SIZE];
 u16 perspNorm;
 MtxF *gModelMatrixF[CAMERA_MODEL_STACK_SIZE + 1];
 Mtx *gModelMatrix[CAMERA_MODEL_STACK_SIZE + 1];
+// Backing store for gModelMatrixF[] (each entry is (MtxF*)&D_80120DA0[i<<4]).
+// Under the float matrix ABI it must be >=8-aligned or those MtxF pointers are
+// 4-aligned and the SH4 fmov.d matrix copy faults on them. N64/fixed builds keep
+// the bare array (matching).
+#ifdef GBI_FLOAT_MTX
+f32 D_80120DA0[CAMERA_MODEL_STACK_SIZE * 16] __attribute__((aligned(8)));
+#else
 f32 D_80120DA0[CAMERA_MODEL_STACK_SIZE * 16];
+#endif
 MtxF gPerspectiveMatrixF;
 MtxF gViewProjMatrixF;
 MtxF gViewMatrixF;

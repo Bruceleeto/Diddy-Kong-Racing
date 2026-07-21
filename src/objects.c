@@ -2380,6 +2380,13 @@ Object *spawn_object(LevelObjectEntryCommon *entry, s32 spawnFlags) {
         address += init_object_interaction_data(curObj, (ObjectInteraction *) address);
     }
     if (behaviourFlags & OBJECT_BEHAVIOUR_COLLIDABLE) {
+#ifdef GBI_FLOAT_MTX
+        // ObjectCollision embeds MtxF matrices[4] at offset 0; under the float
+        // matrix ABI those are copied with SH4 paired fmov.d (8-byte), so the
+        // struct must start 8-aligned. The raw arena address isn't guaranteed
+        // aligned. N64/fixed builds keep the original layout (matching).
+        address = align8(address);
+#endif
         address += obj_init_collision(curObj, (ObjectCollision *) address);
     }
     if (curObj->header->attachPointCount > 0 && curObj->header->attachPointCount < 10) {

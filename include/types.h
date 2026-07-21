@@ -3,7 +3,11 @@
 
 #include <PR/ultratypes.h>
 
+#ifdef GBI_FLOAT_MTX
+typedef float MtxF[4][4] __attribute__((aligned(8)));
+#else
 typedef float MtxF[4][4];
+#endif
 typedef s32 MtxS[4][4];
 typedef s16 VertexList;
 typedef u8 TriangleList;

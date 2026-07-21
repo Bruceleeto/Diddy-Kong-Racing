@@ -997,10 +997,20 @@ typedef struct {
  */
 typedef long	Mtx_t[4][4];
 
+#ifdef GBI_FLOAT_MTX
+// Float matrix ABI: the 64 bytes hold 16 raw floats (see mtxf_to_mtx). 32-byte
+// aligned so shz_memcpy / shz_xmtrx hit the SH4 aligned fast path. Mtx is only
+// ever used standalone here, so the over-alignment changes no struct layout.
+typedef union __attribute__((aligned(32))) {
+    Mtx_t		m;
+    long long int	force_structure_alignment;
+} Mtx;
+#else
 typedef union {
     Mtx_t		m;
     long long int	force_structure_alignment;
 } Mtx;
+#endif
 
 /*
  * Viewport

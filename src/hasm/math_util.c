@@ -9,6 +9,9 @@
 #include "structs.h"
 #include "types.h"
 #include <math.h>
+#ifdef TARGET_DC
+#include <sh4zam/shz_sh4zam.h>
+#endif
 
 u8 gIntDisFlag;
 s32 gCurrentRNGSeed = 0x5141564D; // Official Name: rngSeed ('QAVM')
@@ -294,6 +297,18 @@ void mtxf_mul(MtxF *mat1, MtxF *mat2, MtxF *output) {
  * Official name: mathMtxF2L
  */
 void mtxf_to_mtx(MtxF *mf, Mtx *m) {
+#ifdef GBI_FLOAT_MTX
+    // Float matrix ABI (DC): the gfx backend reads these straight back as float
+    // (mtx_to_float), so skip the s15.16 pack entirely and store the 16 floats
+    // raw — same 64 bytes, no FTOFIX32, no *0x10000, no bit-shuffle, no precision
+    // loss. Every non-float build keeps the fixed pack below so the N64 ROM stays
+    // a bit-exact oracle.
+#ifdef TARGET_DC
+    shz_mat4x4_copy((shz_mat4x4_t *) m, (const shz_mat4x4_t *) mf); // paired fmov.d
+#else
+    __builtin_memcpy(m, mf, sizeof(*mf));
+#endif
+#else
     s32 i, j;
     s32 e1, e2;
     s32 *ai, *af;
@@ -309,6 +324,7 @@ void mtxf_to_mtx(MtxF *mf, Mtx *m) {
             *af++ = ((e1 << 16) & 0xFFFF0000) | (e2 & 0xFFFF);
         }
     }
+#endif
 }
 
 /* Official Name: mathSeed */

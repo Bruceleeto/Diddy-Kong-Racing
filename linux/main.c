@@ -282,6 +282,11 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
  * saturation the console does and the N64 ROM stays a usable oracle.
  */
 static void mtx_to_float(const Mtx *m, f32 out[4][4]) {
+#ifdef GBI_FLOAT_MTX
+    // Float matrix ABI: mtxf_to_mtx()/guMtxF2L() stored the 16 floats raw, so
+    // read them back as-is. No fixed unpack, no /65536, no bit-shuffle.
+    __builtin_memcpy(out, m, 16 * sizeof(f32));
+#else
     const s32 *ints = (const s32 *) &m->m[0][0];
     const s32 *fracs = ints + 8;
     s32 i, j;
@@ -299,6 +304,7 @@ static void mtx_to_float(const Mtx *m, f32 out[4][4]) {
             out[i][j] = (f32) fixed / 65536.0f;
         }
     }
+#endif
 }
 
 /**
