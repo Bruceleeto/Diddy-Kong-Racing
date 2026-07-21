@@ -75,7 +75,7 @@ SRC_FILES := \
 	src/audiomgr.c \
 	src/audiosfx.c \
 	src/audio_spatial.c \
-	src/audio_vehicle.c \
+	dreamcast/audio_vehicle_dc.c \
 	src/borders.c \
 	src/camera.c \
 	src/fade_transition.c \
