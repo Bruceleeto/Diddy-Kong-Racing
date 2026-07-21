@@ -295,6 +295,9 @@ void obj_disable_emitter(Object *obj, s32 emitterIndex);
 void emitter_cleanup(ParticleEmitter *emitter);
 void delete_point_particle_from_sequence(PointParticle *particle);
 void init_particle_assets(void);
+#ifdef TARGET_PC
+void pc_swap_colour_loop_shared(void *cl);
+#endif
 void update_particle_texture_frame(Particle *particle);
 void setup_particle_position(Particle *particle, Object *obj, ParticleEmitter *emitter, ParticleBehaviour *behaviour);
 void particle_deallocate(Particle *particle);

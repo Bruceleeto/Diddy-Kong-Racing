@@ -13,6 +13,7 @@
 #include "memory.h"
 #include "menu.h"
 #include "objects.h"
+#include "particles.h"
 #include "racer.h"
 #include "rcp_dkr.h"
 #include "save_data.h"
@@ -517,6 +518,13 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         if ((s32) gCurrentLevelHeader->unk74[var_s0] != -1) {
             gCurrentLevelHeader->unk74[var_s0] =
                 (LevelHeader_70 *) get_misc_asset((s32) gCurrentLevelHeader->unk74[var_s0]);
+#ifdef TARGET_PC
+            // The colour loop is a big-endian misc asset. Only the subset shared
+            // with a particle behaviour is swapped in init_particle_assets; swap
+            // the rest here (shared swap-once table, so no double-swap) or
+            // func_8007F1E8's count below reads big-endian and walks off the pool.
+            pc_swap_colour_loop_shared(gCurrentLevelHeader->unk74[var_s0]);
+#endif
             func_8007F1E8((LevelHeader_70 *) gCurrentLevelHeader->unk74[var_s0]);
         }
     }
