@@ -109,6 +109,11 @@ typedef struct {
 
 static u32 sGfxFrameCount = 0;
 
+// Overhead counters for the per-batch cost hunt (printed by blast_stats_tick).
+static u32 sTexScanSteps = 0; // texture_current cache-scan iterations
+static u32 sTexDecodes = 0;   // full texture decode+uploads (cache misses)
+static u32 sCcMisses = 0;     // combiner_classify memo misses (full reclassify)
+
 
 #ifdef GFX_PROBE_HOTSRC
 static Vertex sProbeVerts[64];
@@ -243,6 +248,18 @@ typedef struct {
 
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
 static s32 sTexCacheCount = 0;
+
+// Hash hint over the cache: hash(timg, tlut) -> sTexCache index + 1 (0 = no
+// hint). Purely an accelerator: every hint is verified against the full key
+// before use, and a wrong one (hash collision, entry moved by eviction or
+// invalidation) just means one linear scan that re-teaches the slot. So the
+// eviction paths never need to maintain it.
+#define GFX_TEX_HINTS 1024
+static u16 sTexHint[GFX_TEX_HINTS];
+
+static u32 tex_hint_slot(u32 timg, u32 tlut) {
+    return ((timg >> 5) ^ (timg >> 15) ^ (tlut >> 5)) & (GFX_TEX_HINTS - 1);
+}
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
@@ -533,13 +550,31 @@ static u32 texture_current(void) {
         }
     }
 
-    for (i = 0; i < sTexCacheCount; i++) {
-        GfxTexture *t = &sTexCache[i];
-        if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
-            t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
-            t->swapped == (u8) sTexSwapped) {
-            t->lastUsed = sGfxFrameCount;
-            return t->handle;
+    {
+        u32 slot = tex_hint_slot(sTexAddr, (u32) tlut);
+        s32 hi = (s32) sTexHint[slot] - 1;
+
+        if (hi >= 0 && hi < sTexCacheCount) {
+            GfxTexture *t = &sTexCache[hi];
+
+            if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt &&
+                t->siz == sTileSiz && t->width == sTileWidth && t->height == sTileHeight &&
+                t->cmS == sTileCmS && t->cmT == sTileCmT && t->swapped == (u8) sTexSwapped) {
+                t->lastUsed = sGfxFrameCount;
+                return t->handle;
+            }
+        }
+
+        for (i = 0; i < sTexCacheCount; i++) {
+            GfxTexture *t = &sTexCache[i];
+            sTexScanSteps++;
+            if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
+                t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
+                t->swapped == (u8) sTexSwapped) {
+                t->lastUsed = sGfxFrameCount;
+                sTexHint[slot] = (u16) (i + 1);
+                return t->handle;
+            }
         }
     }
 
@@ -572,6 +607,7 @@ static u32 texture_current(void) {
             texels = sTexSwizzleBuf;
         }
         decode_texture(texels, sTileFmt, sTileSiz, sTileWidth, sTileHeight, tlut, sTexDecodeBuf);
+        sTexDecodes++;
     }
 
     {
@@ -587,6 +623,7 @@ static u32 texture_current(void) {
         t->cmT = sTileCmT;
         t->lastUsed = sGfxFrameCount;
         t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileCmS, sTileCmT);
+        sTexHint[tex_hint_slot(t->timg, t->tlut)] = (u16) sTexCacheCount; // index of t, +1
         return t->handle;
     }
 }
@@ -977,7 +1014,11 @@ static void blast_stats_tick(void) {
                sBlastOk, sBlastTris / 60, (u32) (sBlastUs / 60), sBlastFb[0], sBlastFb[1],
                sBlastFb[2], sBlastFb[3], (u32) (sRunDlUs / 60), (u32) (sFrameBeginUs / 60),
                (u32) (sFrameEndUs / 60));
-        printf("blast: audio %u us/f\n", (u32) (sAudioUs / 60));
+        printf("blast: audio %u us/f | texscan %u dec %u ccmiss %u /f\n", (u32) (sAudioUs / 60),
+               sTexScanSteps / 60, sTexDecodes / 60, sCcMisses / 60);
+        sTexScanSteps = 0;
+        sTexDecodes = 0;
+        sCcMisses = 0;
         sBlastOk = sBlastFb[0] = sBlastFb[1] = sBlastFb[2] = sBlastFb[3] = 0;
         sBlastTris = 0;
         sBlastUs = 0;
@@ -1532,6 +1573,7 @@ static void combiner_classify(void) {
     sCcSigPrim = prim;
     sCcSigEnv = env;
     sCcSigValid = TRUE;
+    sCcMisses++;
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
