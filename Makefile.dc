@@ -58,6 +58,7 @@ BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-fwrapv \
 	-ffast-math \
 	-ffp-contract=fast \
+	-fsingle-precision-constant \
 	-mfsrra \
 	-mfsca \
 	-flto
