@@ -23,10 +23,13 @@ extern unsigned int frameSize;
 #define DC_AUDIO_RATE 22050
 #define DC_AUDIO_BYTES_PER_SAMPLE 4 // stereo s16 (interleaved, as the manager sees it)
 
-// Everything below runs on the main thread only: osAiSetNextBuffer, osAiGetLength
-// and pc_audio_frame are all called from the frame pump, and the snd_stream direct
-// callback fires synchronously from inside snd_stream_poll() (also on this thread).
-// So no locking is needed between the ring writer and the ring reader.
+// Everything below runs on the audio thread only: osAiSetNextBuffer,
+// osAiGetLength and pc_audio_tick() are all driven from dc_audio_thread(), and
+// the snd_stream direct callback fires synchronously from inside
+// snd_stream_poll() (also on that thread). So no locking is needed between the
+// ring writer and the ring reader. The one cross-thread hazard is the game's
+// sound state, which the game thread mutates from audiosfx.c — pc_audio_tick()
+// takes the audio lock (pc_audio_lock) around the synth to fence against that.
 
 // ---------------------------------------------------------------------------
 // Pacing model (identical to the silent build — do not entangle with output)
@@ -349,8 +352,4 @@ void dc_audio_start_thread(void) {
     attr.prio = 2; // high (low number = high priority in KOS)
     attr.label = "audio";
     thd_create_ex(&attr, &dc_audio_thread, NULL);
-}
-
-// Diagnostics hook kept for API parity with the main loop.
-void pc_audio_report(void) {
 }

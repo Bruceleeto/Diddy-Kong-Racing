@@ -109,49 +109,6 @@ typedef struct {
 
 static u32 sGfxFrameCount = 0;
 
-// Overhead counters for the per-batch cost hunt (printed by blast_stats_tick).
-static u32 sTexScanSteps = 0; // texture_current cache-scan iterations
-static u32 sTexDecodes = 0;   // full texture decode+uploads (cache misses)
-static u32 sCcMisses = 0;     // combiner_classify memo misses (full reclassify)
-
-
-#ifdef GFX_PROBE_HOTSRC
-static Vertex sProbeVerts[64];
-static Triangle sProbeTris[256];
-static s32 sProbeInit = FALSE;
-
-static void probe_hotsrc_init(void) {
-    s32 i;
-
-    if (sProbeInit) {
-        return;
-    }
-    sProbeInit = TRUE;
-    for (i = 0; i < 64; i++) {
-        sProbeVerts[i].x = (s16) ((i * 37) % 200 - 100);
-        sProbeVerts[i].y = (s16) ((i * 53) % 200 - 100);
-        sProbeVerts[i].z = (s16) ((i * 71) % 200 - 100);
-        sProbeVerts[i].r = 0x80;
-        sProbeVerts[i].g = 0x80;
-        sProbeVerts[i].b = 0x80;
-        sProbeVerts[i].a = 0xFF;
-    }
-    for (i = 0; i < 256; i++) {
-        // Double-sided so nothing backface-culls: the full emit path runs.
-        sProbeTris[i].flags = BACKFACE_DRAW;
-        sProbeTris[i].vi0 = (u8) (i % 64);
-        sProbeTris[i].vi1 = (u8) ((i + 1) % 64);
-        sProbeTris[i].vi2 = (u8) ((i + 2) % 64);
-        sProbeTris[i].uv0.u = 0;
-        sProbeTris[i].uv0.v = 0;
-        sProbeTris[i].uv1.u = 32;
-        sProbeTris[i].uv1.v = 0;
-        sProbeTris[i].uv2.u = 0;
-        sProbeTris[i].uv2.v = 32;
-    }
-}
-#endif
-
 alignas(32) static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
 static s32 sCurMatrix = 0;
 static s32 sBillboard = FALSE;
@@ -353,11 +310,6 @@ static void handle_vertex(u32 w0, u32 w1) {
     if (src == NULL) {
         return;
     }
-
-#ifdef GFX_PROBE_HOTSRC
-    probe_hotsrc_init();
-    src = sProbeVerts; // count <= 32, buffer holds 64 — no wrap needed
-#endif
 
     if (append) {
         dstIdx = sVertexBase;
@@ -567,7 +519,6 @@ static u32 texture_current(void) {
 
         for (i = 0; i < sTexCacheCount; i++) {
             GfxTexture *t = &sTexCache[i];
-            sTexScanSteps++;
             if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
                 t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
                 t->swapped == (u8) sTexSwapped) {
@@ -607,7 +558,6 @@ static u32 texture_current(void) {
             texels = sTexSwizzleBuf;
         }
         decode_texture(texels, sTileFmt, sTileSiz, sTileWidth, sTileHeight, tlut, sTexDecodeBuf);
-        sTexDecodes++;
     }
 
     {
@@ -724,15 +674,6 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
     //
     // Which of the two paths below applies was settled once for the whole batch;
     // see combiner_classify().
-#ifdef GFX_PROBE_NOCOLOR
-    // Probe: no combiner at all — raw shade bytes straight through. Renders
-    // over-bright/wrong, but visible, so the on-screen fps counter works.
-    out->r = v->r;
-    out->g = v->g;
-    out->b = v->b;
-    out->a = v->a;
-    return;
-#endif
     if (sCcFast) {
         // Every channel is either the shade straight through or a per-batch
         // constant, so the whole mux collapses to four byte selects — no FP.
@@ -910,11 +851,6 @@ static void handle_polygon(u32 w0, u32 w1) {
         return;
     }
 
-#ifdef GFX_PROBE_HOTSRC
-    probe_hotsrc_init();
-    tris = sProbeTris; // count <= 16 (4-bit field), buffer holds 256
-#endif
-
     if (texEnabled) {
         texture = texture_current();
     }
@@ -952,19 +888,15 @@ static void handle_polygon(u32 w0, u32 w1) {
         c->v = tris[i].uv2.v * invTexH;
 
         // DKR marks culling per triangle: BACKFACE_DRAW means double-sided.
-#ifndef GFX_PROBE_NOEMIT // probe: skip per-tri cull/clip/project/stage; keep the draw tail
         emit_triangle(a, b, c, !(tris[i].flags & BACKFACE_DRAW));
-#endif
     }
 
-#ifndef GFX_PROBE_NODRAW // probe: skip the per-draw state+submit tail; keep all vertex/tri work
     apply_render_mode();
     gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
     gfx_bind_texture(texture);
     apply_texture_filter();
     gfx_set_texenv_modulate(); // the 2D path leaves the env in blend mode
     gfx_draw_tris(sTriVerts, sTriVertCount);
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -974,7 +906,7 @@ static void handle_polygon(u32 w0, u32 w1) {
 // it (see the G_VTX case) into blast_render. By then the DL has already run
 // the batch's material — matrices, tile state, render mode, combiner — so
 // everything here reads the same interpreter state the emulated path would.
-// What it skips is the machinery the probe ladder measured: no sVerts staging,
+// What it skips is the emulated path's per-batch machinery: no sVerts staging,
 // no per-corner combiner FP, no GfxTriVert copies, no sTriVerts round-trip —
 // one transform per vertex and a store-queue write.
 //
@@ -991,44 +923,6 @@ static void handle_polygon(u32 w0, u32 w1) {
 #define GFX_BLAST_MAX_VERTS 32
 #define GFX_BLAST_MAX_TRIS 16
 
-// Why batches leave the fast path, printed once a second so a silent
-// mass-fallback is visible. Indexed by the BLAST_FB_* constants.
-static u32 sBlastOk = 0;
-static u32 sBlastFb[4];
-static u32 sBlastTris = 0;   // triangles actually streamed by the fast path
-static u64 sBlastUs = 0;     // wall time inside blast_render
-static u64 sRunDlUs = 0;     // wall time of the whole run_dl frame walk
-static u64 sFrameBeginUs = 0; // wall time in gfx_frame_begin (PVR wait)
-static u64 sFrameEndUs = 0;   // wall time in gfx_frame_end (list replay + scene finish)
-static u64 sAudioUs = 0;      // wall time in pc_audio_frame (the HLE audio tick)
-#define BLAST_FB_COMBINER 0
-#define BLAST_FB_NEAR 1
-#define BLAST_FB_GFX 2
-#define BLAST_FB_BILLBOARD 3
-
-static void blast_stats_tick(void) {
-    static u32 sLastFrame = 0;
-
-    if (sGfxFrameCount - sLastFrame >= 60) {
-        printf("blast: ok %u (%u tris, %u us/f) | fb cc %u near %u gfx %u bb %u | dl %u beg %u end %u us/f\n",
-               sBlastOk, sBlastTris / 60, (u32) (sBlastUs / 60), sBlastFb[0], sBlastFb[1],
-               sBlastFb[2], sBlastFb[3], (u32) (sRunDlUs / 60), (u32) (sFrameBeginUs / 60),
-               (u32) (sFrameEndUs / 60));
-        printf("blast: audio %u us/f | texscan %u dec %u ccmiss %u /f\n", (u32) (sAudioUs / 60),
-               sTexScanSteps / 60, sTexDecodes / 60, sCcMisses / 60);
-        sTexScanSteps = 0;
-        sTexDecodes = 0;
-        sCcMisses = 0;
-        sBlastOk = sBlastFb[0] = sBlastFb[1] = sBlastFb[2] = sBlastFb[3] = 0;
-        sBlastTris = 0;
-        sBlastUs = 0;
-        sRunDlUs = 0;
-        sFrameBeginUs = 0;
-        sFrameEndUs = 0;
-        sAudioUs = 0;
-        sLastFrame = sGfxFrameCount;
-    }
-}
 
 /** Render a blast batch through the emulated path, exactly as the DL would have. */
 static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
@@ -1147,7 +1041,6 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     f32 uMul = 0.0f, vMul = 0.0f;
     f32 uS, vS;
     s32 i;
-    u64 t0 = timer_us_gettime64();
 
     if (verts == NULL || tris == NULL || numTris <= 0 || numVerts <= 0) {
         return;
@@ -1159,23 +1052,9 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         return;
     }
 
-    blast_stats_tick();
-
-#ifdef GFX_BLAST_OFF
-    // A/B probe: render every blast batch through the emulated path instead,
-    // with the stats and dl timing still live. Diffing `dl us/f` against the
-    // normal build at the same spot measures exactly what blast buys on
-    // identical geometry.
-    sBlastFb[BLAST_FB_GFX]++;
-    blast_fallback(verts, numVerts, tris, numTris, texEnabled);
-    sBlastUs += timer_us_gettime64() - t0;
-    return;
-#endif
-
     // The color must be per-batch trivial: shade byte or constant per channel.
     combiner_classify();
     if (!sCcFast || sBillboard) {
-        sBlastFb[sBillboard ? BLAST_FB_BILLBOARD : BLAST_FB_COMBINER]++;
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
@@ -1197,7 +1076,6 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // (The fallback's handle_polygon redoes this state itself, so running the
     // state calls before falling back is safe, just redundant.)
     if (!gfx_blast_viable()) {
-        sBlastFb[BLAST_FB_GFX]++;
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
@@ -1225,19 +1103,13 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         sy[i] = sVpTransY - (c.y * invW * sVpScaleY);
         iw[i] = invW;
     }
-    if (behind) {
-        sBlastFb[BLAST_FB_NEAR]++; // informational now: batches partly behind the plane
-    }
 
     if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY)) {
         // handle_polygon redoes this state itself, so falling back after the
         // state calls is safe — just redundant, and rare.
-        sBlastFb[BLAST_FB_GFX]++;
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
-    sBlastOk++;
-    sBlastTris += numTris;
     if (texture != 0) {
         uMul = shz_invf_fsrra(32.0f * (f32) sTileWidth) * uS;
         vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
@@ -1282,7 +1154,6 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         blast_emit(sx[i2], sy[i2], iw[i2], t->uv2.u * uMul, t->uv2.v * vMul, argb[i2],
                    PVR_CMD_VERTEX_EOL);
     }
-    sBlastUs += timer_us_gettime64() - t0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1573,7 +1444,6 @@ static void combiner_classify(void) {
     sCcSigPrim = prim;
     sCcSigEnv = env;
     sCcSigValid = TRUE;
-    sCcMisses++;
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
@@ -2018,34 +1888,11 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
 
 extern void dc_audio_init(void);
 extern void dc_audio_start_thread(void);
-extern void pc_audio_report(void);
 
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
-#if defined(GFX_PROBE_NODRAW) || defined(GFX_PROBE_NOEMIT) || defined(GFX_PROBE_HOTSRC)
-    // The probes blank the screen, so report frame time on the console instead:
-    // wall ms/frame averaged over 120 frames, measured across the whole submit
-    // (run_dl + PVR waits), same span the on-screen fps reflects.
-    static u64 sProbeLastUs = 0;
-    static u32 sProbeFrames = 0;
-    u64 nowUs = timer_us_gettime64();
-
-    if (sProbeLastUs != 0 && ++sProbeFrames == 120) {
-        printf("probe: %.2f ms/frame (%.1f fps)\n", (f32) (nowUs - sProbeLastUs) / (120.0f * 1000.0f),
-               120.0f * 1000000.0f / (f32) (nowUs - sProbeLastUs));
-        sProbeFrames = 0;
-        sProbeLastUs = nowUs;
-    } else if (sProbeLastUs == 0) {
-        sProbeLastUs = nowUs;
-    }
-#endif
     sGfxFrameCount++;
 
-    {
-        u64 t0 = timer_us_gettime64();
-
-        gfx_frame_begin();
-        sFrameBeginUs += timer_us_gettime64() - t0;
-    }
+    gfx_frame_begin();
 
     sCurMatrix = 0;
     sBillboard = FALSE;
@@ -2070,20 +1917,9 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sScisY1 = sVpClipY1 = (f32) N64_SCREEN_H;
     gfx_disable_scissor();
 
-    {
-        u64 t0 = timer_us_gettime64();
+    run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
 
-        run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
-        sRunDlUs += timer_us_gettime64() - t0;
-    }
-
-    {
-        u64 t0 = timer_us_gettime64();
-
-        gfx_frame_end();
-        sFrameEndUs += timer_us_gettime64() - t0;
-    }
-
+    gfx_frame_end();
 }
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
