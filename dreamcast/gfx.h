@@ -66,6 +66,16 @@ void gfx_delete_texture(unsigned int handle);
 // shaded from the vertex colours and modulated by the bound texture.
 void gfx_draw_tris(const GfxTriVert *verts, int count);
 
+// Blast streaming (the native static-geometry path; see gfx.c). Routes,
+// submits scissor + header for the current state, and hands back the bound
+// texture's NPOT UV scales plus the N64-pixels -> framebuffer scale — after
+// which the caller owns the TA and streams PVR vertices to the store queues
+// itself (pvr_dr_target/pvr_dr_commit). Returns 0 when the state needs a path
+// this contract doesn't cover (recorded lists, texenv blend, exact scissor)
+// and the caller must render the batch through gfx_draw_tris instead.
+int gfx_blast_viable(void); // begin() would accept the current state (cheap precheck)
+int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY);
+
 // Turns depth testing on or off — the RDP's Z_CMP. The 2D overlay (text, HUD,
 // fades) is drawn with the z-buffer disabled and relies on display-list order
 // instead, which is what the game itself does: it clears G_ZBUFFER before every

@@ -876,6 +876,63 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
     sRoute = ROUTE_TR;
 }
 
+// ---------------------------------------------------------------------------
+// Blast streaming — the native path for static level geometry (see
+// handle_blast in main.c). The caller transforms vertices itself and streams
+// them here one at a time; this end owns the list routing, scissor, header
+// and store-queue mechanics so they stay consistent with gfx_draw_tris.
+//
+// Only the plain TR streaming case is supported. Anything that would need the
+// recorded PT/OP lists, the texenv-blend colour split, or exact scissor
+// clipping makes begin() refuse, and the caller falls back to the emulated
+// path — correctness is never traded, only overhead.
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether the current state is one gfx_blast_begin would accept — everything
+ * begin() checks is already settled before the caller transforms anything, so
+ * asking first turns a doomed batch's wasted transform into a cheap compare.
+ */
+int gfx_blast_viable(void) {
+    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f) && sDepthTest && !sDepthOffset &&
+           !scissor_needs_exact_clip();
+}
+
+int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY) {
+    if (!gfx_blast_viable()) {
+        return 0;
+    }
+
+    sRoute = ROUTE_TR;
+    if (sScisDirty) {
+        if (sScisEnable) {
+            submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
+                             (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
+        } else {
+            submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+        }
+        sScisDirty = 0;
+    }
+    if (sHdrDirty) {
+        compile_header();
+        sHdrDirty = 0;
+    }
+    shz_sq_memcpy32_1(pvr_ta_sq_addr, &sHdr);
+
+    if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
+        *uScale = sTextures[sBoundTex - 1].u_scale;
+        *vScale = sTextures[sBoundTex - 1].v_scale;
+    } else {
+        *uScale = 1.0f;
+        *vScale = 1.0f;
+    }
+    // The N64-pixels -> framebuffer scale, so the caller can emit vertices to
+    // the store queues itself without a cross-file call per vertex.
+    *scaleX = sScaleX;
+    *scaleY = sScaleY;
+    return 1;
+}
+
 /** Open a list, push a recording into it verbatim, close it. */
 static void replay_list(int list, unsigned char (*buf)[32], int count) {
     int i;
