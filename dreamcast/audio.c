@@ -10,6 +10,7 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef uint8_t u8;
 typedef uint32_t u32;
+typedef uint64_t u64;
 
 // The audio manager's per-frame tick (src/audiomgr.c, TARGET_PC path).
 extern void am_audio_frame_pc(void);
@@ -233,19 +234,26 @@ u32 osAiGetLength(void) {
 // Frame pump
 // ---------------------------------------------------------------------------
 
-// Called once per video frame from dreamcast/main.c, standing in for the audio
-// thread's OS_SC_RETRACE_MSG wakeup.
+// One retrace of the audio manager, standing in for the N64 audio thread's
+// OS_SC_RETRACE_MSG wakeup. Runs on the KOS audio thread below.
 //
-// Pacing (unchanged): drain one video frame of the virtual queue, then top the
-// queue back up to a target depth by synthesizing more, bounded so a bad state
-// can't spin forever. am_audio_frame_pc() feeds osAiSetNextBuffer, which also
-// fills the output rings as a side effect.
+// Pacing (unchanged from the old main-thread version): drain one game frame of
+// the virtual queue, then top it back up to a target depth by synthesizing
+// more, bounded so a bad state can't spin forever. am_audio_frame_pc() feeds
+// osAiSetNextBuffer, which also fills the output rings as a side effect.
 //
-// Output: poll the sound stream so its callback can refill AICA from the rings.
+// am_audio_frame_pc() touches the game's sound state, which the game thread
+// also mutates from audiosfx.c under osSetIntMask(). Hold the same lock across
+// it (pc_audio_lock/unlock, dreamcast/reimpl.c) so the two can't collide. The
+// stream poll is outside the lock: the rings are only ever touched from this
+// thread, so they need no cross-thread guard.
 #define DC_AUDIO_TARGET_FRAMES 3 // ~100ms of buffered audio
 #define DC_AUDIO_MAX_TICKS 6     // don't spin forever if something goes wrong
 
-void pc_audio_frame(void) {
+extern void pc_audio_lock(void);
+extern void pc_audio_unlock(void);
+
+static void pc_audio_tick(void) {
     u32 drained;
     u32 target;
     s32 ticks = 0;
@@ -254,7 +262,9 @@ void pc_audio_frame(void) {
         return;
     }
 
-    // Synthetic DAC drain: retire one video frame of queued audio.
+    pc_audio_lock();
+
+    // Synthetic DAC drain: retire one game frame of queued audio.
     drained = frameSize * DC_AUDIO_BYTES_PER_SAMPLE;
     sQueued = (sQueued > drained) ? sQueued - drained : 0;
 
@@ -264,10 +274,81 @@ void pc_audio_frame(void) {
         ticks++;
     }
 
+    pc_audio_unlock();
+
     // Hand whatever the rings now hold to AICA.
     if (sAudioOk && sStreamStarted) {
         snd_stream_poll(sStream);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Audio thread
+//
+// The whole reason this exists: on Dreamcast everything else runs on one
+// thread, and a menu->game switch is a single blocking level load (gzip inflate
+// + asset DMA) that returns to the main loop only when it is done — sometimes
+// seconds later. While it blocks, nothing pumps audio, the AICA rings drain
+// their ~0.74s and the DAC starves: the glitch/stutter on every transition.
+//
+// So audio moves off the main thread onto its own KOS thread, woken by the
+// vblank interrupt handler (which fires from hardware regardless of what the
+// main thread is doing). Preemptive KOS keeps this thread scheduled straight
+// through the load, so audio never stops. This is exactly the N64's model —
+// audio ran on its own thread there too — and mirrors the OoT DC port.
+//
+// DKR's manager expects a 30 Hz retrace (frameSize == one 1/30 s frame), so tick
+// the body every other 60 Hz vblank.
+// ---------------------------------------------------------------------------
+
+static volatile u64 sVblTicker = 0;
+
+static void audio_vblank_handler(u32 code, void *data) {
+    (void) code;
+    (void) data;
+    sVblTicker++;
+    genwait_wake_one((void *) &sVblTicker);
+}
+
+static void *dc_audio_thread(void *arg) {
+    u64 lastTick = sVblTicker;
+    u32 field = 0;
+
+    (void) arg;
+    for (;;) {
+        while (sVblTicker <= lastTick) {
+#if KOS_VERSION_BELOW(2, 2, 3)
+            genwait_wait((void *) &sVblTicker, NULL, 5, NULL);
+#else
+            genwait_wait((void *) &sVblTicker, NULL, 5);
+#endif
+        }
+        lastTick = sVblTicker;
+
+        // 60 Hz vblank -> 30 Hz manager retrace.
+        if (++field & 1) {
+            pc_audio_tick();
+        }
+    }
+    return NULL;
+}
+
+// Start the vblank-driven audio thread. Called once from main() after
+// dc_audio_init(). No-op safe if audio failed to initialise — the thread just
+// paces a silent manager.
+void dc_audio_start_thread(void) {
+    kthread_attr_t attr;
+
+    thd_set_hz(300); // finer preemption so the audio thread reacts promptly
+
+    vblank_handler_add(&audio_vblank_handler, NULL);
+
+    attr.create_detached = 1;
+    attr.stack_size = 32768;
+    attr.stack_ptr = NULL;
+    attr.prio = 2; // high (low number = high priority in KOS)
+    attr.label = "audio";
+    thd_create_ex(&attr, &dc_audio_thread, NULL);
 }
 
 // Diagnostics hook kept for API parity with the main loop.

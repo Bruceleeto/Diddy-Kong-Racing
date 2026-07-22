@@ -397,13 +397,47 @@ void osInvalDCache(void *vaddr, s32 size) {}
 void osInvalICache(void *vaddr, s32 size) {}
 
 // ---------------------------------------------------------------------------
-// Interrupt management (single-threaded host: nothing to mask)
+// Interrupt management
+//
+// __osDisableInt/__osRestoreInt guard the libultra message-queue layer
+// (osSendMesg/osRecvMesg). Those stay no-ops: the queue traffic is not shared
+// across the host's threads in a way that races.
+//
+// osSetIntMask is different. On N64 it is used by ONE subsystem — audiosfx.c —
+// and only there, to fence the game thread's sound-effect state against the
+// audio thread that consumes it (7 balanced OS_IM_NONE..restore pairs). Now
+// that DKR's audio manager runs on its own KOS thread again (dreamcast/audio.c),
+// that fence has to be real mutual exclusion, not a no-op. Back it with a
+// recursive mutex the audio thread also holds while it runs the synth, so a
+// game-thread SFX post can't tear state out from under __amHandleFrameMsg.
 // ---------------------------------------------------------------------------
+#define PC_OS_IM_NONE 0x00000001u
+
+static mutex_t sAudioMutex = RECURSIVE_MUTEX_INITIALIZER;
+
+// Held by the audio thread across am_audio_frame_pc(); see dreamcast/audio.c.
+void pc_audio_lock(void) {
+    mutex_lock(&sAudioMutex);
+}
+void pc_audio_unlock(void) {
+    mutex_unlock(&sAudioMutex);
+}
+
 s32 __osDisableInt(void) {
     return 0;
 }
 void __osRestoreInt(s32 mask) {}
+
 u32 osSetIntMask(u32 mask) {
+    // osSetIntMask(OS_IM_NONE) enters a critical section; the paired call passes
+    // back the saved mask (our 0) to leave it. Only unlock when this thread is
+    // actually the holder, so a stray "enable" that was never paired with an
+    // OS_IM_NONE can't underflow the mutex.
+    if (mask == PC_OS_IM_NONE) {
+        mutex_lock(&sAudioMutex);
+    } else if (sAudioMutex.holder == thd_get_current()) {
+        mutex_unlock(&sAudioMutex);
+    }
     return 0;
 }
 

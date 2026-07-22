@@ -2017,7 +2017,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
 }
 
 extern void dc_audio_init(void);
-extern void pc_audio_frame(void);
+extern void dc_audio_start_thread(void);
 extern void pc_audio_report(void);
 
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
@@ -2084,16 +2084,6 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
         sFrameEndUs += timer_us_gettime64() - t0;
     }
 
-    // Tick the audio manager once per frame. On N64 this is the scheduler posting
-    // OS_SC_RETRACE_MSG to the audio thread; there is no thread and no scheduler
-    // here, so the frame boundary drives it directly. (linux/audio.c)
-    {
-        u64 t0 = timer_us_gettime64();
-
-        pc_audio_frame();
-        sAudioUs += timer_us_gettime64() - t0;
-    }
-    pc_audio_report();
 }
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
@@ -2110,8 +2100,11 @@ int main(int argc, char **argv) {
     sHostThread.priority = 10;
     __osRunningThread = &sHostThread;
     gfx_window_init(N64_SCREEN_W, N64_SCREEN_H, WINDOW_SCALE);
-    // Bring AICA up now, well before init_game produces the first PCM.
+    // Bring AICA up now, well before init_game produces the first PCM, then hand
+    // audio off to its own vblank-driven thread so it keeps running through the
+    // blocking level loads that used to starve the DAC on every menu->game switch.
     dc_audio_init();
+    dc_audio_start_thread();
     thread3_main(0);
     return 0;
 }
