@@ -67,26 +67,21 @@ s32 pc_retrace_wait(void) {
 #define GFX_MAX_DEPTH 16    // display-list recursion guard
 #define GFX_MAX_TRI_VERTS 8192
 
-// A vertex in clip space — post-matrix, pre-divide. Kept unprojected because
-// near-plane clipping has to interpolate here, before the divide by w (a vertex
-// behind the camera has w <= 0, and dividing by it is exactly the garbage the
-// clip exists to prevent).
-// Field order is deliberate: everything project() reads on the common path is
-// packed at the front, so a vertex costs one 32-byte line to shade instead of
-// picking fields out of two. clip[] is only touched when a triangle actually
-// crosses the near plane, so it goes at the back with the other cold data.
+// A vertex in clip space: post-matrix, pre-divide. Kept unprojected because
+// near-plane clipping interpolates here, before the divide by w (a vertex behind
+// the camera has w <= 0, and dividing by it is the garbage the clip prevents).
+// Field order: everything project() reads on the common path is at the front, so
+// a vertex is one 32-byte line to shade. clip[] is only touched when a triangle
+// crosses the near plane, so it sits at the back with the cold data.
 typedef struct {
     // The perspective divide + viewport map, computed once at G_VTX time rather
-    // than three-times-per-triangle in push_tri. This is where the RSP does it
-    // too: it transforms and projects the vertex when the vertex command loads
-    // it, and the triangle commands afterwards only reference the result. Since
-    // display lists reuse each vertex across two or three triangles, doing it
-    // here rather than per-corner is a straight win.
-    // `sw` doubles as the "is this projected" flag, which is what gets the hot
-    // set to exactly 32 bytes rather than 33. A projected vertex always has
-    // sw == clip[3] >= GFX_NEAR_W (1.0f), so zero is a value it can never
-    // legitimately take, and project_into/clip_edge store 0.0f to mean "behind
-    // the near plane, nothing cached". Use VERTEX_PROJECTED() to read it.
+    // than three-times-per-triangle in push_tri, as the RSP does it: the vertex
+    // command projects, the triangle commands reference the result. Display lists
+    // reuse each vertex across two or three triangles, so this beats per-corner.
+    // `sw` doubles as the "is this projected" flag, keeping the hot set at 32
+    // bytes not 33. A projected vertex always has sw == clip[3] >= GFX_NEAR_W
+    // (1.0f), so zero is unreachable; project_into/clip_edge store 0.0f for
+    // "behind the near plane, nothing cached". Read it via VERTEX_PROJECTED().
     f32 sx, sy, sz, sw, sfog; // 20
     f32 u, v;                 // 28 — per-triangle, written by handle_polygon
     u8 r, g, b, a;            // 32 — shade
@@ -102,9 +97,9 @@ typedef struct {
 // Whether a vertex carries a cached projection. See GfxVertex.sw.
 #define VERTEX_PROJECTED(v) ((v)->sw != 0.0f)
 
-// Which screen-space winding is a front face. Screen y runs downwards here, so
-// this is the opposite sign from the y-up convention. If the world renders
-// inside-out — outer surfaces gone, inner ones visible — flip this.
+// Which screen-space winding is a front face. Screen y runs downwards, so this is
+// the opposite sign from the y-up convention. Flip if the world renders
+// inside-out (outer surfaces gone, inner ones visible).
 #define GFX_FRONT_FACE_SIGN (-1.0f)
 
 static u32 sGfxFrameCount = 0;
@@ -131,11 +126,11 @@ static f32 sVpTransY = N64_SCREEN_H / 2.0f;
 // Two rectangles, and the drawing is confined to the intersection:
 //
 //   sScis*  — the RDP scissor (G_SETSCISSOR). Split-screen, text boxes.
-//   sVpClip* — the viewport's own bounds. The RSP clips geometry to the view
-//       volume, and the viewport maps NDC +-1 onto exactly this rectangle, so on
-//       hardware nothing can be drawn outside it. We only clip against the near
-//       plane, so without this a small viewport — the track-preview window in the
-//       level-select menu — lets its geometry spill out across the whole screen.
+//   sVpClip* — the viewport's own bounds. The RSP clips to the view volume, and
+//       the viewport maps NDC +-1 onto this rectangle, so on hardware nothing
+//       draws outside it. This path only clips against the near plane, so without
+//       this a small viewport (the level-select track-preview window) spills its
+//       geometry across the whole screen.
 // ---------------------------------------------------------------------------
 static f32 sScisX0, sScisY0, sScisX1, sScisY1;
 static f32 sVpClipX0, sVpClipY0, sVpClipX1, sVpClipY1;
@@ -529,11 +524,10 @@ static u32 texture_current(void) {
         }
     }
 
-    // A full cache used to mean "draw untextured, forever". Evict the entry that
-    // has gone unused the longest instead — a texture the game still wants will
-    // simply be decoded again next time it asks for it. With invalidation working
-    // this should not trigger, but degrading into a slow frame beats degrading
-    // into a permanently untextured world.
+    // A full cache used to mean drawing untextured forever. Evict the
+    // least-recently-used entry instead; a texture still wanted is re-decoded next
+    // time it's asked for. With invalidation working this shouldn't trigger, but a
+    // slow frame beats a permanently untextured world.
     if (sTexCacheCount >= GFX_MAX_TEXTURES) {
         s32 oldest = 0;
 
@@ -650,9 +644,9 @@ static void project_into(GfxVertex *v) {
  * Takes the cached projection when there is one; only vertices manufactured by
  * clip_edge have to be projected here.
  *
- * The combiner is deliberately *not* hoisted with the geometry: it is RDP state,
- * not RSP state, so it can legitimately change between the G_VTX that loads a
- * vertex and the G_TRIN that draws with it.
+ * The combiner is not hoisted with the geometry: it is RDP state, not RSP state,
+ * so it can change between the G_VTX that loads a vertex and the G_TRIN that
+ * draws with it.
  */
 static void project(const GfxVertex *v, GfxTriVert *out) {
     if (VERTEX_PROJECTED(v)) {
@@ -667,24 +661,22 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
     out->u = v->u;
     out->v = v->v;
 
-    // The colour the RDP would have computed *around* the texel: the environment
-    // blend, the prim colour, and the prim/vertex alpha behind every fade in the
-    // game. The texture unit modulates the real texel in afterwards, so the
-    // combiner runs here with the texel taken as white.
-    //
-    // Which of the two paths below applies was settled once for the whole batch;
-    // see combiner_classify().
+    // The colour the RDP would compute around the texel: the environment blend,
+    // the prim colour, and the prim/vertex alpha behind every fade. The texture
+    // unit modulates the real texel in afterwards, so the combiner runs here with
+    // the texel as white. Which path applies was settled per batch; see
+    // combiner_classify().
     if (sCcFast) {
-        // Every channel is either the shade straight through or a per-batch
-        // constant, so the whole mux collapses to four byte selects — no FP.
-        // (The blast path makes the same call on the same classification.)
+        // Every channel is the shade straight through or a per-batch constant, so
+        // the mux collapses to four byte selects, no FP. (The blast path makes
+        // the same call on the same classification.)
         out->r = sCcPass[0] ? v->r : sCcConst[0];
         out->g = sCcPass[1] ? v->g : sCcConst[1];
         out->b = sCcPass[2] ? v->b : sCcConst[2];
         out->a = sCcPass[3] ? v->a : sCcConst[3];
     } else {
-        // At least one channel genuinely mixes shade with something else. Run the
-        // real thing. Only the lit half is wanted — see combiner_eval_lit.
+        // At least one channel mixes shade with something else; run the real mux.
+        // Only the lit half is wanted, see combiner_eval_lit.
         f32 shade[4];
         u8 lit[4];
 
@@ -902,20 +894,19 @@ static void handle_polygon(u32 w0, u32 w1) {
 // ---------------------------------------------------------------------------
 // The blast path — native rendering for simple G_VTX + G_TRIN batches.
 //
-// run_dl fuses any G_VTX immediately followed by the one G_TRIN that consumes
-// it (see the G_VTX case) into blast_render. By then the DL has already run
-// the batch's material — matrices, tile state, render mode, combiner — so
-// everything here reads the same interpreter state the emulated path would.
-// What it skips is the emulated path's per-batch machinery: no sVerts staging,
-// no per-corner combiner FP, no GfxTriVert copies, no sTriVerts round-trip —
-// one transform per vertex and a store-queue write.
+// run_dl fuses any G_VTX immediately followed by the one G_TRIN that consumes it
+// (see the G_VTX case) into blast_render. The DL has already run the batch's
+// material (matrices, tile state, render mode, combiner), so this reads the same
+// interpreter state the emulated path would. It skips the emulated path's
+// per-batch machinery: no sVerts staging, no per-corner combiner FP, no
+// GfxTriVert copies, no sTriVerts round-trip — one transform per vertex and a
+// store-queue write.
 //
-// Correctness is guarded, not assumed: if the batch's combiner doesn't
-// collapse to select/passthrough, if billboarding is on, or if the gfx layer
-// needs a path the blast contract doesn't cover, the whole batch falls back to
-// the emulated path by running the exact G_VTX/G_TRIN handlers the fusion
-// replaced. Vertices behind the near plane don't fall back: their triangles
-// go through an in-path clip (blast_clip_tri).
+// Fallback: if the combiner doesn't collapse to select/passthrough, if
+// billboarding is on, or if the gfx layer needs a path blast doesn't cover, the
+// batch runs the exact G_VTX/G_TRIN handlers the fusion replaced. Vertices behind
+// the near plane don't fall back: their triangles go through an in-path clip
+// (blast_clip_tri).
 // ---------------------------------------------------------------------------
 
 // The asset can't exceed these: gSPVertexDKR encodes count-1 in 5 bits,
@@ -924,7 +915,7 @@ static void handle_polygon(u32 w0, u32 w1) {
 #define GFX_BLAST_MAX_TRIS 16
 
 
-/** Render a blast batch through the emulated path, exactly as the DL would have. */
+/** Render a blast batch through the emulated path, as the DL would have. */
 static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
                            s32 texEnabled) {
     handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts);
@@ -1046,8 +1037,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         return;
     }
     if (numVerts > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
-        // Can't even exist in a valid asset (the DL macros couldn't encode it),
-        // and the fallback encoding couldn't either. Drop loudly.
+        // Can't occur in a valid asset (the DL macros can't encode it).
         printf("blast: oversized batch %dv/%dt\n", (int) numVerts, (int) numTris);
         return;
     }
@@ -1059,10 +1049,9 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         return;
     }
 
-    // Resolve this batch's state *before* asking whether the fast path covers
-    // it — gfx_blast_viable() reads the resolved state, and until
-    // apply_render_mode runs that is still the previous batch's (asking early
-    // rejected on a stale alpha test and sent good batches to the slow path).
+    // Resolve this batch's state before checking gfx_blast_viable(), which reads
+    // it: until apply_render_mode runs it's still the previous batch's (a stale
+    // alpha test sent good batches to the slow path).
     if (texEnabled) {
         texture = texture_current();
     }
@@ -1072,17 +1061,16 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     apply_texture_filter();
     gfx_set_texenv_modulate();
 
-    // States begin() would refuse are knowable now — don't transform first.
-    // (The fallback's handle_polygon redoes this state itself, so running the
-    // state calls before falling back is safe, just redundant.)
+    // States begin() would refuse are known now, so don't transform first. The
+    // fallback's handle_polygon redoes this state, so these state calls are safe
+    // to have run.
     if (!gfx_blast_viable()) {
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
 
-    // Transform + project every vertex. A vertex behind the near plane only
-    // marks its bit — the triangles that touch it go through the in-path
-    // clipper below rather than costing the whole batch its fast path.
+    // Transform + project every vertex. A vertex behind the near plane just marks
+    // its bit; the triangles touching it go through the in-path clipper below.
     shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
     for (i = 0; i < numVerts; i++) {
         const Vertex *v = &verts[i];
@@ -1105,8 +1093,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     }
 
     if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY)) {
-        // handle_polygon redoes this state itself, so falling back after the
-        // state calls is safe — just redundant, and rare.
+        // handle_polygon redoes this state, so falling back here is safe.
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
@@ -1159,24 +1146,23 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
 // ---------------------------------------------------------------------------
 // The colour combiner.
 //
-// Evaluated on the CPU, per vertex, with TEXEL0/TEXEL1 taken as white — the GL
-// texture unit then modulates the real texel in afterwards. That is an
-// approximation (the RDP would multiply the texel only into the terms that
-// actually name it, where we multiply it into the whole result), but it is exact
-// for every combiner that reduces to "texel times a constant", and close for the
-// rest. It also needs no shader, no GL_COMBINE and no multitexture, which is the
-// same trade the OoT Dreamcast port makes.
+// Evaluated on the CPU per vertex, with TEXEL0/TEXEL1 taken as white; the GL
+// texture unit modulates the real texel in afterwards. This is exact for any
+// combiner that reduces to "texel times a constant" and approximate for the rest
+// (the RDP multiplies the texel only into the terms that name it; this multiplies
+// it into the whole result). Needs no shader, GL_COMBINE or multitexture, like
+// the OoT DC port.
 //
-// The important part is that SHADE is a *real input* now. DKR's directionally-lit
-// materials (dRenderSettingsDirectionalLighting, used by objects.c whenever
-// directional_lighting_on() is in effect — the intro cutscene, for one) are
+// SHADE is a real input here. DKR's directionally-lit materials
+// (dRenderSettingsDirectionalLighting, via directional_lighting_on() — the intro
+// cutscene, for one) are
 //
 //     cycle 1: G_CC_BLEND_SHADEALPHA  ->  lerp(PRIM, TEXEL0, SHADE_ALPHA)
 //     cycle 2: G_CC_BLENDI_SHADE      ->  lerp(COMBINED, ENV, SHADE)
 //
-// where the vertex colour is a blend *weight* and the lit colour comes from PRIM
-// and ENV. Shading those as texel x vertex-colour, as we did, collapses the model
-// towards black — which is exactly what Diddy's plane looked like.
+// where the vertex colour is a blend weight and the lit colour comes from PRIM
+// and ENV. Shading those as texel x vertex-colour collapses the model towards
+// black (Diddy's plane went dark).
 // ---------------------------------------------------------------------------
 
 /**
@@ -1225,9 +1211,8 @@ static void cc_rgb_in(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]
 }
 
 /**
- * A colour input from the 5-bit multiplier (c) slot, which additionally reaches
- * the alpha registers — that is where ENV_ALPHA and SHADE_ALPHA come from, and
- * both are load-bearing for DKR's lighting.
+ * A colour input from the 5-bit multiplier (c) slot, which also reaches the alpha
+ * registers: the source of ENV_ALPHA and SHADE_ALPHA, both used by DKR's lighting.
  */
 static void cc_rgb_mul(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
     f32 scalar;
@@ -1395,35 +1380,35 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
 // ---------------------------------------------------------------------------
 // Per-batch combiner classification.
 //
-// Running the mux per vertex was measured at ~29ms a frame — by far the largest
-// single cost in the renderer. But the mux, the prim colour and the env colour
-// are all constant for a whole draw batch; only shade varies. So for most
-// batches each output channel is one of just two things:
+// Running the mux per vertex measured at ~29ms a frame, the largest single cost
+// in the renderer. But the mux, prim and env colours are constant for a whole
+// batch; only shade varies. So for most batches each output channel is one of
+// two things:
 //
-//   passthrough — the channel *is* the shade. A plain texel * shade modulate,
-//                 which is what DKR's 3D geometry uses almost everywhere.
-//   constant    — the channel never varies with shade, so evaluate it once.
+//   passthrough — the channel is the shade. A plain texel * shade modulate,
+//                 which DKR's 3D geometry uses almost everywhere.
+//   constant    — the channel never varies with shade; evaluate it once.
 //
-// When every channel is one of those the combiner collapses to four selects and
-// need not run at all. Anything else falls back to the real mux, per vertex.
+// When every channel is one of those the combiner collapses to four selects.
+// Anything else falls back to the real mux, per vertex.
 //
-// Classifying per channel rather than per batch is the whole point: DKR's 3D
-// materials are texel * shade on RGB but take alpha from PRIM or ENV to drive
-// fades, so an all-or-nothing test rejects exactly the batches worth catching.
+// Classification is per channel, not per batch: DKR's 3D materials are
+// texel * shade on RGB but take alpha from PRIM or ENV for fades, so an
+// all-or-nothing test would reject the batches worth catching.
 //
-// The test is functional, not a mux pattern-match — evaluate the real combiner
-// on probe shades and look at what comes out. An unrecognised combiner cannot be
-// misclassified; it simply fails both tests and takes the slow path.
+// The test is functional, not a mux pattern-match: evaluate the real combiner on
+// probe shades and inspect the output. An unrecognised combiner can't be
+// misclassified; it fails both tests and takes the slow path.
 // ---------------------------------------------------------------------------
 // The state the classification is valid for. Any change and it is recomputed.
 static u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
 static s32 sCcSigValid = FALSE;
 
 static void combiner_classify(void) {
-    // Three probes, not two. Two mid-range ones alone would call a combiner that
-    // *saturates* at both of them constant — lerp-towards-env clamps to 255 at
-    // any bright shade, but not at a dark one — so the third sits on the 0/255
-    // extremes, where a saturating combiner gives itself away.
+    // Three probes, not two: two mid-range ones would call a combiner that
+    // saturates at both of them constant (lerp-towards-env clamps to 255 at any
+    // bright shade but not a dark one), so the third sits on the 0/255 extremes
+    // where a saturating combiner shows itself.
     static const u8 probeA[4] = { 13, 71, 149, 233 };
     static const u8 probeB[4] = { 200, 5, 96, 44 };
     static const u8 probeC[4] = { 0, 255, 255, 0 };
@@ -1936,9 +1921,8 @@ int main(int argc, char **argv) {
     sHostThread.priority = 10;
     __osRunningThread = &sHostThread;
     gfx_window_init(N64_SCREEN_W, N64_SCREEN_H, WINDOW_SCALE);
-    // Bring AICA up now, well before init_game produces the first PCM, then hand
-    // audio off to its own vblank-driven thread so it keeps running through the
-    // blocking level loads that used to starve the DAC on every menu->game switch.
+    // Bring AICA up before init_game produces the first PCM, then hand audio to
+    // its own vblank-driven thread so it survives the blocking level loads.
     dc_audio_init();
     dc_audio_start_thread();
     thread3_main(0);

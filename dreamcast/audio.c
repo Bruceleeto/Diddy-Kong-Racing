@@ -23,13 +23,11 @@ extern unsigned int frameSize;
 #define DC_AUDIO_RATE 22050
 #define DC_AUDIO_BYTES_PER_SAMPLE 4 // stereo s16 (interleaved, as the manager sees it)
 
-// Everything below runs on the audio thread only: osAiSetNextBuffer,
-// osAiGetLength and pc_audio_tick() are all driven from dc_audio_thread(), and
-// the snd_stream direct callback fires synchronously from inside
-// snd_stream_poll() (also on that thread). So no locking is needed between the
-// ring writer and the ring reader. The one cross-thread hazard is the game's
-// sound state, which the game thread mutates from audiosfx.c — pc_audio_tick()
-// takes the audio lock (pc_audio_lock) around the synth to fence against that.
+// Runs on the audio thread only (dc_audio_thread): osAiSetNextBuffer,
+// osAiGetLength, pc_audio_tick, and the snd_stream direct callback (via
+// snd_stream_poll). So the ring writer and reader need no lock. Cross-thread
+// hazard is the game's sound state, mutated from audiosfx.c; pc_audio_tick
+// holds pc_audio_lock around the synth.
 
 // ---------------------------------------------------------------------------
 // Pacing model (identical to the silent build — do not entangle with output)
@@ -62,8 +60,8 @@ static s32 sAudioOk;     // AICA/stream initialised successfully
 static s32 sStreamStarted;
 
 static void ring_init(int n) {
-    // Round capacity up to a power of two so head/tail can free-run and wrap with
-    // a mask (RING_BYTES is already a power of two, this is just belt-and-braces).
+    // Power-of-two capacity so head/tail free-run and wrap with a mask.
+    // (RING_BYTES is already a power of two.)
     sRing[n].cap = 1u << (32 - __builtin_clz(RING_BYTES - 1));
     sRing[n].buf = sRingStorage[n];
     sRing[n].head = 0;
@@ -118,13 +116,12 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t left, uintptr_t right, si
 }
 
 
-// Bring AICA up. MUST be called early (from main(), before the game starts
-// producing audio) — snd_stream_init() uploads the AICA firmware and gives it
-// ~10ms to boot, and only once the SPU has validated its command queue is it
-// legal to issue snd_stream_start(). Doing this lazily from osAiSetFrequency
-// (which runs mid-init_game, right before the first frame of PCM) raced the
-// handshake and tripped KOS's "Queue is not yet valid" assert. Failure here is
-// non-fatal: the build just stays silent-but-paced.
+// Bring AICA up. Must be called early (from main(), before the game produces
+// audio): snd_stream_init() uploads the AICA firmware and needs ~10ms to boot,
+// and snd_stream_start() is only legal once the SPU has validated its command
+// queue. Called lazily from osAiSetFrequency it races the handshake and trips
+// KOS's "Queue is not yet valid" assert. Failure here is non-fatal: silent-but-
+// paced.
 void dc_audio_init(void) {
     if (sAudioOk) {
         return;
@@ -137,14 +134,11 @@ void dc_audio_init(void) {
         return;
     }
 
-    // snd_init() only gives the SPU ~10ms to boot its firmware, which is not
-    // enough here: the queue is still invalid afterwards and the first AICA
-    // command asserts ("Queue is not yet valid"). Busy-wait a generous margin on
-    // the microsecond timer — this does not depend on the scheduler and cannot
-    // return early (unlike thd_sleep). We ALSO avoid issuing any AICA command
-    // from here (no snd_stream_volume): snd_stream_alloc touches only SH4 memory,
-    // so the first real AICA traffic is snd_stream_start() on the first frame of
-    // PCM, seconds later — by which point the queue is long valid.
+    // ~10ms is not enough for the queue to validate; the first AICA command
+    // asserts otherwise. Busy-wait on the microsecond timer (scheduler-
+    // independent, no early return unlike thd_sleep). No AICA command is issued
+    // here (no snd_stream_volume): snd_stream_alloc touches only SH4 memory, so
+    // the first real AICA traffic is snd_stream_start() on the first PCM frame.
     {
         uint64_t deadline = timer_us_gettime64() + 100000; // 100ms
         while (timer_us_gettime64() < deadline) {
@@ -161,18 +155,17 @@ void dc_audio_init(void) {
 }
 
 // Called once from amCreateAudioMgr with OUTPUT_RATE. The manager derives its
-// whole frame-size schedule from the value we return, so it must be the rate we
-// actually pace (and now play) against. AICA is brought up separately and earlier
-// by dc_audio_init(); here we just mark audio live.
+// frame-size schedule from the returned rate, so it must be the rate we pace
+// and play against. AICA is brought up earlier by dc_audio_init(); this only
+// marks audio live.
 s32 osAiSetFrequency(u32 frequency) {
     (void) frequency;
     sReady = 1;
     return (s32) DC_AUDIO_RATE;
 }
 
-// The game hands us the PCM the mixer produced for the previous frame: interleaved
-// stereo s16. Deinterleave it into the two channel rings (output), and account the
-// byte count so the pacing loop stays honest (unchanged from the silent build).
+// The game passes the previous frame's mixed PCM: interleaved stereo s16.
+// Deinterleave into the two channel rings and account the byte count for pacing.
 void osAiSetNextBuffer(void *buf, u32 size) {
     if (!sReady || size == 0) {
         return;
@@ -210,19 +203,17 @@ void osAiSetNextBuffer(void *buf, u32 size) {
     }
 }
 
-// Bytes still to play. This is the feedback signal __amHandleFrameMsg uses:
+// Bytes still to play. Feedback signal for __amHandleFrameMsg:
 //
 //     frameSamples = (16 + (frameSize - osAiGetLength()/4 + 96)) & ~0xf
 //
-// On N64 the AI holds at most two buffers — one playing, one pending — and
-// osAiGetLength() returns what is left of the playing one, never more than a
-// single frame. Reporting the whole backlog instead makes (frameSize - samplesLeft)
-// go NEGATIVE; the clamp tests `(u32) info->frameSamples < minFrameSize`, so a
-// negative value casts to a huge unsigned, sails through the clamp, and
-// osAiSetNextBuffer gets a ~4GB length. So: saturate at one frame, exactly like
-// the hardware, and the formula always lands in [112, 848]. This models the
-// virtual queue only — it is intentionally NOT the real ring depth, so pacing is
-// decoupled from AICA's actual drain.
+// On N64 the AI holds at most two buffers (one playing, one pending) and
+// osAiGetLength returns what's left of the playing one, never more than a frame.
+// Reporting the whole backlog makes (frameSize - samplesLeft) negative; the
+// clamp `(u32) info->frameSamples < minFrameSize` then reads it as a huge
+// unsigned and osAiSetNextBuffer gets a ~4GB length. Saturate at one frame like
+// the hardware and the formula stays in [112, 848]. This is the virtual queue,
+// not the real ring depth, so pacing is decoupled from AICA's drain.
 u32 osAiGetLength(void) {
     u32 oneFrame;
 
@@ -240,16 +231,14 @@ u32 osAiGetLength(void) {
 // One retrace of the audio manager, standing in for the N64 audio thread's
 // OS_SC_RETRACE_MSG wakeup. Runs on the KOS audio thread below.
 //
-// Pacing (unchanged from the old main-thread version): drain one game frame of
-// the virtual queue, then top it back up to a target depth by synthesizing
-// more, bounded so a bad state can't spin forever. am_audio_frame_pc() feeds
-// osAiSetNextBuffer, which also fills the output rings as a side effect.
+// Pacing: drain one game frame of the virtual queue, then synthesize back up to
+// a target depth, bounded against a spin. am_audio_frame_pc() feeds
+// osAiSetNextBuffer, which fills the output rings as a side effect.
 //
-// am_audio_frame_pc() touches the game's sound state, which the game thread
-// also mutates from audiosfx.c under osSetIntMask(). Hold the same lock across
-// it (pc_audio_lock/unlock, dreamcast/reimpl.c) so the two can't collide. The
-// stream poll is outside the lock: the rings are only ever touched from this
-// thread, so they need no cross-thread guard.
+// am_audio_frame_pc() touches the game's sound state, which audiosfx.c also
+// mutates under osSetIntMask(). Hold the same lock across it (pc_audio_lock,
+// reimpl.c). The stream poll stays outside the lock: the rings are only touched
+// from this thread.
 #define DC_AUDIO_TARGET_FRAMES 3 // ~100ms of buffered audio
 #define DC_AUDIO_MAX_TICKS 6     // don't spin forever if something goes wrong
 
@@ -267,7 +256,7 @@ static void pc_audio_tick(void) {
 
     pc_audio_lock();
 
-    // Synthetic DAC drain: retire one game frame of queued audio.
+    // Retire one game frame of queued audio.
     drained = frameSize * DC_AUDIO_BYTES_PER_SAMPLE;
     sQueued = (sQueued > drained) ? sQueued - drained : 0;
 
@@ -288,20 +277,16 @@ static void pc_audio_tick(void) {
 // ---------------------------------------------------------------------------
 // Audio thread
 //
-// The whole reason this exists: on Dreamcast everything else runs on one
-// thread, and a menu->game switch is a single blocking level load (gzip inflate
-// + asset DMA) that returns to the main loop only when it is done — sometimes
-// seconds later. While it blocks, nothing pumps audio, the AICA rings drain
-// their ~0.74s and the DAC starves: the glitch/stutter on every transition.
+// Everything else runs on one thread, and a menu->game switch is a single
+// blocking level load (gzip inflate + asset DMA) that can take seconds. While
+// it blocks, nothing pumps audio: the AICA rings drain their ~0.74s and the DAC
+// starves. So audio runs on its own KOS thread, woken by the vblank interrupt
+// handler (fires from hardware regardless of the main thread), and preemptive
+// KOS keeps it scheduled through the load. Same model as the N64 and the OoT DC
+// port.
 //
-// So audio moves off the main thread onto its own KOS thread, woken by the
-// vblank interrupt handler (which fires from hardware regardless of what the
-// main thread is doing). Preemptive KOS keeps this thread scheduled straight
-// through the load, so audio never stops. This is exactly the N64's model —
-// audio ran on its own thread there too — and mirrors the OoT DC port.
-//
-// DKR's manager expects a 30 Hz retrace (frameSize == one 1/30 s frame), so tick
-// the body every other 60 Hz vblank.
+// The manager expects a 30 Hz retrace (frameSize == 1/30 s), so tick every
+// other 60 Hz vblank.
 // ---------------------------------------------------------------------------
 
 static volatile u64 sVblTicker = 0;
@@ -337,8 +322,8 @@ static void *dc_audio_thread(void *arg) {
 }
 
 // Start the vblank-driven audio thread. Called once from main() after
-// dc_audio_init(). No-op safe if audio failed to initialise — the thread just
-// paces a silent manager.
+// dc_audio_init(). Safe if audio failed to init: the thread paces a silent
+// manager.
 void dc_audio_start_thread(void) {
     kthread_attr_t attr;
 

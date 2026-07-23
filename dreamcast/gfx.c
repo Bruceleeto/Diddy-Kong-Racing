@@ -43,15 +43,14 @@ static float sScaleY = 2.0f;
 // Current render state.
 static int sBoundTex;      // 1-based index into sTextures, 0 = untextured
 static int sFilterPoint;   // 1 = nearest, 0 = bilinear
-// texenv "blend toward constant" (the textured 2D path — font glyphs, logos, and
-// the menu highlight). The RDP combiner is linear in the texel:
+// texenv "blend toward constant" (textured 2D: font glyphs, logos, menu
+// highlight). The RDP combiner is linear in the texel:
 //     result = unlit + texel * (lit - unlit)
-// where `unlit`/`lit` are the combiner evaluated at texel 0 and 1. The interpreter
-// hands us `unlit` per-vertex (the vertex colour) and `lit` as this constant. The
-// PVR computes texel*argb + oargb (offset colour, added post-modulate), so this
-// maps EXACTLY: argb = lit - unlit, oargb = unlit. No approximation — and the
-// selection highlight, which lives in the per-vertex `unlit`, survives because it
-// rides in oargb.
+// with `unlit`/`lit` the combiner at texel 0 and 1. The interpreter gives `unlit`
+// per-vertex (the vertex colour) and `lit` as this constant. The PVR computes
+// texel*argb + oargb (offset colour, post-modulate), so argb = lit - unlit,
+// oargb = unlit. The selection highlight lives in per-vertex `unlit`, riding in
+// oargb.
 static int sTexEnvBlend;
 static unsigned char sBlendColor[4]; // `lit`
 static int sDepthTest = 1;
@@ -73,20 +72,18 @@ static int sScisDirtyOp = 1;
 static pvr_poly_hdr_t sHdr __attribute__((aligned(32)));
 
 // Punch-through recording. Headers, vertices and user-clip commands are all one
-// 32-byte TA word, so a batch is recorded as the exact word stream it would have
-// been submitted as, and replayed verbatim. 4096 words is ~30x the ~130 a frame of
+// 32-byte TA word, so a batch is recorded as the word stream it would have been
+// submitted as and replayed verbatim. 4096 words is ~30x the ~130 a frame of
 // trees needs; on overflow the surplus is dropped and reported once.
-// PT routing is off. It cuts the trees out correctly — the alpha test fires and the
-// silhouette is right — but the PVR renders OP, then PT, then TR in hardware, and
-// this backend puts everything else in TR. So a PT tree jumps ahead of the whole
-// scene and anything TR draws early (the black fill quad, batch 1) lands on top of
-// it. Fixing that means classifying the lists properly (opaque -> OP, cutout -> PT,
-// translucent -> TR) the way MK64 does, which is a rewrite of this file's central
-// "ONE list" decision, not a switch. The recording path below is kept because it is
-// correct and that rewrite would need it.
 //
-// Until then: see compile_header_for(), which keeps alpha-tested batches out of the
-// W-buffer instead.
+// PT routing is off. It cuts the trees out correctly, but the PVR renders OP,
+// then PT, then TR, and this backend puts everything else in TR: a PT tree jumps
+// ahead of the whole scene and anything TR drew early (the black fill quad,
+// batch 1) lands on top of it. The fix is classifying the lists properly
+// (opaque -> OP, cutout -> PT, translucent -> TR), a rewrite of this file's "ONE
+// list" decision. The recording path is kept because that rewrite needs it.
+// Until then see compile_header_for(), which keeps alpha-tested batches out of
+// the W-buffer instead.
 #define USE_PT_LIST 1
 
 #define PT_MAX_WORDS 4096
@@ -95,23 +92,22 @@ static unsigned char sPtBuf[PT_MAX_WORDS][32] __attribute__((aligned(32)));
 static int sPtCount;
 static int sPtOverflow;
 
-// The backdrop: the screen fills and the skybox. Both are drawn with depth compare
-// ALWAYS — the fills are the game's 2D clear, and DKR clears G_ZBUFFER for the sky
-// so it can never be depth-rejected. In TR they render *after* the PT list and paint
-// straight over the alpha-tested sprites, which is exactly what makes a tree show
-// sky through it. They belong in OP, which the PVR renders first. Recorded the same
-// way PT is; the sky is a few hundred polys at most.
+// The backdrop: screen fills and skybox. Both draw with depth compare ALWAYS
+// (the fills are the game's 2D clear, and DKR clears G_ZBUFFER for the sky). In
+// TR they render after the PT list and paint over the alpha-tested sprites,
+// making a tree show sky through it. They belong in OP, which the PVR renders
+// first. Recorded like PT; the sky is a few hundred polys at most.
 #define OP_MAX_WORDS 4096
 
 static unsigned char sOpBuf[OP_MAX_WORDS][32] __attribute__((aligned(32)));
 static int sOpCount;
 static int sOpOverflow;
 
-// VRAM freed while a scene is open. A recorded header holds a raw texture pointer
-// and is not replayed until frame end, so freeing mid-frame lets the next upload's
-// pvr_mem_malloc hand the same block straight back and the recording ends up drawing
-// whatever landed there. The frees are held until after the replay instead. This
-// only matters for the recorded lists; TR is submitted as it goes.
+// VRAM freed while a scene is open. A recorded header holds a raw texture
+// pointer and isn't replayed until frame end, so freeing mid-frame lets the next
+// pvr_mem_malloc hand the same block back and the recording draws whatever
+// landed there. Frees are held until after the replay. Only matters for the
+// recorded lists; TR is submitted as it goes.
 #define PENDING_FREE_MAX 512
 
 static pvr_ptr_t sPendingFree[PENDING_FREE_MAX];
@@ -647,22 +643,22 @@ static void compile_header_for(int list, pvr_poly_hdr_t *out) {
 
     cxt.gen.culling = PVR_CULLING_NONE; // the game already back-face culls in SW
     cxt.gen.clip_mode = sScisEnable ? PVR_USERCLIP_INSIDE : PVR_USERCLIP_DISABLE;
-    // Offset colour (specular) always on: it carries the combiner's additive term
-    // in the texenv-blend path (oargb, added post-modulate). Non-blend draws set
-    // oargb = 0, so the add is a free no-op there.
+    // Offset colour (specular) always on: carries the combiner's additive term in
+    // the texenv-blend path (oargb, post-modulate). Non-blend draws set oargb = 0,
+    // so the add is a no-op.
     cxt.gen.specular = PVR_SPECULAR_ENABLE;
     cxt.depth.comparison = sDepthTest ? PVR_DEPTHCMP_GEQUAL : PVR_DEPTHCMP_ALWAYS;
 
-    // An alpha-tested batch in the TR list cannot discard its transparent texels —
-    // only the PT list can — so it must not write depth either. Otherwise those
-    // texels blend away to nothing but still stamp the W-buffer, and everything
-    // drawn later and behind them is depth-rejected: a sprite-shaped hole showing
-    // whatever was in the framebuffer first. The RDP gets to have both because its
-    // alpha compare runs before the depth stage; here it is one or the other.
+    // An alpha-tested batch in TR can't discard its transparent texels (only PT
+    // can), so it must not write depth either. Otherwise those texels blend to
+    // nothing but still stamp the W-buffer, and everything later and behind them
+    // is depth-rejected: a sprite-shaped hole showing the old framebuffer. The RDP
+    // has both because its alpha compare runs before the depth stage; here it is
+    // one or the other.
     //
-    // The cost is real: these sprites no longer occlude anything drawn after them,
-    // so something passing behind a tree can show through it. That is the trade for
-    // not having the hole, and it is only settled by classifying the lists.
+    // Cost: these sprites no longer occlude anything drawn after them, so
+    // something passing behind a tree can show through it. Only fixed by
+    // classifying the lists.
     if (!USE_PT_LIST && sAlphaRef > 0.0f) {
         cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
     } else {
@@ -767,8 +763,8 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         }
     }
 
-    // Only the recorded lists reserve space up front, and clipping changes how many
-    // triangles there will be — so when it is active, count them for real first.
+    // Only the recorded lists reserve space up front, and clipping changes the
+    // triangle count, so count them first when it is active.
     // TR streams straight out and needs no count, which keeps the second pass off
     // the path that matters: a split-screen viewport is a misaligned rect covering
     // the whole scene. Fully-inside triangles short-circuit in clip_tri_to_scissor,
@@ -877,21 +873,20 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 }
 
 // ---------------------------------------------------------------------------
-// Blast streaming — the native path for static level geometry (see
-// handle_blast in main.c). The caller transforms vertices itself and streams
-// them here one at a time; this end owns the list routing, scissor, header
-// and store-queue mechanics so they stay consistent with gfx_draw_tris.
+// Blast streaming — the native path for static level geometry (see handle_blast
+// in main.c). The caller transforms and streams the vertices; this end owns list
+// routing, scissor, header and store-queue mechanics, consistent with
+// gfx_draw_tris.
 //
-// Only the plain TR streaming case is supported. Anything that would need the
-// recorded PT/OP lists, the texenv-blend colour split, or exact scissor
-// clipping makes begin() refuse, and the caller falls back to the emulated
-// path — correctness is never traded, only overhead.
+// Only plain TR streaming is supported. State needing the recorded PT/OP lists,
+// the texenv-blend colour split, or exact scissor clipping makes begin() refuse,
+// and the caller falls back to the emulated path.
 // ---------------------------------------------------------------------------
 
 /**
- * Whether the current state is one gfx_blast_begin would accept — everything
- * begin() checks is already settled before the caller transforms anything, so
- * asking first turns a doomed batch's wasted transform into a cheap compare.
+ * Whether the current state is one gfx_blast_begin would accept. Checked before
+ * the caller transforms anything, so a doomed batch costs a compare, not a
+ * wasted transform.
  */
 int gfx_blast_viable(void) {
     return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f) && sDepthTest && !sDepthOffset &&
@@ -926,8 +921,8 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY) 
         *uScale = 1.0f;
         *vScale = 1.0f;
     }
-    // The N64-pixels -> framebuffer scale, so the caller can emit vertices to
-    // the store queues itself without a cross-file call per vertex.
+    // N64-pixels -> framebuffer scale, so the caller emits vertices without a
+    // cross-file call per vertex.
     *scaleX = sScaleX;
     *scaleY = sScaleY;
     return 1;
