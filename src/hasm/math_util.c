@@ -17,6 +17,7 @@ u8 gIntDisFlag;
 s32 gCurrentRNGSeed = 0x5141564D; // Official Name: rngSeed ('QAVM')
 s32 gPrevRNGSeed = 0x5141564D;
 
+#ifndef TARGET_DC // 
 /* 1025 unsigned 16-bit values, 0-1024, quarter-turn (0-90 degree) sine lookup table. */
 u16 gSineTable[1025] = {
     0x0000, 0x0032, 0x0065, 0x0097, 0x00C9, 0x00FB, 0x012E, 0x0160, 0x0192, 0x01C4, 0x01F7, 0x0229, 0x025B, 0x028D, 0x02C0,
@@ -162,6 +163,7 @@ u16 gArcTanTable[1025] = {
     0x1F9E, 0x1FA4, 0x1FA9, 0x1FAE, 0x1FB3, 0x1FB8, 0x1FBD, 0x1FC3, 0x1FC8, 0x1FCD, 0x1FD2, 0x1FD7, 0x1FDC, 0x1FE1, 0x1FE6,
     0x1FEC, 0x1FF1, 0x1FF6, 0x1FFB, 0x2000,
 };
+#endif // !TARGET_DC
 
 /******************************/
 
@@ -780,6 +782,7 @@ void mtxf_from_scale(MtxF *mtx, f32 scaleX, f32 scaleY, f32 scaleZ) {
     (*mtx)[3][3] = 1.0f;
 }
 
+#ifndef TARGET_DC
 // Blatantly stolen from SM64 :)
 static u16 atan2_lookup(f32 y, f32 x) {
     u16 ret;
@@ -800,8 +803,15 @@ static u16 atan2_lookup(f32 y, f32 x) {
     }
     return ret;
 }
+#endif
 
 s32 atan2s(s32 xDelta, s32 zDelta) {
+#ifdef TARGET_DC
+    // Angle from +z toward +x == atan2(x, z). shz_atan2f returns radians in
+    // (-PI, PI]; SHZ_FSCA_RAD_FACTOR (0x10000 / 2*PI) converts to brad. Cast
+    // through s32 so the negative-angle wrap is defined before the u16 fold.
+    return (u16) (s32) (shz_atan2f((f32) xDelta, (f32) zDelta) * SHZ_FSCA_RAD_FACTOR);
+#else
     u16 ret;
 
     if (xDelta == 0 && zDelta == 0) {
@@ -841,9 +851,15 @@ s32 atan2s(s32 xDelta, s32 zDelta) {
         }
     }
     return ret;
+#endif
 }
 
 u16 arctan2_f(f32 y, f32 x) {
+#ifdef TARGET_DC
+    // Same brad conversion as atan2s; the *255 scaling the N64 path uses only
+    // cancels inside the ratio, so it is dropped here.
+    return (u16) (s32) (shz_atan2f(y, x) * SHZ_FSCA_RAD_FACTOR);
+#else
     // Out-of-range f32->s32 conversion is implementation-defined: the VR4300
     // saturates to INT_MAX, x86 yields INT_MIN — and INT_MIN survives atan2s'
     // negation, breaking its |y| <= |x| lookup invariant. Saturate explicitly
@@ -853,6 +869,7 @@ u16 arctan2_f(f32 y, f32 x) {
     s32 sy = (fy >= 2147483520.0f) ? 0x7FFFFFFF : (fy <= -2147483520.0f) ? -0x7FFFFFFF : (s32) fy;
     s32 sx = (fx >= 2147483520.0f) ? 0x7FFFFFFF : (fx <= -2147483520.0f) ? -0x7FFFFFFF : (s32) fx;
     return atan2s(sy, sx);
+#endif
 }
 
 /**
@@ -946,6 +963,10 @@ void dmacopy_doubleword(void *src, void *dst, u32 end) {
  * Official Name: mathSinInterp
  */
 s32 sins_s16(s16 angle) {
+#ifdef TARGET_DC
+    // FSCA's 16-bit angle == DKR's binary angle; scale back to 16.16 fixed.
+    return (s32) (shz_sincosu16((u16) angle).sin * 65536.0f);
+#else
     u32 a0 = (u16) angle;
     s32 idx;
     u16 lo, hi;
@@ -965,6 +986,7 @@ s32 sins_s16(s16 angle) {
         v0 = -v0;
     }
     return v0;
+#endif
 }
 
 /**
@@ -978,14 +1000,22 @@ s32 coss_s16(s16 angle) {
  * Floating-point wrapper around sins_s16, normalized to [-1.0, 1.0].
  */
 f32 sins_f(s16 angle) {
+#ifdef TARGET_DC
+    return shz_sincosu16((u16) angle).sin;
+#else
     return (f32) sins_s16(angle) * (1.0f / 0x10000);
+#endif
 }
 
 /**
  * Floating-point wrapper around coss_s16, normalized to [-1.0, 1.0].
  */
 f32 coss_f(s16 angle) {
+#ifdef TARGET_DC
+    return shz_sincosu16((u16) angle).cos;
+#else
     return (f32) coss_s16(angle) * (1.0f / 0x10000);
+#endif
 }
 
 /**
@@ -993,6 +1023,9 @@ f32 coss_f(s16 angle) {
  * Official Name: mathSin
  */
 s32 sins_2(s16 angle) {
+#ifdef TARGET_DC
+    return (s32) (shz_sincosu16((u16) angle).sin * 65536.0f);
+#else
     u32 a0 = (u16) angle;
     s32 idx;
     s32 v0;
@@ -1008,6 +1041,7 @@ s32 sins_2(s16 angle) {
         v0 = -v0;
     }
     return v0;
+#endif
 }
 
 /**
