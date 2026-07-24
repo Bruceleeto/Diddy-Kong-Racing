@@ -24,6 +24,10 @@
 // A DC analog trigger past this (0..255) counts as a digital press.
 #define TRIG_THRESHOLD 64
 
+// Stick deflection (post-scale) below this counts as idle, letting the D-pad
+// take over that axis. Covers centering drift without eating real input.
+#define STICK_IDLE 8
+
 void input_host_read(unsigned short *button, signed char *stickX, signed char *stickY) {
     maple_device_t *cont;
     cont_state_t *st;
@@ -72,6 +76,17 @@ void input_host_read(unsigned short *button, signed char *stickX, signed char *s
     if (x > STICK_MAX) x = STICK_MAX;
     if (y < -STICK_MAX) y = -STICK_MAX;
     if (y > STICK_MAX) y = STICK_MAX;
+
+    // The game only reads the stick for steering/pitch, so the D-pad also
+    // synthesizes full stick deflection on any axis the stick leaves idle.
+    if (x > -STICK_IDLE && x < STICK_IDLE) {
+        if (st->buttons & CONT_DPAD_LEFT) x = -STICK_MAX;
+        if (st->buttons & CONT_DPAD_RIGHT) x = STICK_MAX;
+    }
+    if (y > -STICK_IDLE && y < STICK_IDLE) {
+        if (st->buttons & CONT_DPAD_UP) y = STICK_MAX;
+        if (st->buttons & CONT_DPAD_DOWN) y = -STICK_MAX;
+    }
 
     *button = buttons;
     *stickX = (signed char) x;
