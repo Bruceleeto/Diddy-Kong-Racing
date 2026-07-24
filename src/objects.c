@@ -789,6 +789,25 @@ void allocate_object_pools(void) {
                 PC_SWAP16_AT(&boost[n], spriteId, 4);  // spriteId, textureId
             }
         }
+
+        // ASSET_MISC_SHIELD_DATA: the RacerShieldGfx table read by
+        // render_racer_shield, indexed (vehicleID * 10) + racerIndex. Mixed
+        // s16/f32, so it cannot ride along with the flat f32 assets below.
+        // Left big-endian the shield sat ~3000 units above the kart at a
+        // nonsense scale, with a denormal turnSpeed collapsing the shear
+        // matrix: invisible, though shieldTimer still blocked hits.
+        {
+            RacerShieldGfx *shield =
+                (RacerShieldGfx *) &gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_SHIELD_DATA]];
+            s32 n;
+            _Static_assert(sizeof(RacerShieldGfx) == 0x10, "RacerShieldGfx layout drifted from N64");
+            _Static_assert(__builtin_offsetof(RacerShieldGfx, scale) == 8,
+                           "RacerShieldGfx layout drifted from N64");
+            for (n = 0; n < NUMBER_OF_PLAYER_VEHICLES * NUMBER_OF_CHARACTERS; n++) {
+                PC_SWAP16_AT(&shield[n], x_position, 8); // x/y/z_position, y_offset
+                PC_SWAP32_AT(&shield[n], scale, 8);      // scale, turnSpeed
+            }
+        }
     }
 #endif
     gAssetsMiscTableLength = 0;
