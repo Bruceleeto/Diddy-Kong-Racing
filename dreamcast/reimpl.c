@@ -74,6 +74,9 @@ static u8 *pc_load_file(const char *path, u32 *sizeOut) {
         fprintf(stderr, "ASSETS: cannot open %s (run from the repo root, and build the N64 assets first)\n", path);
         exit(1);
     }
+    // Make file reading faster
+    setvbuf(f, NULL, _IONBF, 0);
+
     fseek(f, 0, SEEK_END);
     size = ftell(f);
     fseek(f, 0, SEEK_SET);
