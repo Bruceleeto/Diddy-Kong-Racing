@@ -53,6 +53,12 @@ void mtxf_mul(MtxF *mat1, MtxF *mat2, MtxF *output);
 void mtxf_to_mtx(MtxF *mf, Mtx *m);
 void vec3s_reflect(Vec3s *vec, Vec3s *n);
 void mtxs_transform_dir(MtxS *mi, Vec3s *vec);
+#ifdef TARGET_DC
+void xmtrx_init_transform(ObjectTransform* trans);
+void xmtrx_apply_transform(ObjectTransform* trans);
+void xmtrx_init_inverse_transform(ObjectTransform *trans);
+void xmtrx_apply_inverse_transform(ObjectTransform* trans);
+#endif
 void mtxf_from_transform(MtxF *mtx, ObjectTransform *trans);
 void mtxf_scale_y(MtxF *input, f32 scale);
 void mtxf_translate_y(MtxF *input, f32 offset);

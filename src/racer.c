@@ -3710,7 +3710,7 @@ void func_8004CC20(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Rac
     s32 steerAngle;
     f32 temp4;
     f32 var_f0;
-    f32 mtx[4][4];
+    alignas(8) f32 mtx[4][4];
     Object *obj;
     f32 var_f2;
     s8 objectMoved;

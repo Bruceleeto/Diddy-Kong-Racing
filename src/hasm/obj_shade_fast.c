@@ -10,6 +10,10 @@
 #include "textures_sprites.h"
 #include "types.h"
 
+#ifdef TARGET_DC
+#   include <sh4zam/shz_sh4zam.h>
+#endif
+
 /**
  * Shade an object's vertices from its shadow light direction, without
  * rotating the light into object space first (the direction is used as-is).
@@ -19,32 +23,62 @@
  * only consumed if the batch is environment-mapped.
  */
 void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
-    s32 shade;
-    s32 base;
     s16 normIdx;
     s16 i;
     s16 j;
-    s32 dirX, dirY, dirZ;
     Vertex *vertices;
     Vec3s *normals;
     ShadeProperties *shading;
+#ifdef TARGET_DC
+    f32 dirXf, dirYf, dirZf;
+    f32 baseF;
+    f32 scale;
+#else
+    s32 shade;
+    s32 base;
+    s32 dirX, dirY, dirZ;
+#endif
 
     shading = obj->shading;
     if (shading == NULL) {
         return;
     }
 
+#ifdef TARGET_DC
+    dirXf = (f32) shading->shadowDirX;
+    dirYf = (f32) shading->shadowDirY;
+    dirZf = (f32) shading->shadowDirZ;
+    baseF = shading->unk0 * intensity * 160.0f;
+    scale = baseF / 134217728.0f; /* 2^27 == 2^(11+16), combining the >>11 and >>16 from the original chain */
+#else
     dirX = shading->shadowDirX;
     dirY = shading->shadowDirY;
     dirZ = shading->shadowDirZ;
+    base = shading->unk0 * intensity * 160.0f;
+#endif
     vertices = obj->curVertData;
     normals = model->normals;
     normIdx = 0;
-    base = shading->unk0 * intensity * 160.0f;
 
     for (i = 0; i < model->numberOfBatches; i++) {
         if (model->batches[i].miscData != BATCH_VTX_COL) {
             for (j = model->batches[i].verticesOffset; j < model->batches[i + 1].verticesOffset; j++) {
+#ifdef TARGET_DC
+                f32 dot = shz_dot6f((f32) normals[normIdx].x, (f32) normals[normIdx].y, (f32) normals[normIdx].z,
+                                    dirXf, dirYf, dirZf);
+                f32 shadeF;
+                if (dot > 0.0f) {
+                    shadeF = dot * scale + baseF;
+                    if (shadeF > 255.0f) {
+                        shadeF = 255.0f;
+                    }
+                } else {
+                    shadeF = baseF;
+                }
+                vertices[j].r = (u8) shadeF;
+                vertices[j].g = (u8) shadeF;
+                vertices[j].b = (u8) shadeF;
+#else
                 shade = (normals[normIdx].x * dirX + normals[normIdx].y * dirY + normals[normIdx].z * dirZ) >> 11;
                 if (shade > 0) {
                     shade = ((shade * base) >> 16) + base;
@@ -57,6 +91,7 @@ void obj_shade_fast(ObjectModel *model, Object *obj, f32 intensity) {
                 vertices[j].r = shade;
                 vertices[j].g = shade;
                 vertices[j].b = shade;
+#endif
                 vertices[j].a = 255;
                 normIdx++;
             }
@@ -80,20 +115,42 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 arg
     ShadeProperties *shading;
     Vertex *vertices;
     Vec3s *normals;
-    s32 dirX, dirY, dirZ;
-    s32 ambientFactor;
-    s32 diffuseFactor;
     f32 colourBase;
-    s32 shade;
     s16 normIdx;
     s16 i;
     s16 j;
+#ifdef TARGET_DC
+    f32 ambientFactorF;
+    f32 diffuseScale;
+#else
+    s32 dirX, dirY, dirZ;
+    s32 ambientFactor;
+    s32 diffuseFactor;
+    s32 shade;
+#endif
 
     shading = obj->shading;
     if (shading == NULL) {
         return;
     }
+#ifdef TARGET_DC
+    if (arg2) {
+        shz_xmtrx_load_4x4((const shz_mat4x4_t*)get_projection_matrix_f32());
+        shz_xmtrx_apply_rotation_zxy(-obj->trans.rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
+                                     -obj->trans.rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
+                                     -obj->trans.rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
+    } else {
+        shz_xmtrx_init_rotation_zxy(-obj->trans.rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
+                                    -obj->trans.rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
+                                    -obj->trans.rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
+    }
+    shz_xmtrx_apply_scale(4.0f, 4.0f, 4.0f);
 
+    shz_vec3_deref(&direction) =
+        shz_xmtrx_transform_vec3(shz_vec3_init(shading->shadowDirX,
+                                               shading->shadowDirY,
+                                               shading->shadowDirZ));
+#else
     direction.x = shading->shadowDirX << 2;
     direction.y = shading->shadowDirY << 2;
     direction.z = shading->shadowDirZ << 2;
@@ -110,13 +167,18 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 arg
     trans.z_position = 0.0f;
     mtxf_from_inverse_transform(&mtx, &trans);
     mtxf_transform_dir(&mtx, &direction, &direction);
-
+#endif
     colourBase = shading->unk0 * intensity * 255.0f;
+#ifdef TARGET_DC
+    ambientFactorF = shading->ambient * colourBase;
+    diffuseScale   = (shading->diffuse * colourBase) / (8192.0f * 32768.0f);
+#else
     ambientFactor = shading->ambient * colourBase;
     diffuseFactor = shading->diffuse * colourBase;
     dirX = direction.x;
     dirY = direction.y;
     dirZ = direction.z;
+#endif
     vertices = obj->curVertData;
     normals = model->normals;
     normIdx = 0;
@@ -124,6 +186,22 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 arg
     for (i = 0; i < model->numberOfBatches; i++) {
         if (model->batches[i].miscData != BATCH_VTX_COL) {
             for (j = model->batches[i].verticesOffset; j < model->batches[i + 1].verticesOffset; j++) {
+#ifdef TARGET_DC
+                f32 dot = shz_dot6f((f32) normals[normIdx].x, (f32) normals[normIdx].y, (f32) normals[normIdx].z,
+                                    direction.x, direction.y, direction.z);
+                f32 shadeF;
+                if (dot > 0.0f) {
+                    shadeF = dot * diffuseScale + ambientFactorF;
+                    if (shadeF > 255.0f) {
+                        shadeF = 255.0f;
+                    }
+                } else {
+                    shadeF = ambientFactorF;
+                }
+                vertices[j].r = (u8) shadeF;
+                vertices[j].g = (u8) shadeF;
+                vertices[j].b = (u8) shadeF;
+#else
                 shade = (normals[normIdx].x * dirX + normals[normIdx].y * dirY + normals[normIdx].z * dirZ) >> 7;
                 if (shade > 0) {
                     shade = ((shade * diffuseFactor) >> 21) + ambientFactor;
@@ -136,6 +214,7 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 arg
                 vertices[j].r = shade;
                 vertices[j].g = shade;
                 vertices[j].b = shade;
+#endif
                 vertices[j].a = 255;
                 normIdx++;
             }

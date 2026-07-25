@@ -62,16 +62,17 @@ static struct {
 
     alignas(32) float tableF[8][2][8];
     alignas(32) s16 table[512]; // ADPCM codebook, also POLEF coefficients
-
 } rspa;
 
 // Identity "physical" addresses: osVirtualToPhysical is identity on the host, so a
 // DMA address in the command list is just a host pointer.
-static void *rdram(u32 addr) {
+SHZ_FORCE_INLINE
+void *rdram(u32 addr) {
     return (void *) (unsigned long) addr;
 }
 
-static s16 clamp16(s32 v) {
+SHZ_FORCE_INLINE
+s16 clamp16(s32 v) {
     if (v > 32767) {
         return 32767;
     }
@@ -81,7 +82,8 @@ static s16 clamp16(s32 v) {
     return (s16) v;
 }
 
-static s16 clamp16f(float v) {
+SHZ_FORCE_INLINE
+s16 clamp16f(float v) {
     if (v < -32768.0f) {
         return -32768;
     }
@@ -89,6 +91,21 @@ static s16 clamp16f(float v) {
         return 32767;
     }
     return (s16) v;
+}
+
+SHZ_FORCE_INLINE
+float fclamp16f(float v, s16* res) {
+    float f;
+
+    if (v < -32768.0f)
+        f = -32768.0f;
+    else if (v > 32767.0f)
+        f = 32767.0f;
+    else
+        f = v;
+
+    *res = (s16)f;
+    return f;
 }
 
 // DMEM is byte-addressed but every audio buffer in it is s16-aligned.
@@ -251,55 +268,18 @@ static void op_mix(u32 w0, u32 w1) {
     }
 }
 
-// A_INTERLEAVE: weave two mono buffers into stereo at `out`. Writes 2*count bytes
-// (alSavePull sets count to the MONO byte count, then re-sets it to count<<2 before
-// the SAVEBUFF that follows).
-SHZ_NO_UNROLL_LOOPS
+// We no longer interleave shit, cuz the AICA would just
+// make us deinterleave it.
 static void op_interleave(u32 w1) {
     u16 rightAddr = w1 & 0xFFFF;
-    const s16 *r = dmem16(rightAddr);
-    SHZ_PREFETCH(r);
-
     u16 leftAddr = (w1 >> 16) & 0xFFFF;
+    const s16 *r = dmem16(rightAddr);
     const s16 *l = dmem16(leftAddr);
-    u32 *dst = (u32 *) dmem16(rspa.out);
-    s32 n = rspa.count >> 1; // samples per channel
-    s32 k;
+    s16 *dst = dmem16(rspa.out);
+    s32 n = rspa.count >> 1; // samples per channel, this chunk only
 
-    for (k = 0; k < n; k += 8) {
-        SHZ_PREFETCH(l);
-        u32 lr0 = (u32) (u16) r[0] << 16;
-        u32 lr1 = (u32) (u16) r[1] << 16;
-        u32 lr2 = (u32) (u16) r[2] << 16;
-        u32 lr3 = (u32) (u16) r[3] << 16;
-        u32 lr4 = (u32) (u16) r[4] << 16;
-        u32 lr5 = (u32) (u16) r[5] << 16;
-        u32 lr6 = (u32) (u16) r[6] << 16;
-        u32 lr7 = (u32) (u16) r[7] << 16;
-        r += 8;
-
-        SHZ_PREFETCH(dst);
-        lr0 |= (u16) l[0];
-        lr1 |= (u16) l[1];
-        lr2 |= (u16) l[2];
-        lr3 |= (u16) l[3];
-        lr4 |= (u16) l[4];
-        lr5 |= (u16) l[5];
-        lr6 |= (u16) l[6];
-        lr7 |= (u16) l[7];
-        l += 8;
-
-        SHZ_PREFETCH(r);
-        dst[0] = lr0;
-        dst[1] = lr1;
-        dst[2] = lr2;
-        dst[3] = lr3;
-        dst[4] = lr4;
-        dst[5] = lr5;
-        dst[6] = lr6;
-        dst[7] = lr7;
-        dst += 8;
-    }
+    shz_memcpy(dst, l, n * sizeof(s16));
+    shz_memcpy(dst + n, r, n * sizeof(s16));
 }
 
 alignas(32) static const float sResampleTable[64][4] = {
@@ -720,7 +700,8 @@ static void op_adpcm(u32 w0, u32 w1) {
 //   [6..7] rate L (16.16)      [8..9] rate R
 //   [10]   dry                 [11]   wet
 // ---------------------------------------------------------------------------
-static void ramp_update(s32 *volAccu, const s32 *target, const s32 *rate) {
+SHZ_FORCE_INLINE
+void ramp_update(s32 *volAccu, const s32 *target, const s32 *rate) {
     s32 i;
 
     for (i = 0; i < 2; i++) {
@@ -745,7 +726,6 @@ static void op_envmixer(u32 w0, u32 w1) {
     s32 n = rspa.count >> 1;
     s32 volAccu[2];
     s32 target[2], rate[2], dry, wet;
-    s32 k;
 
     if (flags & A_INIT) {
         volAccu[0] = (s32) rspa.vol[0] << 16;
@@ -767,8 +747,72 @@ static void op_envmixer(u32 w0, u32 w1) {
         wet = state[11];
     }
 
-    if (flags & A_AUX) {
-        for (k = 0; k < n; k++) {
+    SHZ_PREFETCH(src);
+
+    if (rate[0] == 0 && rate[1] == 0) {
+        const s32 vl = volAccu[0] >> 16;
+        const s32 vr = volAccu[1] >> 16;
+
+        if (flags & A_AUX) {
+#pragma GCC unroll 1
+            for (int k = 0; k < (n >> 1); ++k) {
+                SHZ_PREFETCH(dryL);
+                s32 s1 = *src++;
+                s32 s2 = *src++;
+
+                s32 l1 = (s1 * vl) >> 15;
+                s32 l2 = (s2 * vl) >> 15;
+
+                s32 r1 = (s1 * vr) >> 15;
+                s32 r2 = (s2 * vr) >> 15;
+
+                SHZ_PREFETCH(dryR);
+                dryL[0] = clamp16(dryL[0] + ((l1 * dry) >> 15));
+                dryL[1] = clamp16(dryL[1] + ((l2 * dry) >> 15));
+                dryL += 2;
+
+                SHZ_PREFETCH(wetL);
+                dryR[0] = clamp16(dryR[0] + ((r1 * dry) >> 15));
+                dryR[1] = clamp16(dryR[1] + ((r2 * dry) >> 15));
+                dryR += 2;
+
+                SHZ_PREFETCH(wetR);
+                wetL[0] = clamp16(wetL[0] + ((l1 * wet) >> 15));
+                wetL[1] = clamp16(wetL[1] + ((l2 * wet) >> 15));
+                wetL += 2;
+
+                SHZ_PREFETCH(src);
+                wetR[0] = clamp16(wetR[0] + ((r1 * wet) >> 15));
+                wetR[1] = clamp16(wetR[1] + ((r2 * wet) >> 15));
+                wetR += 2;
+            }
+        } else {
+#pragma GCC unroll 1
+            for (int k = 0; k < (n >> 1); ++k) {
+                SHZ_PREFETCH(dryL);
+                s32 s1 = *src++;
+                s32 s2 = *src++;
+
+                s32 l1 = (s1 * vl) >> 15;
+                s32 l2 = (s2 * vl) >> 15;
+
+                s32 r1 = (s1 * vr) >> 15;
+                s32 r2 = (s2 * vr) >> 15;
+
+                SHZ_PREFETCH(dryR);
+                dryL[0] = clamp16(dryL[0] + ((l1 * dry) >> 15));
+                dryL[1] = clamp16(dryL[1] + ((l2 * dry) >> 15));
+                dryL += 2;
+
+                SHZ_PREFETCH(src);
+                dryR[0] = clamp16(dryR[0] + ((r1 * dry) >> 15));
+                dryR[1] = clamp16(dryR[1] + ((r2 * dry) >> 15));
+                dryR += 2;
+            }
+        }
+    } else if (flags & A_AUX) {
+#pragma GCC unroll 2
+        for (int k = 0; k < n; k++) {
             s32 s = src[k];
             s32 vl = volAccu[0] >> 16;
             s32 vr = volAccu[1] >> 16;
@@ -783,7 +827,8 @@ static void op_envmixer(u32 w0, u32 w1) {
             ramp_update(volAccu, target, rate);
         }
     } else {
-        for (k = 0; k < n; k++) {
+#pragma GCC unroll 2
+        for (int k = 0; k < n; k++) {
             s32 s = src[k];
             s32 vl = volAccu[0] >> 16;
             s32 vr = volAccu[1] >> 16;
@@ -820,31 +865,61 @@ static void op_envmixer(u32 w0, u32 w1) {
 // is exactly the one-pole recursion y[n] = gain·x[n] + fc·y[n-1]. Implement that
 // directly. Everything is Q14 (SCALE = 16384 in drvrnew.c; fgain = SCALE - fc, so
 // DC gain is unity).
+SHZ_COLD
 static void op_polef(u32 w0, u32 w1) {
-    u8 flags = (w0 >> 16) & 0xFF;
-    s16 gain = (s16) (w0 & 0xFFFF);
-    s16 *state = rdram(w1);
     s16 *src = dmem16(rspa.in);
-    s16 *dst = dmem16(rspa.out);
-    s32 fc = rspa.table[8];
-    s32 n = rspa.count >> 1;
-    s32 y1;
-    s32 k;
+    SHZ_PREFETCH(src);
 
-    if (flags & A_INIT) {
-        y1 = 0;
-    } else {
-        y1 = state[0];
+    s16*    dst = dmem16(rspa.out);
+    s16*  state = rdram(w1);
+    u8    flags = (w0 >> 16) & 0xFF;
+    float  gain = (s16) (w0 & 0xFFFF);
+    float    fc = rspa.table[8];
+    int       n = rspa.count >> 3;
+    float    y0 = (flags & A_INIT)? 0.0f : state[0];
+
+    const float      A  = gain * (1.0f / 16384.0f);
+    const float      B  =   fc * (1.0f / 16384.0f);
+    const shz_vec4_t BV = shz_vec4_init(B, (B * B   ), (B * B * B), (B * B * B * B));
+    const shz_vec4_t AV = shz_vec4_init(A, (A * BV.x), (A * BV.y ), (A * BV.z     ));
+
+    shz_xmtrx_init_lower_triangular(AV, AV.xyz, AV.xy, AV.x);
+
+    for(int k = 0; k < n; ++k) {
+        SHZ_PREFETCH(dst);
+
+        const shz_vec4_t in   = shz_vec4_init(src[0], src[1], src[2], src[3]);
+        const shz_vec4_t part = shz_xmtrx_transform_vec4(in);
+              shz_vec4_t out  = shz_vec4_add(part, shz_vec4_scale(BV, y0));
+
+        SHZ_PREFETCH(src += 4);
+
+        if(out.x < -32768.0f || out.x > 32767.0f) goto y1;
+        *dst++ = (s16)out.x;
+
+        if(out.y < -32768.0f || out.y > 32767.0f) goto y2;
+        *dst++ = (s16)out.y;
+
+        if(out.z < -32768.0f || out.z > 32767.0f) goto y3;
+        *dst++ = (s16)out.z;
+
+        if(out.w < -32768.0f || out.w > 32767.0f) goto y4;
+        *dst++ = (s16)out.w;
+
+        y0 = out.w;
+        continue;
+
+    y1: out.x = fclamp16f((in.x * gain + fc *    y0) * (1.0f / 16384.0f), dst++);
+    y2: out.y = fclamp16f((in.y * gain + fc * out.x) * (1.0f / 16384.0f), dst++);
+    y3: out.z = fclamp16f((in.z * gain + fc * out.y) * (1.0f / 16384.0f), dst++);
+    y4: out.w = fclamp16f((in.w * gain + fc * out.z) * (1.0f / 16384.0f), dst++);
+        y0    = out.w;
     }
 
-    for (k = 0; k < n; k++) {
-        y1 = clamp16(((s32) src[k] * (s32) gain + fc * y1) >> 14);
-        dst[k] = (s16) y1;
-    }
-
-    state[0] = (s16) y1;
+    state[0] = (s16)y0;
     state[1] = 0;
 }
+
 
 // ---------------------------------------------------------------------------
 // The interpreter

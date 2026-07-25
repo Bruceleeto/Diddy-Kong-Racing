@@ -41,6 +41,10 @@
 #include "weather.h"
 #include "pc_swap.h"
 
+#ifdef TARGET_DC
+#   include <sh4zam/shz_sh4zam.h>
+#endif
+
 #define OBJECT_MAP_SIZE 0x3000
 #define MAX_CHECKPOINTS 60
 #define OBJECT_POOL_SIZE 0x15800
@@ -59,6 +63,7 @@
 #define SET_SHIFT_AND_MASK(varShift, varMask, x) \
     varShift = x;                                \
     varMask = 0xFFFF >> x;
+
 
 /************ .data ************/
 
@@ -5421,7 +5426,6 @@ void obj_collision_transform(Object *obj) {
 #ifdef AVOID_UB
     curMtx = &colData->matrices[colData->mtxFlip];
 #else
-
     curMtx = (MtxF *) &colData->_matrices[colData->mtxFlip << 1];
 #endif
     trans.rotation.y_rotation = -obj->trans.rotation.y_rotation;
@@ -5431,6 +5435,12 @@ void obj_collision_transform(Object *obj) {
     trans.x_position = -obj->trans.x_position;
     trans.y_position = -obj->trans.y_position;
     trans.z_position = -obj->trans.z_position;
+#ifdef TARGET_DC
+    inverseScale = shz_invf_fsrra(obj->trans.scale);
+    shz_xmtrx_init_scale(inverseScale, inverseScale, inverseScale);
+    xmtrx_apply_inverse_transform(&trans);
+    shz_xmtrx_store_4x4((shz_mat4x4_t*)curMtx);
+#else
     mtxf_from_inverse_transform(curMtx, &trans);
     inverseScale = 1.0 / obj->trans.scale;
     i = 0;
@@ -5444,10 +5454,11 @@ void obj_collision_transform(Object *obj) {
     inverseMtx[2][2] = inverseScale;
     inverseMtx[3][3] = 1.0f;
     mtxf_mul(curMtx, &inverseMtx, curMtx);
+#endif
+    trans.scale = obj->trans.scale;
     trans.rotation.y_rotation = obj->trans.rotation.y_rotation;
     trans.rotation.x_rotation = obj->trans.rotation.x_rotation;
     trans.rotation.z_rotation = obj->trans.rotation.z_rotation;
-    trans.scale = 1.0 / inverseScale;
     trans.x_position = obj->trans.x_position;
     trans.y_position = obj->trans.y_position;
     trans.z_position = obj->trans.z_position;
@@ -5541,22 +5552,41 @@ s32 collision_objectmodel(Object *obj, s32 arg1, s32 *arg2, Vec3f *arg3, f32 *ar
         spDC = (MtxF *) &collision->_matrices[((sp158->collisionData->mtxFlip + 1) & 1) << 1];
 #endif
 
+#ifdef TARGET_DC
+        shz_xmtrx_load_4x4((const shz_mat4x4_t*)*spDC);
+#endif
+
         sp14C = func_8001790C(obj, sp158);
         if (sp14C != NULL) {
             for (i = 0, j = 0; j < arg1; j++, i += 3) {
                 sp13C[j] = sp14C->unk0C[i + 0];
                 sp12C[j] = sp14C->unk0C[i + 1];
                 sp11C[j] = sp14C->unk0C[i + 2];
+#ifdef TARGET_DC
+                shz_vec3_t out = shz_xmtrx_transform_point3(shz_vec3_deref(&arg4[i]));
+                sp100[j] = out.x; spF0[j]  = out.y; spE0[j]  = out.z;
+#else
                 mtxf_transform_point(*spDC, arg4[i], arg4[i + 1], arg4[i + 2], &sp100[j], &spF0[j], &spE0[j]);
+#endif
             }
         } else {
             for (i = 0, j = 0; j < arg1; j++, i++) {
+#ifdef TARGET_DC
+                shz_vec3_t out = shz_xmtrx_transform_point3(shz_vec3_deref(&arg3[i]));
+                sp13C[j] = out.x; sp12C[j] = out.y; sp11C[j] = out.z;
+#else
                 mtxf_transform_point(*spDC, arg3[i].x, arg3[i].y, arg3[i].z, &sp13C[j], &sp12C[j], &sp11C[j]);
+#endif
             }
         }
 
         for (i = 0, j = 0; j < arg1; j++, i += 3) {
+#ifdef TARGET_DC
+            shz_vec3_t out = shz_xmtrx_transform_point3(shz_vec3_deref(&arg4[i]));
+            sp100[j] = out.x; spF0[j]  = out.y; spE0[j]  = out.z;
+#else
             mtxf_transform_point(*spDC, arg4[i], arg4[i + 1], arg4[i + 2], &sp100[j], &spF0[j], &spE0[j]);
+#endif
         }
 
         arg2[0] = 0;
@@ -5583,6 +5613,10 @@ s32 collision_objectmodel(Object *obj, s32 arg1, s32 *arg2, Vec3f *arg3, f32 *ar
         // @fake
         if (sp158) {}
 
+#ifdef TARGET_DC
+        shz_xmtrx_load_4x4((const shz_mat4x4_t*)*spDC);
+#endif
+
         sp16C = 1;
         for (i = 0, j = 0; j < arg1; j++, i += 3, sp16C <<= 1) {
             if (sp14C != NULL) {
@@ -5591,7 +5625,11 @@ s32 collision_objectmodel(Object *obj, s32 arg1, s32 *arg2, Vec3f *arg3, f32 *ar
                 sp14C->unk0C[i + 2] = spE0[j];
             }
             if (tempv0 & sp16C) {
+#ifdef TARGET_DC
+                shz_vec3_deref(&arg4[i]) = shz_xmtrx_transform_point3(shz_vec3_init(sp100[j], spF0[j], spE0[j]));
+#else
                 mtxf_transform_point(*spDC, sp100[j], spF0[j], spE0[j], &arg4[i + 0], &arg4[i + 1], &arg4[i + 2]);
+#endif
             }
         }
 
@@ -8361,8 +8399,12 @@ void calc_env_mapping_for_object(ObjectModel *model, s16 zRot, s16 xRot, s16 yRo
     s16 maskT;
     s16 i;
     s16 j;
+#ifdef TARGET_DC
+    shz_vec3_t eyeUnit;
+#else
     s16 var_v0;
     s16 var_v1;
+#endif
 
     count = 0;
     triangles = model->triangles;
@@ -8374,9 +8416,15 @@ void calc_env_mapping_for_object(ObjectModel *model, s16 zRot, s16 xRot, s16 yRo
     objTrans.y_position = 0.0f;
     objTrans.z_position = 0.0f;
     objTrans.scale = 1.0f;
+#ifdef TARGET_DC
+    eyeUnit = shz_vec3_scale(shz_vec3_init(gEnvmapPos[0].x,
+                                           gEnvmapPos[0].y,
+                                           gEnvmapPos[0].z),
+                             1.0f / 8192.0f);
+#else
     mtxf_from_transform(&objRotMtxF32, &objTrans);
     mtxf_to_mtxs(&objRotMtxF32, &objRotMtxS32);
-
+#endif
     for (i = 0; i < model->numberOfBatches; i++) {
         if (model->batches[i].flags & RENDER_ENVMAP) {
             sp70 = ((model->batches[i].flags & RENDER_UNK_0020000) | RENDER_ENVMAP) ^ RENDER_ENVMAP;
@@ -8412,15 +8460,45 @@ void calc_env_mapping_for_object(ObjectModel *model, s16 zRot, s16 xRot, s16 yRo
                     break;
             }
 
+#ifdef TARGET_DC
+            xmtrx_init_transform(&objTrans);
+            if (sp70 != 0) {
+                shz_xmtrx_apply_scale(4.0f, 4.0f, 4.0f);
+                shz_xmtrx_set_translation(32768.0f, 32768.0f, 32768.0f);
+            }
+#endif
+
             for (j = model->batches[i].verticesOffset; j < model->batches[i + 1].verticesOffset; j++, k++) {
+#ifdef TARGET_DC
+                shz_vec3_t n = shz_vec3_init(model40Entries[count].x,
+                                             model40Entries[count].y,
+                                             model40Entries[count].z);
+                s32 u16;
+                s32 v16;
+
+                if (sp70 == 0) {
+                    shz_vec3_t worldN = shz_xmtrx_transform_vec3(n);
+                    shz_vec3_t unitN  = shz_vec3_scale(worldN, 1.0f / 8192.0f);
+                    shz_vec3_t refl   = shz_vec3_reflect(eyeUnit, unitN);
+                    u16 = (s32) (refl.x * 32768.0f + 32768.0f);
+                    v16 = (s32) (refl.y * 32768.0f + 32768.0f);
+                } else {
+                    shz_vec3_t uv = shz_xmtrx_transform_point3(n);
+                    u16 = (s32) uv.x;
+                    v16 = (s32) uv.y;
+                }
+                count++;
+                D_8011AF68[k].u = ((s16) u16 >> shiftS) & maskS;
+                D_8011AF68[k].v = ((s16) v16 >> shiftT) & maskT;
+#else
                 gEnvmapPos[1].x = model40Entries[count].x;
                 gEnvmapPos[1].y = model40Entries[count].y;
                 gEnvmapPos[1].z = model40Entries[count].z;
-                count++;
                 mtxs_transform_dir(&objRotMtxS32, &gEnvmapPos[1]);
                 if (sp70 == 0) {
                     vec3s_reflect(&gEnvmapPos[0], &gEnvmapPos[1]);
                 }
+                count++;
                 var_v0 = gEnvmapPos[1].x;
                 var_v1 = gEnvmapPos[1].y;
                 if (var_v0 > 0) {
@@ -8433,6 +8511,7 @@ void calc_env_mapping_for_object(ObjectModel *model, s16 zRot, s16 xRot, s16 yRo
                 var_v1 = (var_v1 << 2) + 0x8000;
                 D_8011AF68[k].u = (var_v0 >> shiftS) & maskS;
                 D_8011AF68[k].v = (var_v1 >> shiftT) & maskT;
+#endif
             }
 
             for (j = model->batches[i].facesOffset; j < model->batches[i + 1].facesOffset; j++) {

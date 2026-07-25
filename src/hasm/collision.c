@@ -5,6 +5,10 @@
 #include "textures_sprites.h"
 #include "types.h"
 
+#ifdef TARGET_DC
+#   include <sh4zam/shz_sh4zam.h>
+#endif
+
 /*******************************/
 
 extern LevelModel *gCurrentLevelModel;
@@ -309,21 +313,30 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
                     B = collisionPlanes[facet->basePlaneIndex * 4 + 1];
                     C = collisionPlanes[facet->basePlaneIndex * 4 + 2];
                     D = collisionPlanes[facet->basePlaneIndex * 4 + 3];
-
+#ifdef TARGET_DC
+                    shz_vec2_t dot = shz_vec4_dot2(shz_vec4_deref(&collisionPlanes[facet->basePlaneIndex * 4]),
+                                                   shz_vec3_vec4(shz_vec3_deref(target), 1.0f),
+                                                   shz_vec3_vec4(shz_vec3_deref(origin), 1.0f));
+                    targetDist = dot.x - *radius;
+                    originDist = dot.y - *radius;
+#else
                     targetDist = (target->x * A + target->y * B + target->z * C + D) - *radius;
                     originDist = (origin->x * A + origin->y * B + origin->z * C + D) - *radius;
-
+#endif
                     // Process only one-sided collisions (above -> below plane), with tolerance
                     if (targetDist < -0.1 && originDist >= -0.1) {
                         diffX = target->x - origin->x;
                         diffY = target->y - origin->y;
                         diffZ = target->z - origin->z;
-
-                        if (targetDist != originDist) {
+#ifdef TARGET_DC
+                        intersectionFactor = shz_divf_fsrra(originDist, originDist - targetDist);
+#else
+                       if (targetDist != originDist) {
                             intersectionFactor = originDist / (originDist - targetDist);
                         } else {
                             intersectionFactor = 0.0f;
                         }
+#endif
 
                         intersectionPointX = origin->x + diffX * intersectionFactor;
                         intersectionPointY = origin->y + diffY * intersectionFactor;
@@ -345,8 +358,12 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
                             B1 = collisionPlanes[edgeBisectorPlane * 4 + 1];
                             C1 = collisionPlanes[edgeBisectorPlane * 4 + 2];
                             D1 = collisionPlanes[edgeBisectorPlane * 4 + 3];
-
+#ifdef TARGET_DC
+                            dist = shz_dot8f(intersectionPointX, intersectionPointY, intersectionPointZ, 1.0f,
+                                             A1,                 B1,                 C1,                 D1);
+#else
                             dist = intersectionPointX * A1 + intersectionPointY * B1 + intersectionPointZ * C1 + D1;
+#endif
                             if (flipSide) {
                                 dist = -dist;
                             }
@@ -361,7 +378,11 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
                                 gCollisionMode == COLLISION_MODE_DEFAULT) {
                                 // Push up vertically if slope is gentle and not stone
                                 outX = target->x;
+#ifdef TARGET_DC
+                                outY = shz_divf_fsrra(*radius - (target->x * A + target->z * C + D), B);
+#else
                                 outY = (*radius - (target->x * A + target->z * C + D)) / B;
+#endif
                                 outZ = target->z;
                             } else {
                                 if (B < 0.45 && gCollisionMode != COLLISION_MODE_NO_WALLS) {
@@ -429,8 +450,12 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
                     B = collisionPlanes[facet->basePlaneIndex * 4 + 1];
                     C = collisionPlanes[facet->basePlaneIndex * 4 + 2];
                     D = collisionPlanes[facet->basePlaneIndex * 4 + 3];
-
+#ifdef TARGET_DC
+                    targetDist = shz_dot8f(target->x, target->y, target->z, 1.0f,
+                                           A,         B,         C,         D) - *radius;
+#else
                     targetDist = (target->x * A + target->y * B + target->z * C + D) - *radius;
+#endif
                     if (targetDist < -0.1 && targetDist > -(*radius + 3.0f)) {
                         insideTriangle = TRUE;
                         for (j = 0; j < 3 && insideTriangle; j++) {
@@ -447,8 +472,12 @@ s32 resolve_collisions(Vec3f *origin, Vec3f *target, f32 *radius, s8 *surface, s
                             B1 = collisionPlanes[edgePlaneIndex * 4 + 1];
                             C1 = collisionPlanes[edgePlaneIndex * 4 + 2];
                             D1 = collisionPlanes[edgePlaneIndex * 4 + 3];
-
+#ifdef TARGET_DC
+                            dist = shz_dot8f(target->x, target->y, target->z, 1.0f,
+                                             A1,        B1,        C1,        D1);
+#else
                             dist = target->x * A1 + target->y * B1 + target->z * C1 + D1;
+#endif
                             if (flipSide) {
                                 dist = -dist;
                             }
