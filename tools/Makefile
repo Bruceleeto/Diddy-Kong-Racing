@@ -67,7 +67,7 @@ dkr_assets_tool_C_FILES := $(call rwildcard,dkr_assets_tool_src,*.c)
 dkr_assets_tool_OBJ_FILES := $(foreach file,$(dkr_assets_tool_C_FILES),$(BUILD_DIR)/$(file:.c=.o)) \
                              $(foreach file,$(dkr_assets_tool_CPP_FILES),$(BUILD_DIR)/$(file:.cpp=.o))
 
-DUMMY != mkdir -p $(sort $(dir $(dkr_assets_tool_OBJ_FILES)))
+DUMMY := $(shell mkdir -p $(sort $(dir $(dkr_assets_tool_OBJ_FILES))))
 
 $(BUILD_DIR)/%.o: %.c
 	$(CC) -c $^ -o $@ $(CFLAGS)

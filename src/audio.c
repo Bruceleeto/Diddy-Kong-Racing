@@ -290,8 +290,14 @@ void audio_init(OSSched *sc) {
     synth_config.maxPVoices = 40;
     synth_config.maxUpdates = 96;
     synth_config.dmaproc = NULL;
+#ifdef AUDIO_NO_REVERB
+    
+    synth_config.fxType[0] = AL_FX_NONE;
+    synth_config.fxType[1] = AL_FX_NONE;
+#else
     synth_config.fxType[0] = AL_FX_CUSTOM;
     synth_config.fxType[1] = AL_FX_BIGROOM;
+#endif
     synth_config.outputRate = 0;
     synth_config.heap = &gALHeap;
     amCreateAudioMgr(&synth_config, 12, sc);
