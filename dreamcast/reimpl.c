@@ -454,9 +454,6 @@ u32 osGetCount(void) {
     return (u32) (ns * 3 / 64);
 }
 
-// KOS uptime in nanoseconds, for callers that can't include a KOS header —
-// main.c pulls in <ultra64.h>, whose R4300.h collides with the SH4 arch defs
-// (EXC_CODE) that any <kos/*.h> drags in. This wrapper keeps KOS out of there.
 u64 pc_uptime_ns(void) {
     return timer_ns_gettime64();
 }
@@ -494,8 +491,7 @@ s32 (*__osHwIntTable[8])(void) = { 0 };
 
 // ---------------------------------------------------------------------------
 // Thread context switching (was exceptasm.s code).
-// Empty stubs for now, same as the OoT port's bring-up state — the real
-// scheduler replacement is its own milestone.
+// Empty stubs for now.
 // ---------------------------------------------------------------------------
 void __osEnqueueThread(void **queue, void *thread) {}
 void __osEnqueueAndYield(void **queue) {}

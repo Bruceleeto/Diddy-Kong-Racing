@@ -1,7 +1,4 @@
 // OS reimplementation stubs for the PC build.
-// Modeled on the OoT DC port's src/linux/reimpl.c — same names and behavior
-// where the two games needed the same symbol; DKR-specific ones added at the
-// bottom of each section.
 
 #include <stdarg.h>
 #include <stdint.h>

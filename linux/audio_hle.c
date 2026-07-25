@@ -1,31 +1,3 @@
-// HLE of the aspMain RSP audio microcode — the replacement for the RSP itself.
-//
-// The libultra synthesizer (libultra/src/audio/) does not mix anything: it builds
-// a list of commands for the RSP, and the RSP does the work. There is no RSP here,
-// so this file executes that command list in C: a 4KB DMEM, 15 opcodes, ABI1.
-//
-// PORTABLE C ON PURPOSE. It is the hot loop of the audio system and it is also the
-// part the Dreamcast needs verbatim — the only platform-specific audio file is
-// linux/audio.c (the SDL ring). Do not put x86-isms or SDL calls in here.
-//
-// ---------------------------------------------------------------------------
-// Endianness: the whole design rests on one rule.
-// ---------------------------------------------------------------------------
-// Everything in DMEM and in the RDRAM audio buffers is HOST-NATIVE s16, because we
-// own both ends of it: this file writes those buffers and this file reads them back
-// (reverb delay lines), and SDL consumes the final output. The only data crossing
-// in from the big-endian world is sample data out of the asset image, and that was
-// already handled at bank-load time (docs/audio.md, M1):
-//
-//   - ADPCM sample frames  : a BYTE stream. Never swapped, anywhere. LOADBUFF
-//                            memcpy's them raw and the decoder reads nibbles.
-//   - RAW16 sample data    : BE s16, swapped once in the asset image itself
-//                            (pc_asset_swap16_region), so LOADBUFF's memcpy is
-//                            already host-native.
-//   - ADPCM codebooks      : swapped as part of ALADPCMBook in bnkf.c.
-//
-// So there is not a single byteswap in this file. If you find yourself wanting to
-// add one, the bug is upstream.
 
 #include <string.h>
 

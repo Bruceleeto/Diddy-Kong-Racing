@@ -271,21 +271,7 @@ static void pc_audio_tick(void) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Audio thread
-//
-// Everything else runs on one thread, and a menu->game switch is a single
-// blocking level load (gzip inflate + asset DMA) that can take seconds. While
-// it blocks, nothing pumps audio: the AICA rings drain their ~0.74s and the DAC
-// starves. So audio runs on its own KOS thread, woken by the vblank interrupt
-// handler (fires from hardware regardless of the main thread), and preemptive
-// KOS keeps it scheduled through the load. Same model as the N64 and the OoT DC
-// port.
-//
-// The manager expects a 30 Hz retrace (frameSize == 1/30 s), so tick every
-// other 60 Hz vblank.
-// ---------------------------------------------------------------------------
-
+ 
 static volatile u64 sVblTicker = 0;
 
 static void audio_vblank_handler(u32 code, void *data) {

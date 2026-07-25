@@ -7,8 +7,7 @@
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
 
-// KOS uptime in ns (dreamcast/reimpl.c). Declared here rather than via
-// <kos/timer.h>, whose arch chain redefines R4300.h's EXC_CODE.
+
 extern u64 pc_uptime_ns(void);
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
@@ -108,7 +107,6 @@ alignas(32) static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
 static s32 sCurMatrix = 0;
 static s32 sBillboard = FALSE;
 
-// Layout is load-bearing — see GfxVertex. Assert it rather than trust it.
 _Static_assert(sizeof(GfxTriVert) == 32, "GfxTriVert must be exactly one SH4 cache line");
 _Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields must fit one cache line");
 

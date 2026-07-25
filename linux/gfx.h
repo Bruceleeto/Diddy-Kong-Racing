@@ -1,26 +1,7 @@
 #ifndef LINUX_GFX_H
 #define LINUX_GFX_H
 
-// Host graphics layer (linux/gfx.c) — SDL2 + OpenGL.
-//
-// This is deliberately its own translation unit and uses only plain C types:
-// SDL's headers pull in the system's <strings.h>/<stdint.h>, which collide with
-// the N64 headers (os_libc.h's bzero prototype, types.h's uintptr_t). So the
-// F3DDKR display-list interpreter (linux/main.c) speaks N64 types and talks to
-// the host renderer through this interface, and never includes SDL itself.
 
-// A triangle corner, in N64 screen pixels (origin top-left, y down). `z` is the
-// perspective-divided depth, negated so that nearer is smaller (GL_LESS).
-// `u`/`v` are normalised texture coordinates.
-//
-// `w` is the clip-space w the vertex was divided by — the camera-space depth.
-// The position is already divided, but GL still needs w to interpolate the
-// texture coordinates perspective-correctly (see gfx_draw_tris). Screen-space
-// geometry that never went through a projection passes w = 1.
-// `fog` is how far this vertex is faded into the fog colour, 0..1 — the factor the
-// RSP computes and the RDP's blender applies *after* texturing. It rides in GL's
-// fog coordinate, which is the same stage: the Dreamcast port hands the identical
-// number to the PVR in the vertex's offset-colour alpha (PVR_FOG_VERTEX).
 typedef struct {
     float x, y, z, w;
     float u, v;

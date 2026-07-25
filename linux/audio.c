@@ -1,23 +1,3 @@
-// Host audio backend for the PC build.
-//
-// This is the ONLY platform-specific audio file. Everything above it — the
-// libultra ALSynth sequencer/synthesizer, the audio manager, the (M3) command-list
-// interpreter — is portable C. The Dreamcast port replaces this file with a KOS
-// snd_stream backend and changes nothing else. Keep it that way: no game logic
-// here, no mixing here.
-//
-// Two jobs:
-//
-//   1. The AI (Audio Interface) shims. On N64 these poke MMIO registers; the three
-//      the game actually uses become a ring buffer here. osAiGetLength() is NOT a
-//      throwaway stub — __amHandleFrameMsg recomputes how many samples to
-//      synthesize each frame from it, so it has to honestly report how much audio
-//      is still queued or the frame-size feedback loop goes unstable.
-//
-//   2. The frame pump. There is no audio thread and no scheduler on PC (see
-//      linux/reimpl.c), so the audio manager is ticked once per video frame from
-//      the main loop instead — same shape as the gfx-task and thread-30 shims in
-//      rcp_dkr.c and thread30_bgload.c.
 
 #include <SDL2/SDL.h>
 #include <stdio.h>

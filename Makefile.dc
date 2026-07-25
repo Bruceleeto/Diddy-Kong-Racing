@@ -65,13 +65,10 @@ BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-flto
 BASE_CFLAGS += -MMD -MP
 
-# LTO defers codegen to link time, so the link line has to repeat the codegen
-# flags or the compile-time ones are silently dropped.
 LTO_FLAGS := $(OPT) $(filter -f%,$(BASE_CFLAGS)) $(filter -m%,$(BASE_CFLAGS))
 CFLAGS        := $(BASE_CFLAGS) $(INCLUDES)
 CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 
-# KOS pulls in its own libm/newlib via kos-cc; no SDL/GL on Dreamcast.
 LIBS := -lsh4zam -lm
 
 # Every game-code source file, individually.
