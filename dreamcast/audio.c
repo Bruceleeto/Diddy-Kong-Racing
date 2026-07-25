@@ -1,5 +1,5 @@
 #include <kos.h>
-#include <stddef.h> 
+#include <stddef.h>
 #include <dc/sound/stream.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,7 +21,7 @@ extern void am_audio_frame_pc(void);
 extern unsigned int frameSize;
 
 #define DC_AUDIO_RATE 22050
-#define DC_AUDIO_BYTES_PER_SAMPLE 4 // stereo s16 (interleaved, as the manager sees it)
+#define DC_AUDIO_BYTES_PER_SAMPLE 4 // stereo s16 (planar per chunk; see osAiSetNextBuffer)
 
 // Runs on the audio thread only (dc_audio_thread): osAiSetNextBuffer,
 // osAiGetLength, pc_audio_tick, and the snd_stream direct callback (via
@@ -98,10 +98,11 @@ static void ring_read(int n, void *dst, u32 count) {
     }
     idx = r->tail & mask;
     first = MIN(count, r->cap - idx);
-    shz_memcpy(dst, r->buf + idx, first);
-    if (count - first) {
-        shz_memcpy((u8 *) dst + first, r->buf, count - first);
-    }
+
+    spu_memload_sq((uintptr_t)dst, r->buf + idx, first);
+    if(count - first)
+        spu_memload_sq((u8 *) dst + first, r->buf, count - first);
+
     r->tail += count;
 }
 
@@ -164,8 +165,8 @@ s32 osAiSetFrequency(u32 frequency) {
     return (s32) DC_AUDIO_RATE;
 }
 
-// The game passes the previous frame's mixed PCM: interleaved stereo s16.
-// Deinterleave into the two channel rings and account the byte count for pacing.
+#define DC_AUDIO_CHUNK_SAMPLES 160
+
 void osAiSetNextBuffer(void *buf, u32 size) {
     if (!sReady || size == 0) {
         return;
@@ -174,23 +175,19 @@ void osAiSetNextBuffer(void *buf, u32 size) {
     sQueued += size; // pacing signal — see osAiGetLength()
 
     if (sAudioOk && buf != NULL) {
-        const s16 *pcm = (const s16 *) buf;
-        u32 frames = size / DC_AUDIO_BYTES_PER_SAMPLE; // stereo sample pairs
+        const s16 *p = (const s16 *) buf;
+        u32 frames = size / DC_AUDIO_BYTES_PER_SAMPLE; // samples per channel, whole frame
         u32 done = 0;
 
-        // Deinterleave in bounded chunks so the scratch stays on the stack.
         while (done < frames) {
-            s16 l[256];
-            s16 r[256];
-            u32 n = MIN(frames - done, 256u);
-            u32 i;
+            u32 n = MIN(frames - done, (u32) DC_AUDIO_CHUNK_SAMPLES);
+            const s16 *l = p;
+            const s16 *r = p + n;
 
-            for (i = 0; i < n; i++) {
-                l[i] = pcm[(done + i) * 2 + 0];
-                r[i] = pcm[(done + i) * 2 + 1];
-            }
             ring_write(0, l, n * sizeof(s16));
             ring_write(1, r, n * sizeof(s16));
+
+            p += (u32) n << 1; // this chunk's full L+R block
             done += n;
         }
 
@@ -332,7 +329,7 @@ void dc_audio_start_thread(void) {
     vblank_handler_add(&audio_vblank_handler, NULL);
 
     attr.create_detached = 1;
-    attr.stack_size = 32768;
+    attr.stack_size = 8192;
     attr.stack_ptr = NULL;
     attr.prio = 2; // high (low number = high priority in KOS)
     attr.label = "audio";

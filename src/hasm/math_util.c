@@ -251,9 +251,16 @@ void mtxf_to_mtxs(MtxF *mf, MtxS *mi) {
  * Official name: mathMtxXFMF
  */
 void mtxf_transform_point(float mf[4][4], float x, float y, float z, float *ox, float *oy, float *oz) {
+#ifdef TARGET_DC
+    shz_vec3_t out = shz_mat4x4_transform_point3((const shz_mat4x4_t*)mf, shz_vec3_init(x, y, z));
+    *ox = out.x;
+    *oy = out.y;
+    *oz = out.z;
+#else
     *ox = mf[0][0] * x + mf[1][0] * y + mf[2][0] * z + mf[3][0];
     *oy = mf[0][1] * x + mf[1][1] * y + mf[2][1] * z + mf[3][1];
     *oz = mf[0][2] * x + mf[1][2] * y + mf[2][2] * z + mf[3][2];
+#endif
 }
 
 /**
@@ -264,12 +271,18 @@ void mtxf_transform_point(float mf[4][4], float x, float y, float z, float *ox, 
  * Official name: mathMtxFastXFMF
  */
 void mtxf_transform_dir(MtxF *mf, Vec3f *in, Vec3f *out) {
+#ifdef TARGET_DC
+    *(SHZ_ALIASING shz_vec3_t*)out =
+            shz_mat4x4_transform_vec3((const shz_mat4x4_t*)mf,
+                                       *(SHZ_ALIASING const shz_vec3_t*)in);
+#else
     f32 x = in->f[0];
     f32 y = in->f[1];
     f32 z = in->f[2];
     out->f[0] = (x * (*mf)[0][0]) + (y * (*mf)[1][0]) + (z * (*mf)[2][0]);
     out->f[1] = (x * (*mf)[0][1]) + (y * (*mf)[1][1]) + (z * (*mf)[2][1]);
     out->f[2] = (x * (*mf)[0][2]) + (y * (*mf)[1][2]) + (z * (*mf)[2][2]);
+#endif
 }
 
 /**
@@ -277,8 +290,12 @@ void mtxf_transform_dir(MtxF *mf, Vec3f *in, Vec3f *out) {
  * Official name: mathMtxCatF
  */
 void mtxf_mul(MtxF *mat1, MtxF *mat2, MtxF *output) {
+#ifdef TARGET_DC
+    shz_mat4x4_mult((shz_mat4x4_t*)output,
+                    (const shz_mat4x4_t*)mat2,
+                    (const shz_mat4x4_t*)mat1);
+#else
     s32 i, j, k;
-
     for (i = 0; i < 4; i++) {
         for (j = 0; j < 4; j++) {
             /*
@@ -292,6 +309,7 @@ void mtxf_mul(MtxF *mat1, MtxF *mat2, MtxF *output) {
                               ((*mat1)[i][0] * (*mat2)[0][j] + (*mat1)[i][3] * (*mat2)[3][j]);
         }
     }
+#endif
 }
 
 /**
@@ -422,6 +440,28 @@ void mtxs_transform_dir(MtxS *mi, Vec3s *vec) {
     vec->z = ((*mi)[0][2] * x + (*mi)[1][2] * y + (*mi)[2][2] * z) >> 16;
 }
 
+#ifdef TARGET_DC
+void xmtrx_init_transform(ObjectTransform *trans) {
+    shz_xmtrx_init_rotation_yxz(trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR,
+                                trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
+                                trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_apply_scale(trans->scale, trans->scale, trans->scale);
+    shz_xmtrx_set_translation(trans->x_position,
+                              trans->y_position,
+                              trans->z_position);
+}
+
+void xmtrx_apply_transform(ObjectTransform *trans) {
+    shz_xmtrx_apply_rotation_yxz(trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR,
+                                trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
+                                trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_apply_scale(trans->scale, trans->scale, trans->scale);
+    shz_xmtrx_set_translation(trans->x_position,
+                              trans->y_position,
+                              trans->z_position);
+}
+#endif
+
 /**
  * Converts an ObjectTransform into a transformation matrix and writes it to `mtx`.
  * The matrix is built by applying the following operations in order:
@@ -432,6 +472,10 @@ void mtxs_transform_dir(MtxS *mi, Vec3s *vec) {
  * 5. Translation
  */
 void mtxf_from_transform(MtxF *mtx, ObjectTransform *trans) {
+#ifdef TARGET_DC
+    xmtrx_init_transform(trans);
+    shz_xmtrx_store_4x4((shz_mat4x4_t*)*mtx);
+#else
     f32 yRotSine;
     f32 yRotCosine;
     f32 xRotSine;
@@ -464,6 +508,7 @@ void mtxf_from_transform(MtxF *mtx, ObjectTransform *trans) {
     (*mtx)[3][1] = trans->y_position;
     (*mtx)[3][2] = trans->z_position;
     (*mtx)[3][3] = 1.0f;
+#endif
 }
 
 /**
@@ -490,6 +535,22 @@ void mtxf_translate_y(MtxF *input, f32 offset) {
     (*input)[3][2] += (*input)[1][2] * offset;
 }
 
+#ifdef TARGET_DC
+void xmtrx_init_inverse_transform(ObjectTransform *trans) {
+    shz_xmtrx_init_rotation_zxy(trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
+                                trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
+                                trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_translate(trans->x_position, trans->y_position, trans->z_position);
+}
+
+void xmtrx_apply_inverse_transform(ObjectTransform *trans) {
+    shz_xmtrx_apply_rotation_zxy(trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
+                                 trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
+                                 trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_translate(trans->x_position, trans->y_position, trans->z_position);
+}
+#endif
+
 /**
  * Writes an inverse transformation matrix to `mtx` based on a pre-inverted `ObjectTransform`.
  * This is used to convert world-space coordinates to local object-space coordinates.
@@ -507,6 +568,10 @@ void mtxf_translate_y(MtxF *input, f32 offset) {
  * Official Name: mathRpyXyzMtx
  */
 void mtxf_from_inverse_transform(MtxF *mtx, ObjectTransform *trans) {
+#ifdef TARGET_DC
+    xmtrx_init_inverse_transform(trans);
+    shz_xmtrx_store_4x4((shz_mat4x4_t*)*mtx);
+#else
     f32 yRotSine;
     f32 yRotCosine;
     f32 xRotSine;
@@ -540,6 +605,7 @@ void mtxf_from_inverse_transform(MtxF *mtx, ObjectTransform *trans) {
     (*mtx)[3][2] =
         ((*mtx)[0][2] * trans->x_position) + ((*mtx)[1][2] * trans->y_position) + ((*mtx)[2][2] * trans->z_position);
     (*mtx)[3][3] = 1.0f;
+#endif
 }
 
 /**
@@ -552,6 +618,12 @@ void mtxf_from_inverse_transform(MtxF *mtx, ObjectTransform *trans) {
  * while preserving their upright orientation.
  */
 void mtxf_billboard(MtxF *mtx, s32 angle, f32 scale, f32 scaleY) {
+#ifdef TARGET_DC
+    shz_xmtrx_init_scale(scale, scale, scale);
+    shz_xmtrx_apply_rotation_z(angle / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_store_4x4((shz_mat4x4_t*)*mtx);
+    (*mtx)[1][1] *= scaleY;
+#else
     f32 cosine, sine;
 
     sine = sins_s16(angle) * (1.0f / 0x10000);
@@ -572,6 +644,7 @@ void mtxf_billboard(MtxF *mtx, s32 angle, f32 scale, f32 scaleY) {
     (*mtx)[3][1] = 0;
     (*mtx)[3][2] = 0;
     (*mtx)[3][3] = 1.0f;
+#endif
 }
 
 /**
@@ -745,6 +818,9 @@ s32 tri2d_xz_contains_point(s32 x, s32 z, Vec3s *pointA, Vec3s *pointB, Vec3s *p
  * Official Name: mathTranslateMtx
  */
 void mtxf_from_translation(MtxF *mtx, f32 x, f32 y, f32 z) {
+#ifdef TARGET_DC
+    shz_mat4x4_init_translation((shz_mat4x4_t*)mtx, x, y, z);
+#else
     s32 i, j;
 
     // Clear matrix
@@ -760,6 +836,7 @@ void mtxf_from_translation(MtxF *mtx, f32 x, f32 y, f32 z) {
     (*mtx)[3][0] = x;
     (*mtx)[3][1] = y;
     (*mtx)[3][2] = z;
+#endif
 }
 
 /**
@@ -767,6 +844,9 @@ void mtxf_from_translation(MtxF *mtx, f32 x, f32 y, f32 z) {
  * Official Name: mathScaleMtx
  */
 void mtxf_from_scale(MtxF *mtx, f32 scaleX, f32 scaleY, f32 scaleZ) {
+#ifdef TARGET_DC
+    shz_mat4x4_init_scale((shz_mat4x4_t*)mtx, scaleX, scaleY, scaleZ);
+#else
     s32 i, j;
 
     // Clear matrix
@@ -780,6 +860,7 @@ void mtxf_from_scale(MtxF *mtx, f32 scaleX, f32 scaleY, f32 scaleZ) {
     (*mtx)[1][1] = scaleY;
     (*mtx)[2][2] = scaleZ;
     (*mtx)[3][3] = 1.0f;
+#endif
 }
 
 #ifndef TARGET_DC
@@ -941,6 +1022,17 @@ f32 area_triangle_2d(f32 x0, f32 z0, f32 x1, f32 z1, f32 x2, f32 z2) {
     f32 dz1 = z2 - z1;
     f32 dx2 = x0 - x2;
     f32 dz2 = z0 - z2;
+#if 0
+    f32 d0 = shz_sqrtf((dx0 * dx0) + (dz0 * dz0)); // Distance between points 0 & 1
+    f32 d1 = shz_sqrtf((dx1 * dx1) + (dz1 * dz1)); // Distance between points 1 & 2
+    f32 d2 = shz_sqrtf((dx2 * dx2) + (dz2 * dz2)); // Distance between points 2 & 0
+    f32 m = 0.5f * (d0 + d1 + d2);             // Half the sum of the distances?
+    f32 result = m * (m - d0) * (m - d1) * (m - d2);
+    if (result <= 0.0f) {
+        return 0.0f;
+    }
+    return shz_sqrtf_fsrra(result);
+#else
     f32 d0 = sqrtf((dx0 * dx0) + (dz0 * dz0)); // Distance between points 0 & 1
     f32 d1 = sqrtf((dx1 * dx1) + (dz1 * dz1)); // Distance between points 1 & 2
     f32 d2 = sqrtf((dx2 * dx2) + (dz2 * dz2)); // Distance between points 2 & 0
@@ -950,11 +1042,16 @@ f32 area_triangle_2d(f32 x0, f32 z0, f32 x1, f32 z1, f32 x2, f32 z2) {
         result = 0.0f;
     }
     return sqrtf(result);
+#endif
 }
 
 void dmacopy_doubleword(void *src, void *dst, u32 end) {
     s32 size = end - (u32) dst;
+#ifdef TARGET_DC
+    shz_memcpy(dst, src, size);
+#else
     memcpy(dst, src, size);
+#endif
 }
 
 /**
