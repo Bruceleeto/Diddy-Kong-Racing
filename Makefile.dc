@@ -79,6 +79,7 @@ SRC_FILES := \
 	dreamcast/gfx.c \
 	dreamcast/input.c \
 	dreamcast/reimpl.c \
+	dreamcast/vmu_anim.c \
 	src/asset_loading.c \
 	src/audio.c \
 	src/audiomgr.c \

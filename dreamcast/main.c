@@ -6,6 +6,8 @@
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
+#include "save.h"
+#include "vmu_anim.h"
 
 
 extern u64 pc_uptime_ns(void);
@@ -55,6 +57,8 @@ s32 pc_retrace_wait(void) {
 
     // Advance by whole periods so rounding doesn't accumulate into drift.
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
+    eeprom_update();
+    vmu_anim_update();
     return periods;
 }
 
@@ -1908,6 +1912,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
     (void)addr;
     (void)btns;
+    eeprom_flush_to_vmu();
     arch_exit();
 }
 
