@@ -2085,7 +2085,10 @@ Object_Log *obj_wave_init(s32 blockID, f32 x, f32 z) {
     f32 var_f14;
     s32 var_v0_2;
     s32 var_a2;
-    s32 sp80[3];
+    // Bisected to this array: read before it is written on some path through
+    // the branches below, which indexes gWaveHeightIndices with garbage and
+    // blacks out Future Fun Land on DC.
+    s32 sp80[3] = { 0 };
     s32 sp68[6];
     s32 sp5C[3];
     f32 sp50[3];

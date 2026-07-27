@@ -477,11 +477,13 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
         if (gCurrentLevelHeader->race_type == RACETYPE_HUBWORLD) {
             if (gCurrentLevelHeader->world > WORLD_CENTRAL_AREA && gCurrentLevelHeader->world < WORLD_FUTURE_FUN_LAND) {
                 var_s0 = gCurrentLevelHeader->world;
+                // Shifts of 32+ on an s32 are UB in C; the N64 relied on MIPS masking the
+                // count mod 32 (so +31 means -1). GCC deletes the flag checks otherwise.
                 if (settings->keys & (1 << var_s0) &&
-                    !(settings->cutsceneFlags & (CUTSCENE_DINO_DOMAIN_KEY << (var_s0 + 31)))) {
+                    !(settings->cutsceneFlags & (CUTSCENE_DINO_DOMAIN_KEY << ((var_s0 + 31) & 31)))) {
                     // Trigger World Key unlocking Challenge Door cutscene.
                     level_properties_push(levelId, entranceId, vehicleId, cutsceneId);
-                    settings->cutsceneFlags |= CUTSCENE_DINO_DOMAIN_KEY << (var_s0 + 31);
+                    settings->cutsceneFlags |= CUTSCENE_DINO_DOMAIN_KEY << ((var_s0 + 31) & 31);
                     someAsset = (s8 *) get_misc_asset(ASSET_MISC_68);
                     levelId = someAsset[var_s0 - 1];
                     entranceId = 0;
@@ -571,7 +573,7 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
     stubbed_printf("post vehicle swap\n");
     if (gCurrentLevelHeader->race_type == RACETYPE_HUBWORLD) {
         if (settings->worldId - 1 >= 0) {
-            var_s0 = 8 << (settings->worldId + 31);
+            var_s0 = 8 << ((settings->worldId + 31) & 31); // MIPS shift-mask semantics; see above
             if (settings->worldId == 5) {
                 if (settings->balloonsPtr[0] >= 47) {
                     if (settings->ttAmulet >= 4) {
