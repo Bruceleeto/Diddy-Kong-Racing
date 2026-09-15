@@ -1,5 +1,10 @@
 # Diddy Kong Racing
 
+![Overworld](/media/screenshot1.png)
+![Whale Bay](/media/screenshot2.png)
+![Walrus Cove](/media/screenshot3.png)
+![Hot Top Volcano](/media/screenshot4.png)
+
 tldr for dreamcast
 
 `put baserom.z64 in baseroms folder`
