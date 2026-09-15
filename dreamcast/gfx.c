@@ -293,7 +293,7 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
         return 0;
     }
 
-    pvr_txr_load(tmp, vram, (uint32) (pw * ph * 2)); // plain copy, non-twiddled
+    pvr_txr_load(tmp, vram, (uint32_t) (pw * ph * 2)); // plain copy, non-twiddled
 
     free(tmp);
 
