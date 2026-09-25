@@ -317,6 +317,44 @@ alignas(32) static const float sResampleTable[64][4] = {
     {-40.0f, 3679.0f, 26262.0f, 2873.0f}, {-33.0f, 3398.0f, 26285.0f, 3129.0f},
 };
 
+inline static void bzero2_4(uint16_t* dst) {
+    uintptr_t zero;
+
+    asm(R"(
+        mov    #0, %[z]
+        add    #8, %[d]
+        mov.w  %[z], @-%[d]
+        mov.w  %[z], @-%[d]
+        mov.w  %[z], @-%[d]
+        mov.w  %[z], @-%[d]
+    )"
+    : [z] "=r" (zero),
+      "=m" ((dst)[0]), "=m" ((dst)[1]),
+      "=m" ((dst)[2]), "=m" ((dst)[3])
+    : [d] "r" (dst));
+}
+
+inline static void memcpy2_4(uint16_t* restrict dst, const uint16_t* restrict src) {
+    uintptr_t t1, t2, t3, t4;
+
+    asm(R"(
+        mov.w  @%[s]+, %[t1]
+        mov.w  @%[s]+, %[t2]
+        mov.w  @%[s]+, %[t3]
+        mov.w  @%[s]+, %[t4]
+        add    #8, %[d]
+        mov.w  %[t4], @-%[d]
+        mov.w  %[t3], @-%[d]
+        mov.w  %[t2], @-%[d]
+        mov.w  %[t1], @-%[d]
+    )"
+    : [s] "+&r" (src),
+      [t1] "=&r" (t1), [t2] "=&r" (t2), [t3] "=&r" (t3), [t4] "=&r" (t4),
+      "=m" ((dst)[0]), "=m" ((dst)[1]), "=m" ((dst)[2]), "=m" ((dst)[3])
+    : [d] "r" (dst),
+      "m" ((src)[0]), "m" ((src)[1]), "m" ((src)[2]), "m" ((src)[3]));
+}
+
 // ---------------------------------------------------------------------------
 // A_RESAMPLE — pitch shift, 4-tap polyphase (ucode-accurate).
 //
@@ -344,10 +382,10 @@ static void op_resample(u32 w0, u32 w1) {
     s32 k;
 
     if (flags & A_INIT) {
-        shz_memset2_16(hist, 0);
+        bzero2_4(hist);
         accu = 0;
     } else {
-        shz_memcpy2_16(hist, &state[0]);
+        memcpy2_4(hist, state);
         accu = (u16) state[4];
     }
 
