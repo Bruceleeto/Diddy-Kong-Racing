@@ -50,6 +50,9 @@ INCLUDES := $(INCLUDES_REIMPL)
 
 OPT      ?= -O3
 
+SHZ_BACKEND ?= SHZ_SH4
+FAST_MATH   ?= $(if $(filter SHZ_SW,$(SHZ_BACKEND)),-fno-fast-math,-ffast-math)
+
 BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-std=gnu23 \
 	-fno-common \
@@ -57,12 +60,14 @@ BASE_CFLAGS := $(OPT) -g $(DEFINES) \
 	-Wno-int-conversion \
 	-funsigned-char \
 	-fwrapv \
-	-ffast-math \
 	-ffp-contract=fast \
 	-fsingle-precision-constant \
 	-mfsrra \
 	-mfsca \
-	-flto
+	-flto \
+    -DSHZ_BACKEND=$(SHZ_BACKEND) \
+    $(FAST_MATH)
+
 BASE_CFLAGS += -MMD -MP
 
 LTO_FLAGS := $(OPT) $(filter -f%,$(BASE_CFLAGS)) $(filter -m%,$(BASE_CFLAGS))
