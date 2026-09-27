@@ -10,3 +10,6 @@
 [submodule "tools/Flips"]
 	path = tools/Flips
 	url = https://github.com/Alcaro/Flips.git
+[submodule "third_party/aicaflow"]
+	path = third_party/aicaflow
+	url = git@github.com:dfchil/aicaflow.git

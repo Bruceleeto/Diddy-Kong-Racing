@@ -528,6 +528,7 @@ void menu_logos_screen_init(void);
 s32 menu_logo_screen_loop(s32 updateRate);
 void init_title_screen_variables(void);
 void menu_title_screen_init(void);
+void menu_prefetch_next_title_demo_music(void);
 void titlescreen_free(void);
 void menu_options_init(void);
 void optionscreen_render(s32 updateRate);

@@ -88,3 +88,8 @@ cd/
 testcast
 pc/
 amap
+
+# Generated Dreamcast disc staging and images
+/cdrom/
+/*.cdi
+/dkracing-*.elf

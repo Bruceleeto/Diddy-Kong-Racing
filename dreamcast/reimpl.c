@@ -1,3 +1,4 @@
+#include "dkr_asset_mount.h"
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -55,7 +56,7 @@ u8 *main_BSS_START[1] = { 0 };
 // ---------------------------------------------------------------------------
 
 #ifdef TARGET_DC
-#define ASSET_DIR "/pc/assets/"
+#define ASSET_DIR DKR_ASSET_MOUNT "/assets/"
 #else
 #define ASSET_DIR "assets/"
 #endif
@@ -77,13 +78,27 @@ static u8 *pc_load_file(const char *path, u32 *sizeOut) {
     // Make file reading faster
     setvbuf(f, NULL, _IONBF, 0);
 
-    fseek(f, 0, SEEK_END);
-    size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    buf = malloc(size);
-    if (fread(buf, 1, size, f) != (size_t) size) {
-        fprintf(stderr, "ASSETS: short read on %s\n", path);
+    if (fseek(f, 0, SEEK_END) || (size = ftell(f)) <= 0 ||
+        fseek(f, 0, SEEK_SET)) {
+        printf("ASSETS: cannot determine size of %s\n", path);
+        fclose(f);
         exit(1);
+    }
+    buf = malloc(size);
+    if (!buf) {
+        printf("ASSETS: allocation failed for %s (%ld bytes)\n", path, size);
+        fclose(f);
+        exit(1);
+    }
+    /* Bound each /pc transaction without a second staging buffer. */
+    for (size_t offset = 0; offset < (size_t)size;) {
+        size_t count = (size_t)size - offset;
+        if (count > 32768) count = 32768;
+        if (fread(buf + offset, 1, count, f) != count) {
+            fprintf(stderr, "ASSETS: short read on %s at %zu\n", path, offset);
+            exit(1);
+        }
+        offset += count;
     }
     fclose(f);
     *sizeOut = (u32) size;

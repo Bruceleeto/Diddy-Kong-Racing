@@ -6,6 +6,11 @@
 #include "PR/libaudio.h"
 #include "video.h"
 
+#ifdef DKR_AICAFLOW
+#include "../dreamcast/audio_aicaflow.h"
+#include <aicaflow_protocol.h>
+#endif
+
 #define SOUND_PARAM_DURATION(m) (m->velocityMax * 33333)
 #define SOUND_PARAM_NEXT_SOUND(m) (m->velocityMin + (m->keyMin & 0xC0) * 4)
 #define SOUND_PARAM_GROUP(m) (m->keyMin & 0x3F)
@@ -20,6 +25,78 @@ SoundPlayer *gSoundPlayerPtr = &gSoundPlayer;
 s32 gSoundGlobalVolume = 256;
 s16 gNumActiveSounds = 0;
 s16 *gSoundGroupVolume;
+
+#ifdef DKR_AICAFLOW
+static u8 sndp_aicaflow_gain(ALSoundState *state) {
+    u32 group = SOUND_PARAM_GROUP(state->sound->keyMap);
+    u32 volume = state->volume < 0 ? 0 : state->volume;
+    u64 scaled;
+    if (volume > 32767) volume = 32767;
+    scaled = (u64)volume * gSoundGroupVolume[group] * gSoundGlobalVolume * 255u;
+    return (u8)(scaled / (32767ull * 32767ull * 256ull));
+}
+
+void sndp_aicaflow_complete(void *owner) {
+    ALSoundState *state = owner;
+    if (state && state->state != SOUND_STATE_NONE) sndp_deallocate(state);
+}
+
+void sndp_aicaflow_preempt(void *owner) {
+    ALSoundState *state = owner;
+    if (state && state->state != SOUND_STATE_NONE) sndp_deallocate(state);
+}
+
+static void sndp_aicaflow_volume(ALSoundState *state) {
+    dkr_afx_sfx_volume(state, sndp_aicaflow_gain(state));
+}
+
+static void sndp_aicaflow_started(ALSoundState *state) {
+    state->flags |= SOUND_FLAG_PLAYING;
+    state->state = SOUND_STATE_PLAYING;
+    ++gNumActiveSounds;
+    sndp_aicaflow_volume(state);
+    dkr_afx_sfx_pitch(state, state->pitch);
+    dkr_afx_sfx_pan(state, state->pan);
+    dkr_afx_sfx_fx(state, state->fxmix);
+}
+
+int sndp_aicaflow_voice_available(void *owner) {
+    ALSoundState *state = owner;
+    return gNumActiveSounds < gSoundPlayerPtr->maxActiveSounds || (state->flags & SOUND_FLAG_RETRIGGER);
+}
+
+int sndp_aicaflow_bank_pending(uint16_t id) {
+    for (ALSoundState *state = gSoundStateLists.allocHead; state; state = state->next)
+        if (state->state == SOUND_STATE_WAIT_VOICE && state->aicaflowId == id) return 1;
+    return 0;
+}
+
+void sndp_aicaflow_retry_pending(void) {
+    ALSoundState *state;
+    OSIntMask mask = osSetIntMask(OS_IM_NONE);
+
+    for (state = gSoundStateLists.allocHead; state;) {
+        ALSoundState *next = state->next;
+        int result;
+        if (state->state != SOUND_STATE_WAIT_VOICE) {
+            state = next;
+            continue;
+        }
+        result = dkr_afx_sfx_play(state->aicaflowId, state, state->priority);
+        /* Preemption can unlink a later entry; read next after that mutation. */
+        next = state->next;
+        if (!result) sndp_aicaflow_started(state);
+        else if (result != -AFX_BUSY) {
+            if (result != -AFX_NO_EXEC_BUDGET ||
+                (!(state->flags & (SOUND_FLAG_LOOPED | SOUND_FLAG_RETRIGGER)) && --state->retries < 0)) {
+                sndp_deallocate(state);
+            }
+        }
+        state = next;
+    }
+    osSetIntMask(mask);
+}
+#endif
 
 /**** Debug strings ****/
 const char D_800E4AB0[] = "Bad soundState: voices =%d, states free =%d, states busy =%d, type %d data %x\n";
@@ -54,6 +131,13 @@ void sndp_set_global_volume(u32 volume) {
     }
 
     gSoundGlobalVolume = volume;
+#ifdef DKR_AICAFLOW
+    OSIntMask mask = osSetIntMask(OS_IM_NONE);
+    for (ALSoundState *state = gSoundStateLists.allocHead; state; state = state->next) {
+        sndp_aicaflow_volume(state);
+    }
+    osSetIntMask(mask);
+#endif
 }
 
 /**
@@ -677,6 +761,9 @@ void sndp_set_priority(ALSoundState *sndp, u8 priority) {
     SNDP_PC_GUARD();
     if (sndp != NULL) {
         sndp->priority = priority;
+#ifdef DKR_AICAFLOW
+        dkr_afx_sfx_priority(sndp, priority);
+#endif
     }
 }
 
@@ -709,6 +796,32 @@ ALSoundState *sndp_play(ALBank *bnk, s16 sndIndx, ALSoundState **handlePtr) {
  */
 ALSoundState *sndp_play_with_priority(ALBank *bank, s16 sndIndx, u8 priority, ALSoundState **handlePtr) {
     SNDP_PC_GUARD(NULL);
+#ifdef DKR_AICAFLOW
+    OSIntMask mask = osSetIntMask(OS_IM_NONE);
+    ALSoundState *state = NULL;
+    if (sndIndx != SOUND_NONE) {
+        state = sndp_allocate(bank, bank->instArray[0]->soundArray[sndIndx - 1]);
+    }
+    if (state) {
+        int result;
+        if (priority) state->priority = priority;
+        state->aicaflowId = (u16)sndIndx;
+        state->flags |= SOUND_FLAG_FINAL_IN_SEQUENCE;
+        state->userHandle = handlePtr;
+        result = dkr_afx_sfx_play(state->aicaflowId, state, state->priority);
+        if (!result) {
+            sndp_aicaflow_started(state);
+        } else if (result == -AFX_BUSY || result == -AFX_NO_EXEC_BUDGET) {
+            state->state = SOUND_STATE_WAIT_VOICE;
+        } else {
+            sndp_deallocate(state);
+            state = NULL;
+        }
+    }
+    if (handlePtr) *handlePtr = state;
+    osSetIntMask(mask);
+    return state;
+#else
     ALSound *sound;
     ALSoundState *lastSoundState;
     ALSoundState *soundState;
@@ -798,6 +911,7 @@ ALSoundState *sndp_play_with_priority(ALBank *bank, s16 sndIndx, u8 priority, AL
         *handlePtr = lastSoundState;
     }
     return lastSoundState;
+#endif
 }
 
 /**
@@ -806,6 +920,17 @@ ALSoundState *sndp_play_with_priority(ALBank *bank, s16 sndIndx, u8 priority, AL
  */
 void sndp_stop(ALSoundState *state) {
     SNDP_PC_GUARD();
+#ifdef DKR_AICAFLOW
+    OSIntMask mask = osSetIntMask(OS_IM_NONE);
+    if (state != NULL && state->state == SOUND_STATE_WAIT_VOICE) {
+        sndp_deallocate(state);
+    } else if (state != NULL && state->state != SOUND_STATE_STOPPING) {
+        state->flags &= ~SOUND_FLAG_RETRIGGER;
+        state->state = SOUND_STATE_STOPPING;
+        dkr_afx_sfx_stop(state);
+    }
+    osSetIntMask(mask);
+#else
     ALSndpEvent alEvent;
 
     alEvent.common.type = AL_SNDP_STOP_EVT;
@@ -817,6 +942,7 @@ void sndp_stop(ALSoundState *state) {
         // From JFG
         // osSyncPrintf("WARNING: Attempt to stop NULL sound aborted\n");
     }
+#endif
 }
 
 /**
@@ -825,19 +951,28 @@ void sndp_stop(ALSoundState *state) {
 void sndp_stop_with_flags(u8 flags) {
     SNDP_PC_GUARD();
     OSIntMask mask;
+#ifndef DKR_AICAFLOW
     ALSndpEvent evt;
+#endif
     ALSoundState *soundState;
 
     mask = osSetIntMask(OS_IM_NONE);
     soundState = gSoundStateLists.allocHead;
     while (soundState != NULL) {
+        ALSoundState *next = soundState->next;
+#ifndef DKR_AICAFLOW
         evt.common.type = AL_SNDP_STOP_EVT;
         evt.common.state = soundState;
+#endif
         if ((soundState->flags & flags) == flags) {
+#ifdef DKR_AICAFLOW
+            sndp_stop(soundState);
+#else
             evt.common.state->flags &= ~SOUND_FLAG_RETRIGGER;
             alEvtqPostEvent(&gSoundPlayerPtr->evtq, (ALEvent *) &evt, 0);
+#endif
         }
-        soundState = soundState->next;
+        soundState = next;
     }
     osSetIntMask(mask);
 }
@@ -875,6 +1010,35 @@ void sndp_stop_all_looped(void) {
  */
 void sndp_set_param(SoundHandle soundMask, s16 type, u32 paramValue) {
     SNDP_PC_GUARD();
+#ifdef DKR_AICAFLOW
+    OSIntMask mask = osSetIntMask(OS_IM_NONE);
+    if (!soundMask) {
+        osSetIntMask(mask);
+        return;
+    }
+    switch (type) {
+        case AL_SNDP_PAN_EVT:
+            soundMask->pan = (paramValue > 127) ? 127 : paramValue;
+            dkr_afx_sfx_pan(soundMask, soundMask->pan);
+            break;
+        case AL_SNDP_PITCH_EVT:
+            soundMask->pitch = *(f32 *)&paramValue;
+            dkr_afx_sfx_pitch(soundMask, soundMask->pitch);
+            break;
+        case AL_SNDP_FX_EVT:
+            soundMask->fxmix = paramValue;
+            dkr_afx_sfx_fx(soundMask, soundMask->fxmix);
+            break;
+        case AL_SNDP_VOL_EVT:
+            soundMask->volume = (paramValue > 32767) ? 32767 : paramValue;
+            sndp_aicaflow_volume(soundMask);
+            break;
+        case AL_SNDP_GROUP_VOL_EVT:
+            sndp_aicaflow_volume(soundMask);
+            break;
+    }
+    osSetIntMask(mask);
+#else
     ALSndpEvent evt;
     evt.common.type = type;
     evt.common.state = soundMask;
@@ -885,6 +1049,7 @@ void sndp_set_param(SoundHandle soundMask, s16 type, u32 paramValue) {
         // From JFG
         // osSyncPrintf("WARNING: Attempt to modify NULL sound aborted\n");
     }
+#endif
 }
 
 /**
@@ -893,27 +1058,35 @@ void sndp_set_param(SoundHandle soundMask, s16 type, u32 paramValue) {
  */
 u16 sndp_get_group_volume(u8 groupID) {
     SNDP_PC_GUARD(0);
+    if (groupID >= 64) return 0;
     return gSoundGroupVolume[groupID];
 }
 
 /**
  * Sets the volume for the specified group and updates the volume of all sounds in that group.
  *
- * !@bug: No bounds checking is performed on the group index. In DKR, only one group is defined and memory is allocated
- * for a single group. This leads to out-of-bounds access, which can cause undefined behavior, including potential
- * crashes.
- *
  * Official Name: gsSndpSetMasterVolume
  */
 void sndp_set_group_volume(u8 groupID, u16 volume) {
     SNDP_PC_GUARD();
+    if (groupID >= 64) return;
     OSIntMask mask;
     ALSoundState *state;
     UNUSED s32 pad;
+#ifndef DKR_AICAFLOW
     ALSndpEvent evt;
+#endif
 
     mask = osSetIntMask(OS_IM_NONE);
     state = gSoundStateLists.allocHead;
+#ifdef DKR_AICAFLOW
+    if (volume > AL_SNDP_GROUP_VOLUME_MAX) volume = AL_SNDP_GROUP_VOLUME_MAX;
+    gSoundGroupVolume[groupID] = volume;
+    while (state != NULL) {
+        if (SOUND_PARAM_GROUP(state->sound->keyMap) == groupID) sndp_aicaflow_volume(state);
+        state = state->next;
+    }
+#else
     gSoundGroupVolume[groupID] = volume;
 
     while (state != NULL) {
@@ -924,6 +1097,7 @@ void sndp_set_group_volume(u8 groupID, u16 volume) {
         }
         state = state->next;
     }
+#endif
 
     osSetIntMask(mask);
 }
