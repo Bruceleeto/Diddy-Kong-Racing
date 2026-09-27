@@ -101,16 +101,11 @@ These changes do not guarantee recovery from arbitrary network failures.
 ## Verification
 
 ```sh
-for test in dreamcast/test_aicaflow_*.py dreamcast/test_asset_reads.py; do
-    python3 "$test" || exit 1
-done
 python3 dreamcast/build_aicaflow_sfx.py . third_party/aicaflow/tools build/dc/aicaflow --verify
 python3 dreamcast/build_aicaflow_fallback.py . third_party/aicaflow/tools build/dc/aicaflow/fallback --verify
 make -C third_party/aicaflow/driver/arm7
 make -C third_party/aicaflow/driver/sh4
 ```
 
-Lifecycle tests exercise delayed acknowledgements, cancellation, preemption,
-queued bank requests and allocation failure/retry. Bank verification compares
-actual IDs and file lengths with source-derived sets. Runtime music may differ
-from a level header's default.
+Bank verification compares actual IDs and file lengths with source-derived
+sets. Runtime music may differ from a level header's default.
