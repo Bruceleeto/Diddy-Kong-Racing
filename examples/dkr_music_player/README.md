@@ -1,9 +1,11 @@
 # DKR Music Player
 
 Dreamcast player for all 64 non-silent Diddy Kong Racing music sequences. It
-uses AICAflow's shared music-player UI and lifecycle core, with DKR supplying
-one complete flow per sequence, per-sequence gain, room recipe, and VIZ1
-sidecars. Brief cues (under ten seconds) are listed after the regular music;
+uses AICAflow's shared music-player UI and lifecycle core. It loads one shared
+`music.afb`, then one small bank-bound `.afx` flow per sequence; the optional
+`.afc` sidecar supplies seek checkpoints and is the only size shown in the
+playlist. DKR supplies per-sequence gain, room recipe, and VIZ1 sidecars.
+Brief cues (under ten seconds) are listed after the regular music;
 ambient beds follow the ordinary tracks, and brief cues remain at the end.
 Original order is preserved within each group.
 
