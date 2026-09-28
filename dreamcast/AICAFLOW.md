@@ -84,7 +84,7 @@ commit the changed gitlink with its DKR validation:
 
 ```sh
 git -C third_party/aicaflow fetch --tags
-git -C third_party/aicaflow checkout v0.1.5-dkr
+git -C third_party/aicaflow checkout v0.1.6-dkr
 git add third_party/aicaflow
 ```
 
