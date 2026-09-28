@@ -1,11 +1,16 @@
 # DKR AICAFLOW loader
 
-The music sample bank and core SFX bank stay resident. Vehicle samples stay loaded
+The music AFB and core SFX AFB stay resident. Vehicle samples stay loaded
 while scenes need vehicles. A scene-local bank is preloaded when it fits with
 64 KiB left for fallback; otherwise sounds load individually on demand. That
 64 KiB check is a preload decision, not an allocator reservation. If concurrent
 music loading consumes the measured space, a failed local-bank allocation also
 falls back to individual sounds.
+
+DKR builds its calibrated room DSP image at runtime with AICAflow's C
+`afx_dsp_program_room()` factory, then uploads that image as the active DSP
+scene. Reverb settings only gate the authored stereo returns; they do not
+replace or regenerate the effect while audio is running.
 
 The generated pack contains 51 resident sounds, 24 vehicle sounds, 49 nonempty
 local banks for 65 scene choices, and 784 independently loadable fallback banks.
@@ -22,7 +27,7 @@ generation discards loads completed after their scene ended.
 Scene teardown cancels pending and delayed sounds, stops active SFX, and waits for
 recycling before releasing banks. Instance slots are not reused before recycling.
 Under memory pressure the loader releases idle fallback banks and speculative
-music controls, preserving resident music samples and a song requested for
+music flows, preserving the resident music bank and a song requested for
 playback. A stopped predecessor yields space to replacement music. A later sound
 trigger may retry a previous allocation failure; file/format errors remain errors.
 
@@ -57,8 +62,11 @@ an existing checkout (a fresh clone should use `--recurse-submodules`):
 
 ```sh
 git submodule update --init --recursive
-python3 -m pip install mido
+python3.10 -m pip install mido
 ```
+
+DKR's AICAflow build requires Python 3.10+. `Makefile.dc` selects a suitable
+interpreter automatically; set `PYTHON=/path/to/python3.10-or-newer` to choose one explicitly.
 
 DKR uses its own KOS build, not enDJinn. The shared environment script supplies
 the toolchain and Dreamcast helpers:
@@ -76,7 +84,7 @@ commit the changed gitlink with its DKR validation:
 
 ```sh
 git -C third_party/aicaflow fetch --tags
-git -C third_party/aicaflow checkout v0.1.4-dkr
+git -C third_party/aicaflow checkout v0.1.5-dkr
 git add third_party/aicaflow
 ```
 
@@ -101,11 +109,13 @@ These changes do not guarantee recovery from arbitrary network failures.
 ## Verification
 
 ```sh
-python3 dreamcast/build_aicaflow_sfx.py . third_party/aicaflow/tools build/dc/aicaflow --verify
-python3 dreamcast/build_aicaflow_fallback.py . third_party/aicaflow/tools build/dc/aicaflow/fallback --verify
+./.venv/bin/python3 dreamcast/build_aicaflow_sfx.py . third_party/aicaflow/tools build/dc/aicaflow --verify
+./.venv/bin/python3 dreamcast/build_aicaflow_fallback.py . third_party/aicaflow/tools build/dc/aicaflow/fallback --verify
 make -C third_party/aicaflow/driver/arm7
 make -C third_party/aicaflow/driver/sh4
 ```
 
+Each AFX is sample-free and binds once to exactly one AFB. AFC files are
+optional SH4 seek indexes; normal game playback needs only the AFB and AFX.
 Bank verification compares actual IDs and file lengths with source-derived
 sets. Runtime music may differ from a level header's default.

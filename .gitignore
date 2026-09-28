@@ -93,3 +93,4 @@ amap
 /cdrom/
 /*.cdi
 /dkracing-*.elf
+/examples/dkr_music_player/cdrom/

@@ -8,7 +8,7 @@
 
 #ifdef DKR_AICAFLOW
 #include "../dreamcast/audio_aicaflow.h"
-#include <aicaflow_protocol.h>
+#include <aicaflow/protocol.h>
 #endif
 
 #define SOUND_PARAM_DURATION(m) (m->velocityMax * 33333)

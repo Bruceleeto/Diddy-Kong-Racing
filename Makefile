@@ -125,6 +125,12 @@ OBJCOPY  = $(CROSS)objcopy
 STRIP    = $(CROSS)strip
 VENV     = .venv
 PYTHON   = $(VENV)/bin/python3
+# AICAflow's N64 import tools require Python 3.10+.  Keep setup aligned with
+# Makefile.dc so a host's older `python3` cannot create an unusable venv.
+PYTHON_BOOTSTRAP ?= $(shell for candidate in /opt/homebrew/bin/python3 python3.14 python3.13 python3.12 python3.11 python3.10 python3; do if command -v "$$candidate" >/dev/null 2>&1 && "$$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 10))' >/dev/null 2>&1; then command -v "$$candidate"; break; fi; done)
+ifeq ($(PYTHON_BOOTSTRAP),)
+$(error DKR setup requires Python 3.10+; install it or set PYTHON_BOOTSTRAP=/path/to/python3.10-or-newer)
+endif
 GCC      = gcc
 
 #Options
@@ -345,7 +351,7 @@ extractall:
 
 setup:
 #Set up a python venv so we don't get warnings about breaking system packages.
-	$(V)python3 -m venv $(VENV)
+	$(V)$(PYTHON_BOOTSTRAP) -m venv $(VENV)
 #Installing the splat dependencies
 	$(V)$(PYTHON) -m pip install -r requirements.txt
 	$(V)$(PYTHON) ver/splat/update_baserom_names.py

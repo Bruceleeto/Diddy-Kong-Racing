@@ -1,9 +1,12 @@
 #include "dkr_asset_mount.h"
+#include "dkr_music_bench.h"
 #include "audio_aicaflow.h"
 #include "sound_ids.h"
 
 #include <aicaflow/host.h>
-#include <aicaflow/sfx_bank.h>
+#include <aicaflow/dsp.h>
+#include <aicaflow/bank.h>
+#include <aicaflow/codec.h>
 #include "sfx_manifest.h"
 #include <kos.h>
 #include <stdalign.h>
@@ -34,10 +37,23 @@ alignas(32) static const unsigned char firmware[] = {
 #define DKR_SHORT_MUSIC_COUNT 25
 
 typedef struct {
+    uint16_t id;
+    uint16_t channels;
+    afx_asset_t flow;
+    uint16_t *fields;
+} dkr_sfx_sound_t;
+
+typedef struct {
+    afx_bank_t bank;
+    dkr_sfx_sound_t *sounds;
+    uint16_t sound_count;
+} dkr_sfx_bank_t;
+
+typedef struct {
     void *owner;
     afx_instance_t instance;
-    const afx_sfx_bank_t *bank;
-    const afx_sfx_bank_sound_t *sound;
+    const dkr_sfx_bank_t *bank;
+    const dkr_sfx_sound_t *sound;
     uint32_t dirty;
     uint8_t volume;
     float pitch;
@@ -73,13 +89,13 @@ static afx_instance_t sMusic;
 static uint8_t sMusicFlowSequence;
 static uint8_t sPrefetchedMusicSequence;
 static dkr_sfx_slot_t sSfxSlots[DKR_SFX_SLOTS];
-static afx_sfx_bank_t sResidentSfx;
-static afx_sfx_bank_t sSceneSfx;
-static afx_sfx_bank_t sVehicleSfx;
-static afx_sfx_bank_t sMusicBank;
+static dkr_sfx_bank_t sResidentSfx;
+static dkr_sfx_bank_t sSceneSfx;
+static dkr_sfx_bank_t sVehicleSfx;
+static afx_bank_t sMusicBank;
 #define DKR_FALLBACK_SLOTS DKR_SFX_SLOTS
 static struct {
-    afx_sfx_bank_t bank;
+    dkr_sfx_bank_t bank;
     uint16_t id;
     uint8_t loading, requested;
     int result;
@@ -131,6 +147,15 @@ static afx_asset_t music_flow_for(uint8_t sequence) {
     return short_music_flow(sequence);
 }
 
+/* DKR owns this room recipe and can tune it in normal C code. The reduced wet
+ * gain and feedback retain the N64-like space without masking the lead line. */
+static int dsp_room_upload(void) {
+    afx_dsp_program_t program;
+    int result = afx_dsp_program_room(&program, 20480, 12288, false, 128, false);
+    if (!result) result = afx_dsp_scene_program(&program, sizeof(program));
+    return result;
+}
+
 int dkr_afx_sfx_stop_all(void) {
     uint32_t i, attempt;
     for (attempt = 0; attempt < 100; ++attempt) {
@@ -149,6 +174,90 @@ int dkr_afx_sfx_stop_all(void) {
         thd_sleep(1);
     }
     return -AFX_BUSY;
+}
+
+static int read_asset(const char *path, uint8_t **out_data, uint32_t *out_size) {
+    FILE *file = fopen(path, "rb");
+    long length;
+    uint8_t *data = NULL;
+    if (!file || fseek(file, 0, SEEK_END)) { if (file) fclose(file); return -AFX_BAD_BOUNDS; }
+    length = ftell(file);
+    if (length <= 0 || length > AFX_ASSET_LIMIT || fseek(file, 0, SEEK_SET)) {
+        fclose(file); return -AFX_BAD_BOUNDS;
+    }
+    data = memalign(32, (size_t)length);
+    if (!data) { fclose(file); return -AFX_NO_HOST_RAM; }
+    if (fread(data, 1, (size_t)length, file) != (size_t)length || ferror(file)) {
+        free(data); fclose(file); return -AFX_BAD_BOUNDS;
+    }
+    fclose(file);
+    *out_data = data;
+    *out_size = (uint32_t)length;
+    return AFX_OK;
+}
+
+static int sfx_flow_load(dkr_sfx_bank_t *bank, dkr_sfx_sound_t *sound,
+                         uint16_t id, const char *path) {
+    afx_file_header_t header;
+    uint8_t *data;
+    uint32_t bytes;
+    int result = read_asset(path, &data, &bytes);
+    if (result) return result;
+    result = afx_file_validate(data, bytes, &header);
+    if (!result && (!header.setup_count || header.setup_count > UINT16_MAX)) result = -AFX_BAD_FORMAT;
+    if (!result) {
+        sound->fields = calloc(header.setup_count, AFX_SETUP_BYTES);
+        if (!sound->fields) result = -AFX_NO_HOST_RAM;
+    }
+    if (!result) {
+        const uint8_t *setups = data + header.image_offset;
+        for (uint32_t setup = 0; setup < header.setup_count; ++setup)
+            for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
+                sound->fields[setup * AFX_FIELD_COUNT + field] =
+                    afx_read16(setups + setup * AFX_SETUP_BYTES + field * 2);
+        result = afx_bank_flow_upload(&bank->bank, data, bytes, &sound->flow);
+    }
+    free(data);
+    if (result) { free(sound->fields); *sound = (dkr_sfx_sound_t){0}; return result; }
+    sound->id = id;
+    sound->channels = (uint16_t)header.setup_count;
+    return AFX_OK;
+}
+
+static int sfx_bank_load(dkr_sfx_bank_t *bank, const char *afb, const char *controls,
+                         const uint16_t *ids, uint16_t count) {
+    int result;
+    if (!bank || bank->bank.asset || !count) return -AFX_BAD_COMMAND;
+    result = afx_bank_load_file(&bank->bank, afb);
+    if (result) return result;
+    bank->sounds = calloc(count, sizeof(*bank->sounds));
+    if (!bank->sounds) { (void)afx_bank_release(&bank->bank); return -AFX_NO_HOST_RAM; }
+    bank->sound_count = count;
+    for (uint16_t i = 0; i < count; ++i) {
+        char path[112];
+        snprintf(path, sizeof(path), "%s/%u.afx", controls, ids[i]);
+        result = sfx_flow_load(bank, &bank->sounds[i], ids[i], path);
+        if (result) break;
+    }
+    if (!result) return AFX_OK;
+    for (uint16_t i = 0; i < count; ++i) {
+        if (bank->sounds[i].flow) (void)afx_asset_free(bank->sounds[i].flow);
+        free(bank->sounds[i].fields);
+    }
+    free(bank->sounds); (void)afx_bank_release(&bank->bank); *bank = (dkr_sfx_bank_t){0};
+    return result;
+}
+
+static int sfx_bank_release(dkr_sfx_bank_t *bank) {
+    int result = AFX_OK;
+    if (!bank) return -AFX_BAD_COMMAND;
+    for (uint16_t i = 0; i < bank->sound_count; ++i) {
+        if (bank->sounds[i].flow && (result = afx_asset_free(bank->sounds[i].flow))) return result;
+    }
+    if (bank->bank.asset && (result = afx_bank_release(&bank->bank))) return result;
+    for (uint16_t i = 0; i < bank->sound_count; ++i) free(bank->sounds[i].fields);
+    free(bank->sounds); *bank = (dkr_sfx_bank_t){0};
+    return AFX_OK;
 }
 
 static const char *sfx_scene_path(uint16_t level, char path[64]) {
@@ -176,19 +285,21 @@ int dkr_afx_sfx_scene_prepare(uint16_t level) {
     if (result) return result;
     result = fallback_clear();
     if (result) return result;
-    if (sSceneSfx.header) {
-        result = afx_sfx_bank_release(&sSceneSfx);
+    if (sSceneSfx.bank.asset) {
+        result = sfx_bank_release(&sSceneSfx);
         if (result) return result;
         sSceneLevel = UINT16_MAX;
     }
-    if (sVehicleSfx.header && !vehicle_path) {
-        result = afx_sfx_bank_release(&sVehicleSfx);
+    if (sVehicleSfx.bank.asset && !vehicle_path) {
+        result = sfx_bank_release(&sVehicleSfx);
         if (result) return result;
         sVehicleMask = 0;
     }
     result = AFX_OK;
-    if (vehicle_path && !sVehicleSfx.header)
-        result = afx_sfx_bank_load_file(&sVehicleSfx, vehicle_path);
+    if (vehicle_path && !sVehicleSfx.bank.asset)
+        result = sfx_bank_load(&sVehicleSfx, vehicle_path,
+                               DKR_ASSET_MOUNT "/build/dc/aicaflow/vehicle",
+                               dkr_afx_vehicle_sound_ids, DKR_AFX_VEHICLE_SOUND_COUNT);
     if (result) return result;
     if (vehicle_path && !sVehicleMask) {
         sVehicleMask = 1;
@@ -202,7 +313,13 @@ int dkr_afx_sfx_scene_prepare(uint16_t level) {
             path = NULL;
         }
     }
-    result = path ? afx_sfx_bank_load_file(&sSceneSfx, path) : AFX_OK;
+    if (path) {
+        char controls[64];
+        snprintf(controls, sizeof(controls), DKR_SCENE_SFX_DIR "/%u", level);
+        result = sfx_bank_load(&sSceneSfx, path, controls,
+                               dkr_afx_scene_sound_ids + dkr_afx_scene_sound_first[level],
+                               dkr_afx_scene_sound_count[level]);
+    } else result = AFX_OK;
     /* Music loading can consume the measured space before this allocation. */
     if (result == -AFX_NO_AICA_RAM) {
         path = NULL;
@@ -215,11 +332,13 @@ int dkr_afx_sfx_scene_prepare(uint16_t level) {
 int dkr_afx_init(void) {
     int result;
     result = afx_init(firmware, sizeof(firmware));
-    if (!result) result = afx_sfx_bank_load_file(&sResidentSfx, DKR_RESIDENT_SFX_PATH);
-    if (!result) result = afx_sfx_bank_load_samples_file(&sMusicBank, DKR_MUSIC_BANK_PATH);
+    if (!result) result = sfx_bank_load(&sResidentSfx, DKR_RESIDENT_SFX_PATH,
+                                        DKR_ASSET_MOUNT "/build/dc/aicaflow/core",
+                                        dkr_afx_resident_sound_ids, DKR_AFX_RESIDENT_SOUND_COUNT);
+    if (!result) result = afx_bank_load_file(&sMusicBank, DKR_MUSIC_BANK_PATH);
     for (uint32_t i = 0; !result && i < DKR_SHORT_MUSIC_COUNT; ++i)
         result = music_flow_load(sShortMusicSequences[i], &sShortMusicFlows[i]);
-    if (!result) result = afx_dsp_scene_enable();
+    if (!result) result = dsp_room_upload();
     if (!result) {
         result = music_flow_load(DKR_STARTUP_MUSIC_FIRST, &sMusicFlow);
         if (!result) sMusicFlowSequence = DKR_STARTUP_MUSIC_FIRST;
@@ -245,16 +364,24 @@ int dkr_afx_init(void) {
         }
     }
     sReady = result == 0;
+    if (sReady && DKR_MUSIC_BENCH_SOLO_MASK) {
+        __atomic_store_n(&sMuted, (uint16_t)~DKR_MUSIC_BENCH_SOLO_MASK, __ATOMIC_RELEASE);
+        __atomic_store_n(&sMuteDirty, 0xffffu, __ATOMIC_RELEASE);
+    }
+    /* The capture flow is already preloaded below; avoid taking the game audio
+       mutex while audio startup is still wiring its worker threads. */
+    if (sReady && DKR_MUSIC_BENCH_SEQUENCE)
+        __atomic_store_n(&sWantedSequence, DKR_MUSIC_BENCH_SEQUENCE, __ATOMIC_RELEASE);
     if (result) printf("DKR AICAFLOW: init failed (%d)\n", result);
     return result;
 }
 
-static const afx_sfx_bank_t *sfx_bank_for(uint16_t id, uint32_t *index) {
-    const afx_sfx_bank_t *banks[] = { &sSceneSfx, &sVehicleSfx, &sResidentSfx };
+static const dkr_sfx_bank_t *sfx_bank_for(uint16_t id, uint32_t *index) {
+    const dkr_sfx_bank_t *banks[] = { &sSceneSfx, &sVehicleSfx, &sResidentSfx };
     uint32_t i;
     uint32_t bank;
     for (bank = 0; bank < sizeof(banks) / sizeof(banks[0]); ++bank) {
-        for (i = 0; banks[bank]->header && i < banks[bank]->header->sound_count; ++i) {
+        for (i = 0; banks[bank]->bank.asset && i < banks[bank]->sound_count; ++i) {
             if (banks[bank]->sounds[i].id == id) {
                 *index = i;
                 return banks[bank];
@@ -264,7 +391,7 @@ static const afx_sfx_bank_t *sfx_bank_for(uint16_t id, uint32_t *index) {
     for (i = 0; i < DKR_FALLBACK_SLOTS; ++i) {
         if (sFallback[i].id == id && !sFallback[i].loading &&
             !sFallback[i].requested && !sFallback[i].result &&
-            sFallback[i].bank.header) {
+            sFallback[i].bank.bank.asset) {
             *index = 0;
             return &sFallback[i].bank;
         }
@@ -272,7 +399,7 @@ static const afx_sfx_bank_t *sfx_bank_for(uint16_t id, uint32_t *index) {
     return NULL;
 }
 
-static int fallback_bank_active(const afx_sfx_bank_t *bank) {
+static int fallback_bank_active(const dkr_sfx_bank_t *bank) {
     for (unsigned i = 0; i < DKR_SFX_SLOTS; ++i)
         if (sSfxSlots[i].instance && sSfxSlots[i].bank == bank) return 1;
     return 0;
@@ -283,7 +410,7 @@ static int fallback_clear(void) {
     ++sFallbackGeneration;
     for (unsigned i = 0; i < DKR_FALLBACK_SLOTS; ++i) {
         if (sFallback[i].loading) continue;
-        int result = afx_sfx_bank_release(&sFallback[i].bank);
+        int result = sfx_bank_release(&sFallback[i].bank);
         if (result) return result;
         sFallback[i].id = sFallback[i].requested = 0;
         sFallback[i].result = 0;
@@ -297,7 +424,7 @@ static int fallback_request(uint16_t id) {
         if (sFallback[i].id == id) {
             int result = sFallback[i].result;
             /* Report this failure, but let a later trigger retry after voices retire. */
-            if (result == -AFX_NO_AICA_RAM && !afx_sfx_bank_release(&sFallback[i].bank))
+            if (result == -AFX_NO_AICA_RAM && !sfx_bank_release(&sFallback[i].bank))
                 sFallback[i].id = 0;
             return result ? result : -AFX_BUSY;
         }
@@ -308,7 +435,7 @@ static int fallback_request(uint16_t id) {
             if (sFallback[i].loading || sFallback[i].requested ||
                 sndp_aicaflow_bank_pending(sFallback[i].id) ||
                 fallback_bank_active(&sFallback[i].bank)) continue;
-            if (afx_sfx_bank_release(&sFallback[i].bank)) continue;
+            if (sfx_bank_release(&sFallback[i].bank)) continue;
             sFallback[i].id = id;
             sFallback[i].result = 0;
             sFallback[i].requested = 1;
@@ -335,7 +462,11 @@ static void fallback_load(void) {
     sFallback[i].loading = 1;
     pc_audio_unlock();
     snprintf(path, sizeof(path), DKR_ASSET_MOUNT "/build/dc/aicaflow/fallback/%u.afb", id);
-    result = afx_sfx_bank_load_file(&sFallback[i].bank, path);
+    {
+        char controls[80];
+        snprintf(controls, sizeof(controls), DKR_ASSET_MOUNT "/build/dc/aicaflow/fallback/controls");
+        result = sfx_bank_load(&sFallback[i].bank, path, controls, &id, 1);
+    }
     pc_audio_lock();
     if (result == -AFX_NO_AICA_RAM && generation == sFallbackGeneration) {
         /* Make room without touching resident music or playing sounds. */
@@ -343,7 +474,7 @@ static void fallback_load(void) {
             if (j == i || sFallback[j].loading || sFallback[j].requested ||
                 sndp_aicaflow_bank_pending(sFallback[j].id) ||
                 fallback_bank_active(&sFallback[j].bank)) continue;
-            if (!afx_sfx_bank_release(&sFallback[j].bank)) sFallback[j].id = 0;
+            if (!sfx_bank_release(&sFallback[j].bank)) sFallback[j].id = 0;
         }
         /* A speculative next song yields to a sound needed in this scene. */
         if (sPrefetchedMusicFlow &&
@@ -353,11 +484,15 @@ static void fallback_load(void) {
             sPrefetchedMusicSequence = DKR_SEQUENCE_NONE;
         }
         pc_audio_unlock();
-        result = afx_sfx_bank_load_file(&sFallback[i].bank, path);
+        {
+            char controls[80];
+            snprintf(controls, sizeof(controls), DKR_ASSET_MOUNT "/build/dc/aicaflow/fallback/controls");
+            result = sfx_bank_load(&sFallback[i].bank, path, controls, &id, 1);
+        }
         pc_audio_lock();
     }
     if (generation != sFallbackGeneration) {
-        int released = afx_sfx_bank_release(&sFallback[i].bank);
+        int released = sfx_bank_release(&sFallback[i].bank);
         sFallback[i].id = 0;
         if (released) result = released;
     }
@@ -385,7 +520,13 @@ static int sfx_preempt(uint8_t priority) {
 }
 
 int dkr_afx_sfx_play(uint16_t id, void *owner, uint8_t priority) {
-    const afx_sfx_bank_t *bank;
+    if (DKR_MUSIC_BENCH_SEQUENCE) {
+        (void)id;
+        (void)owner;
+        (void)priority;
+        return AFX_OK;
+    }
+    const dkr_sfx_bank_t *bank;
     uint32_t sound_index;
     uint32_t i;
     if (!sReady || !owner) return -AFX_BAD_COMMAND;
@@ -398,7 +539,7 @@ int dkr_afx_sfx_play(uint16_t id, void *owner, uint8_t priority) {
         dkr_sfx_slot_t *slot = &sSfxSlots[i];
         int result;
         if (slot->instance) continue;
-        result = afx_instance_activate(bank->flows[sound_index], &slot->instance);
+        result = afx_instance_activate(bank->sounds[sound_index].flow, &slot->instance);
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             return sfx_preempt(priority);
         }
@@ -474,6 +615,7 @@ void dkr_afx_sfx_fx(void *owner, uint8_t fx) {
 }
 
 void dkr_afx_music_play(uint8_t sequence) {
+    if (DKR_MUSIC_BENCH_SEQUENCE) sequence = DKR_MUSIC_BENCH_SEQUENCE;
     if (sequence == DKR_SEQUENCE_NONE2) sequence = DKR_SEQUENCE_NONE;
     pc_audio_lock();
     int result = sequence ? dkr_afx_music_prepare(sequence) : AFX_OK;
@@ -590,11 +732,17 @@ static void apply_controls(void) {
 }
 
 static int music_flow_load(uint8_t sequence, afx_asset_t *out_flow) {
-    char path[64];
-    if (!sMusicBank.header || !out_flow || !sequence || sequence >= DKR_SEQUENCE_COUNT)
+    char path[80];
+    uint8_t *data = NULL;
+    uint32_t bytes;
+    int result;
+    if (!sMusicBank.asset || !out_flow || !sequence || sequence >= DKR_SEQUENCE_COUNT)
         return -AFX_BAD_FORMAT;
-    snprintf(path, sizeof(path), DKR_MUSIC_CONTROL_DIR "/sequence_%u.afc", sequence);
-    return afx_sfx_bank_control_upload(&sMusicBank, path, out_flow);
+    snprintf(path, sizeof(path), DKR_MUSIC_CONTROL_DIR "/sequence_%u.afx", sequence);
+    result = read_asset(path, &data, &bytes);
+    if (!result) result = afx_bank_flow_upload(&sMusicBank, data, bytes, out_flow);
+    free(data);
+    return result;
 }
 
 static void music_load_enqueue(uint8_t sequence, int prepared) {
@@ -707,23 +855,23 @@ static void apply_sfx_controls(dkr_sfx_slot_t *slot) {
         if (result) return;
     }
     for (channel = 0; channel < slot->sound->channels; ++channel) {
-        const afx_sfx_bank_setup_t *setup = &slot->bank->setups[slot->sound->setup_first + channel];
+        const uint16_t *setup = slot->sound->fields + channel * AFX_FIELD_COUNT;
         uint16_t values[AFX_FIELD_COUNT];
         uint32_t mask = 0, count = 0;
         if (dirty & DKR_SFX_DIRTY_PITCH) {
             mask |= 1u << AFX_FIELD_PITCH;
-            values[count++] = scaled_pitch(setup->fields[AFX_FIELD_PITCH], slot->pitch);
+            values[count++] = scaled_pitch(setup[AFX_FIELD_PITCH], slot->pitch);
         }
         if (dirty & DKR_SFX_DIRTY_FX) {
-            unsigned fx = (slot->fx + ((setup->fields[AFX_FIELD_DSP_SEND] >> 4) & 15u)) * 8u;
+            unsigned fx = (slot->fx + ((setup[AFX_FIELD_DSP_SEND] >> 4) & 15u)) * 8u;
             if (fx > 127) fx = 127;
             mask |= 1u << AFX_FIELD_DSP_SEND;
-            values[count++] = (uint16_t)((setup->fields[AFX_FIELD_DSP_SEND] & ~0xf0u) |
+            values[count++] = (uint16_t)((setup[AFX_FIELD_DSP_SEND] & ~0xf0u) |
                                          ((fx * 15u + 63u) / 127u) << 4);
         }
         if (dirty & DKR_SFX_DIRTY_PAN) {
             mask |= 1u << AFX_FIELD_DIRECT;
-            values[count++] = panned_direct(setup->fields[AFX_FIELD_DIRECT], slot->pan);
+            values[count++] = panned_direct(setup[AFX_FIELD_DIRECT], slot->pan);
         }
         if (mask && afx_instance_patch(slot->instance, channel, mask, values)) return;
     }
