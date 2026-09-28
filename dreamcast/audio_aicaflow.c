@@ -1,5 +1,4 @@
 #include "dkr_asset_mount.h"
-#include "dkr_music_bench.h"
 #include "audio_aicaflow.h"
 #include "sound_ids.h"
 
@@ -364,14 +363,6 @@ int dkr_afx_init(void) {
         }
     }
     sReady = result == 0;
-    if (sReady && DKR_MUSIC_BENCH_SOLO_MASK) {
-        __atomic_store_n(&sMuted, (uint16_t)~DKR_MUSIC_BENCH_SOLO_MASK, __ATOMIC_RELEASE);
-        __atomic_store_n(&sMuteDirty, 0xffffu, __ATOMIC_RELEASE);
-    }
-    /* The capture flow is already preloaded below; avoid taking the game audio
-       mutex while audio startup is still wiring its worker threads. */
-    if (sReady && DKR_MUSIC_BENCH_SEQUENCE)
-        __atomic_store_n(&sWantedSequence, DKR_MUSIC_BENCH_SEQUENCE, __ATOMIC_RELEASE);
     if (result) printf("DKR AICAFLOW: init failed (%d)\n", result);
     return result;
 }
@@ -520,12 +511,6 @@ static int sfx_preempt(uint8_t priority) {
 }
 
 int dkr_afx_sfx_play(uint16_t id, void *owner, uint8_t priority) {
-    if (DKR_MUSIC_BENCH_SEQUENCE) {
-        (void)id;
-        (void)owner;
-        (void)priority;
-        return AFX_OK;
-    }
     const dkr_sfx_bank_t *bank;
     uint32_t sound_index;
     uint32_t i;
@@ -615,7 +600,6 @@ void dkr_afx_sfx_fx(void *owner, uint8_t fx) {
 }
 
 void dkr_afx_music_play(uint8_t sequence) {
-    if (DKR_MUSIC_BENCH_SEQUENCE) sequence = DKR_MUSIC_BENCH_SEQUENCE;
     if (sequence == DKR_SEQUENCE_NONE2) sequence = DKR_SEQUENCE_NONE;
     pc_audio_lock();
     int result = sequence ? dkr_afx_music_prepare(sequence) : AFX_OK;

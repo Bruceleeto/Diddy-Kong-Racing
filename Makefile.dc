@@ -20,9 +20,6 @@ $(error DKR_ASSET_MOUNT must be /pc or /cd)
 endif
 endif
 
-DKR_MUSIC_BENCH_SEQUENCE ?= 0
-DKR_MUSIC_BENCH_SOLO_MASK ?= 0
-
 AICAFLOW_ROOT := third_party/aicaflow
 
 DEFINES := \
@@ -326,16 +323,8 @@ $(BUILD)/dkr_asset_mount.h: force-asset-mount
 	@printf '#define DKR_ASSET_MOUNT "$(DKR_ASSET_MOUNT)"\n' > $@.tmp
 	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
 
-.PHONY: force-music-bench
-force-music-bench:
-
-$(BUILD)/dkr_music_bench.h: force-music-bench
-	@mkdir -p $(dir $@)
-	@printf '#define DKR_MUSIC_BENCH_SEQUENCE $(DKR_MUSIC_BENCH_SEQUENCE)\n#define DKR_MUSIC_BENCH_SOLO_MASK $(DKR_MUSIC_BENCH_SOLO_MASK)\n' > $@.tmp
-	@cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@
-
 $(BUILD)/dreamcast/reimpl.o: $(BUILD)/dkr_asset_mount.h
-$(BUILD)/dreamcast/audio_aicaflow.o: $(BUILD)/dkr_asset_mount.h $(BUILD)/dkr_music_bench.h
+$(BUILD)/dreamcast/audio_aicaflow.o: $(BUILD)/dkr_asset_mount.h
 
 all: $(MUSIC_AFX) $(MUSIC_BANK)
 $(TARGET): | $(SFX_FALLBACK)

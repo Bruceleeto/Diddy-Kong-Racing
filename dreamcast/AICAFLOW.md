@@ -26,16 +26,18 @@ generation discards loads completed after their scene ended.
 
 Scene teardown cancels pending and delayed sounds, stops active SFX, and waits for
 recycling before releasing banks. Instance slots are not reused before recycling.
-Under memory pressure the loader releases idle fallback banks and speculative
-music flows, preserving the resident music bank and a song requested for
+Under memory pressure the loader releases idle fallback banks and an unneeded
+title-demo prefetch, preserving the resident music bank and a song requested for
 playback. A stopped predecessor yields space to replacement music. A later sound
 trigger may retry a previous allocation failure; file/format errors remain errors.
 
-Short music flows stay ready for race jingles. Loading waits are excluded from
-frame timing so attract demos do not accelerate to catch up afterward. Asset-file
-reads use at most 32 KiB per `/pc` transaction, directly into the destination;
-this does not add a staging buffer or remove the original N64 audio bytes still
-present in SH4's assets.bin. Runtime CRC is not enabled.
+Short music flows stay ready for race jingles. The title menu may prepare one
+next-demo flow so the transition stays gap-free; it is otherwise discarded before
+it competes with scene SFX. Loading waits are excluded from frame timing so
+attract demos do not accelerate to catch up afterward. Asset-file reads use at
+most 32 KiB per `/pc` transaction, directly into the destination; this does not
+add a staging buffer or remove the original N64 audio bytes still present in
+SH4's assets.bin. Runtime CRC is not enabled.
 
 ## Playback lifetime and limits
 
