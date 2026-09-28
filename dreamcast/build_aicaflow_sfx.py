@@ -25,10 +25,6 @@ EXTRA_BY_LEVEL = {
 VEHICLE_NAMES = ("VEHICLE_CAR", "VEHICLE_HOVERCRAFT", "VEHICLE_PLANE")
 
 
-def level_stem(name):
-    return "".join(part.title() for part in name.removeprefix("ASSET_LEVEL_").split("_"))
-
-
 def sound_ids_header(path):
     return {match.group(2): int(match.group(1), 16)
             for match in re.finditer(r"/\* 0x([0-9A-Fa-f]+) \*/\s*(SOUND_[A-Z0-9_]+)",
@@ -181,10 +177,13 @@ def main():
     # to preserve AICA RAM for the music bank.
     core = RACE_IDS | TITLE_IDS | ITEM_IDS | ALWAYS_IDS
     vehicles = vehicle_ids(assets / "audio/unknown/asset_audio_8.bin") - core
-    order = json.loads((assets / "asset_level_headers.meta.json").read_text())["files"]["order"]
+    level_metadata = json.loads((assets / "asset_level_headers.meta.json").read_text())["files"]
+    order = level_metadata["order"]
+    header_filenames = level_metadata["sections"]
     scene_ids, present, masks = {}, [], []
     for level, enum in enumerate(order):
-        header = json.loads((assets / "levels/headers" / f"{level_stem(enum)}.json").read_text())
+        header = json.loads((assets / "levels/headers" /
+                             header_filenames[enum]["filename"]).read_text())
         ids = level_ids(root, header, table) | EXTRA_BY_LEVEL.get(level, set())
         ids -= core | vehicles
         scene_ids[level] = ids
