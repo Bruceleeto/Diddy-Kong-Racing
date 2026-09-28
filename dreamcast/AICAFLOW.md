@@ -78,13 +78,16 @@ ensure_dctool_ready && dc-tool-ip -f -t "$DCTOOL_HOST:31313" -q -m "$PWD" -x "$P
 ```
 
 `Makefile.dc` builds the pinned AICAflow firmware and SH-4 library on demand.
+The standalone DKR music player lives in the pinned AICAflow checkout at
+`examples/dkr_music_player`; it builds its checked-in player assets without a
+DKR checkout or extraction step.
 
 To update deliberately, check out a tested AICAflow tag in the submodule and
 commit the changed gitlink with its DKR validation:
 
 ```sh
 git -C third_party/aicaflow fetch --tags
-git -C third_party/aicaflow checkout v0.1.6-dkr
+git -C third_party/aicaflow checkout v0.1.8-dkr
 git add third_party/aicaflow
 ```
 
