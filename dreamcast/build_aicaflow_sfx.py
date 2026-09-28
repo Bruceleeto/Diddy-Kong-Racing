@@ -13,7 +13,9 @@ TITLE_IDS = {17, 22, 261, 262}
 RACE_IDS = {1, 4, 5, 10, 19, 21, 22, 24, 25, 35, 41, 47, 55, 74, 76, 77, 83,
             114, 122, 128, 139, 155, 180, 189, 200, 218, 224, 225, 226, 227,
             228, 231, 232, 233, 234, 235, 236, 237, 243, 257, 266, 269, 286,
-            289, 304, 505, 563, 677}
+            289, 304, 505, 677}
+ITEM_IDS = {563, 565, 567}
+ALWAYS_IDS = {7}  # SOUND_BALLOON_POP after DKR's gSoundTable translation.
 EXTRA_BY_LEVEL = {
     36: {3, 4, 66, 68, 69, 77, 269, 270},
     # The boot logo runs in Frontend. These are the raw sound bites
@@ -173,7 +175,11 @@ def main():
     # for this one offline export pass.
     bank, component_cache = ALBank(control, samples), {}
     table = sound_table(assets / "audio/unknown/asset_audio_7.bin")
-    core = RACE_IDS | TITLE_IDS
+    # These sound-table targets are selected arithmetically in gameplay code,
+    # so static_ids() cannot discover all of them. They must be ready before a
+    # pickup can be heard; the remaining one-shots stay scene-local/fallback
+    # to preserve AICA RAM for the music bank.
+    core = RACE_IDS | TITLE_IDS | ITEM_IDS | ALWAYS_IDS
     vehicles = vehicle_ids(assets / "audio/unknown/asset_audio_8.bin") - core
     order = json.loads((assets / "asset_level_headers.meta.json").read_text())["files"]["order"]
     scene_ids, present, masks = {}, [], []
