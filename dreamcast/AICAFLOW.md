@@ -79,7 +79,8 @@ make -f Makefile.dc -j8
 ensure_dctool_ready && dc-tool-ip -f -t "$DCTOOL_HOST:31313" -q -m "$PWD" -x "$PWD/dkracing.elf"
 ```
 
-`Makefile.dc` builds the pinned AICAflow firmware and SH-4 library on demand.
+`Makefile.dc` uses the pinned, precompiled AICAflow firmware and builds the SH-4 library on demand.
+An ARM7 toolchain is only needed when modifying the firmware.
 The standalone DKR music player lives in the pinned AICAflow checkout at
 `examples/dkr_music_player`; it builds its checked-in player assets without a
 DKR checkout or extraction step.
