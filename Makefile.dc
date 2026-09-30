@@ -293,7 +293,7 @@ MUSIC_CONTROLS := $(BUILD)/aicaflow/music_controls
 MUSIC_VISUALS := $(BUILD)/aicaflow/music_visuals.json
 DKR_AICAFLOW_TOOLS := dreamcast/aicaflow_tools
 AICAFLOW_RESEARCH := $(AICAFLOW_ROOT)/tools/research
-AICAFLOW_N64_SEQUENCE := $(DKR_AICAFLOW_TOOLS)/afx_n64.py \
+AICAFLOW_N64_SEQUENCE := $(AICAFLOW_RESEARCH)/afx_n64.py $(AICAFLOW_RESEARCH)/afx_n64_cseq.py \
 	$(AICAFLOW_RESEARCH)/afx_compile.py $(AICAFLOW_RESEARCH)/afx_adpcm.py
 AICAFLOW_N64_SFX := $(DKR_AICAFLOW_TOOLS)/afx_n64_sfx.py $(AICAFLOW_N64_SEQUENCE)
 SFX_MANIFEST := $(BUILD)/aicaflow/sfx_manifest.h
@@ -360,7 +360,7 @@ $(BUILD)/aicaflow/sequence_%.afx: \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_5.bin \
 	$(AICAFLOW_N64_SEQUENCE)
 	@mkdir -p $(dir $@)
-	$(PYTHON) $(DKR_AICAFLOW_TOOLS)/afx_n64.py --quiet $(word 1,$^) $(word 2,$^) $(word 3,$^) $* $@
+	$(PYTHON) $(AICAFLOW_RESEARCH)/afx_n64.py cseq --quiet $(word 1,$^) $(word 2,$^) $(word 3,$^) $* $@
 
 $(MUSIC_BANK): $(MUSIC_AFX) \
 	$(AICAFLOW_RESEARCH)/afx_music_bank.py $(AICAFLOW_RESEARCH)/afx_compile.py

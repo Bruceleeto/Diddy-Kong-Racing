@@ -14,7 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "third_party/aicaflow/tools/research"))
 
 import afx_compile
-from afx_n64 import ALBank, N64Error, _attenuation, _rate_for_us
+from afx_n64_cseq import ALBank, N64Error, _attenuation, _rate_for_us
 
 
 AFB_MAGIC = 0x00424641  # "AFB\\0"

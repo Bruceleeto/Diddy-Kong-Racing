@@ -12,7 +12,7 @@ DKR builds its calibrated room DSP image at runtime with AICAflow's C
 scene. Reverb settings only gate the authored stereo returns; they do not
 replace or regenerate the effect while audio is running.
 
-The generated pack contains 51 resident sounds, 24 vehicle sounds, 49 nonempty
+The generated pack contains 54 resident sounds, 24 vehicle sounds, 49 nonempty
 local banks for 65 scene choices, and 784 independently loadable fallback banks.
 Scene extraction reads audio objects, audio lines and animation sound IDs; the
 frontend includes the intro plane and children explicitly. Runtime requests not
@@ -81,9 +81,11 @@ ensure_dctool_ready && dc-tool-ip -f -t "$DCTOOL_HOST:31313" -q -m "$PWD" -x "$P
 
 `Makefile.dc` uses the current pinned AICAflow `main` runtime and builds the SH-4 library on demand.
 An ARM7 toolchain is only needed when modifying the firmware.
-DKR's CSeq/ALBank readers live in `dreamcast/aicaflow_tools`; they deliberately
-remain here because they describe Nintendo 64 assets, while the compiler,
-codec, and runtime live in the reusable AICAflow submodule.
+The reusable CSeq/ALBank reader lives in
+`third_party/aicaflow/tools/research/afx_n64.py cseq`. DKR owns only its SFX
+pack policy in `dreamcast/aicaflow_tools`: which sounds are resident, vehicle-
+or scene-local, and its source-derived manifest. OoT's distinct AudioSeq
+reader is exposed through the same AICAflow command as `audioseq`.
 
 To update deliberately, move the submodule to a tested AICAflow main commit and
 commit the changed gitlink with its DKR validation:

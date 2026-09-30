@@ -159,8 +159,9 @@ def main():
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
     root, output = args.root.resolve(), args.output.resolve()
+    sys.path.insert(0, str(root / "third_party/aicaflow/tools/research"))
     sys.path.insert(0, str(args.aicaflow_tools.resolve()))
-    from afx_n64 import ALBank
+    from afx_n64_cseq import ALBank
     from afx_n64_sfx import compile_pack
 
     assets = root / "assets/.vanilla/us.v77"

@@ -13,8 +13,10 @@ from pathlib import Path
 # three player “get item” composites and their chained components.
 def initialize_worker(tools, control, samples):
     global _control, _samples, _bank, _component_cache
+    root = Path(tools).resolve().parents[1]
+    sys.path.insert(0, str(root / 'third_party/aicaflow/tools/research'))
     sys.path.insert(0, tools)
-    from afx_n64 import ALBank
+    from afx_n64_cseq import ALBank
     _control, _samples = control, samples
     _bank = ALBank(control, samples)
     _component_cache = {}
@@ -33,8 +35,9 @@ def main():
     parser.add_argument('output', type=Path)
     parser.add_argument('--verify', action='store_true')
     args = parser.parse_args()
+    sys.path.insert(0, str(args.root.resolve() / 'third_party/aicaflow/tools/research'))
     sys.path.insert(0, str(args.tools.resolve()))
-    from afx_n64 import ALBank
+    from afx_n64_cseq import ALBank
     assets = args.root/'assets/.vanilla/us.v77/audio/unknown'
     control = (assets/'asset_audio_2.bin').read_bytes()
     samples = (assets/'asset_audio_3.bin').read_bytes()
