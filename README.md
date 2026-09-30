@@ -17,7 +17,7 @@ tldr for dreamcast
 
 `make -f Makefile.dc -j8`
 
-Dreamcast audio uses the pinned [AICAflow DKR Edition](dreamcast/AICAFLOW.md)
+Dreamcast audio uses the pinned [AICAflow runtime](dreamcast/AICAFLOW.md)
 submodule. Clone with `--recurse-submodules`, or initialise submodules before
 building.
 

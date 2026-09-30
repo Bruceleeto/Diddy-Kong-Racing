@@ -24,7 +24,7 @@
 #define DKR_SFX_DIRTY_FX 8
 
 alignas(32) static const unsigned char firmware[] = {
-#embed "../third_party/aicaflow/driver/arm7/aicaflow.drv"
+#embed "../third_party/aicaflow/firmware/aicaflow.drv"
 };
 
 #define DKR_RESIDENT_SFX_PATH DKR_ASSET_MOUNT "/build/dc/aicaflow/core.afb"
@@ -181,7 +181,7 @@ static int read_asset(const char *path, uint8_t **out_data, uint32_t *out_size) 
     uint8_t *data = NULL;
     if (!file || fseek(file, 0, SEEK_END)) { if (file) fclose(file); return -AFX_BAD_BOUNDS; }
     length = ftell(file);
-    if (length <= 0 || length > AFX_ASSET_LIMIT || fseek(file, 0, SEEK_SET)) {
+    if (length <= 0 || length > AFX_ASSET_MAX || fseek(file, 0, SEEK_SET)) {
         fclose(file); return -AFX_BAD_BOUNDS;
     }
     data = memalign(32, (size_t)length);

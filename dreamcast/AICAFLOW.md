@@ -79,18 +79,18 @@ make -f Makefile.dc -j8
 ensure_dctool_ready && dc-tool-ip -f -t "$DCTOOL_HOST:31313" -q -m "$PWD" -x "$PWD/dkracing.elf"
 ```
 
-`Makefile.dc` uses the pinned, precompiled AICAflow firmware and builds the SH-4 library on demand.
+`Makefile.dc` uses the current pinned AICAflow `main` runtime and builds the SH-4 library on demand.
 An ARM7 toolchain is only needed when modifying the firmware.
-The standalone DKR music player lives in the pinned AICAflow checkout at
-`examples/dkr_music_player`; it builds its checked-in player assets without a
-DKR checkout or extraction step.
+DKR's CSeq/ALBank readers live in `dreamcast/aicaflow_tools`; they deliberately
+remain here because they describe Nintendo 64 assets, while the compiler,
+codec, and runtime live in the reusable AICAflow submodule.
 
-To update deliberately, check out a tested AICAflow tag in the submodule and
+To update deliberately, move the submodule to a tested AICAflow main commit and
 commit the changed gitlink with its DKR validation:
 
 ```sh
-git -C third_party/aicaflow fetch --tags
-git -C third_party/aicaflow checkout v0.1.10-dkr
+git -C third_party/aicaflow fetch origin main
+git -C third_party/aicaflow checkout origin/main
 git add third_party/aicaflow
 ```
 
@@ -115,11 +115,14 @@ These changes do not guarantee recovery from arbitrary network failures.
 ## Verification
 
 ```sh
-./.venv/bin/python3 dreamcast/build_aicaflow_sfx.py . third_party/aicaflow/tools build/dc/aicaflow --verify
-./.venv/bin/python3 dreamcast/build_aicaflow_fallback.py . third_party/aicaflow/tools build/dc/aicaflow/fallback --verify
-make -C third_party/aicaflow/driver/arm7
+./.venv/bin/python3 dreamcast/build_aicaflow_sfx.py . dreamcast/aicaflow_tools build/dc/aicaflow --verify
+./.venv/bin/python3 dreamcast/build_aicaflow_fallback.py . dreamcast/aicaflow_tools build/dc/aicaflow/fallback --verify
 make -C third_party/aicaflow/driver/sh4
 ```
+
+The checked-in `third_party/aicaflow/firmware/aicaflow.drv` lets normal DKR
+builds work without an ARM7 toolchain. Rebuild it only after firmware changes:
+`make -C third_party/aicaflow firmware`.
 
 Each AFX is sample-free and binds once to exactly one AFB. AFC files are
 optional SH4 seek indexes; normal game playback needs only the AFB and AFX.
