@@ -1,53 +1,49 @@
-# DKR Music Player
+# DKR music player
 
-This optional enDjinn bonus player plays DKR's 64 non-silent sequences. It loads
-the shared `music.afb`, then one small bank-bound AFX/AFC/AFV set per song.
-The game itself neither needs enDjinn nor builds this directory.
+An optional enDjinn player for DKR's 64 playable sequences. It keeps one
+shared `music.afb` resident and loads each song's AFX/AFC/AFV sidecars.
+The game itself does not depend on this player or enDjinn.
 
-The D-pad selects, A plays or pauses, B stops, LEFT/RIGHT seek ten seconds,
-and L/R page.  Regular tracks come first, ambient tracks next, and short cues
-last. The playlist reports only the AFC file size in KiB (rounded up).
-AFC contains SH4-only seek checkpoints; it is not uploaded to AICA and the
-displayed size excludes the AFX control stream and shared AFB sample bank.
-The AFC header is included in the file size; SH4 retains its checkpoint payload
-after validation. Seeking sends reconstructed voice state, not the AFC table,
-to AICA. The footer's `AICA` figure is a separate flow-image figure; with this
-shared bank, `S 0K/0` means no per-song sample allocation, not silent music or
-a missing `music.afb`. The shared bank is still resident.
+## Build and launch
 
-Build only when you want the player.  First make enDjinn available next to the
-DKR checkout, then run:
+Place enDjinn next to the DKR checkout. From the DKR root:
 
 ```sh
+cd bonus/dkr_music_player
 source ../../../enDjinn/environ.sh
 make
 make check
-make bin/dkr_music_player.cdi
+kos-tool -f -t "$DCTOOL_HOST" \
+  -m "$PWD/cdrom/dkr_music_player" -x "$PWD/bin/dkr_music_player.elf"
 ```
 
-The first build regenerates DKR's CSeq-derived shared bank, flows and AFV
-sidecars with the pinned AICAflow C tools.  Launch its ELF with the staged
-directory as `/pc`:
+For dc-load-ip, use the same mapped directory:
 
 ```sh
 dc-tool-ip -f -t "$DCTOOL_HOST:31313" -q \
   -m "$PWD/cdrom/dkr_music_player" -x "$PWD/bin/dkr_music_player.elf"
 ```
 
-For kos-load/kos-tool instead:
+Keep the host server and computer awake during `/pc` playback. For Flycast or
+offline playback:
 
 ```sh
-kos-tool -f -t "$DCTOOL_HOST" \
-  -m "$PWD/cdrom/dkr_music_player" -x "$PWD/bin/dkr_music_player.elf"
+make bin/dkr_music_player.cdi
 ```
 
-Keep the host server/computer awake while using `/pc`; the player reads songs
-and visualization data after ELF startup. START+A+B+X+Y exits through the
-enDjinn loop. For Flycast or an offline recording, use the generated CDI.
+## Controls and display
 
-`prepare.py` stages existing authored files and builds `include/songs.h` with
-actual AFC byte sizes and source-derived titles/gain/reverb metadata; it is
-not another music compiler. AFX/AFC reads are synchronous. AFV reads use the
-shared player loop; song changes reuse the resident AFB. The game alone uses
-the [AFSFX grouping map](../../third_party/aicaflow/docs/specs/afsfx.md); this
-music-only player does not need or interpret it.
+D-pad selects, A plays/pauses, B stops, left/right seeks ten seconds, and L/R
+pages. START+A+B+X+Y exits. Regular songs precede ambient tracks and short cues.
+
+The playlist shows AFC file size rounded up to KiB, including its header.
+AFC seek data stays on SH4. The footer's `AICA` value is the flow-image cost;
+`S 0K/0` indicates no per-song sample allocation because the shared bank is
+resident. Seeking sends reconstructed voice state to AICA, not the AFC table.
+
+## Assets
+
+The build generates music with AICAflow's C tools. `prepare.py` stages assets
+and writes `include/songs.h` with titles, AFC sizes and gain/reverb metadata.
+AFX/AFC reads are synchronous; AFV reads are stepped through the shared
+[enDjinn player framework](../../third_party/aicaflow/examples/player_framework/README.md).
