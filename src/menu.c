@@ -3354,6 +3354,33 @@ void func_80083098(f32 updateRateF) {
  * Load the title textures and reset player allocation.
  * Set the current level and demo.
  */
+void menu_prefetch_next_title_demo_music(void) {
+    s8 *demo;
+    u32 *offsets;
+    u8 sequence = SEQUENCE_NONE;
+    s32 index;
+    s32 count;
+
+    if (!sTitleScreenDemoIds) return;
+    index = gTitleDemoIndex + DEMO_INDEX_SIZE;
+    demo = &sTitleScreenDemoIds[index];
+    if (demo[0] == -1) demo = sTitleScreenDemoIds;
+    if (demo[DEMO_LEVEL_ID] < 0) return;
+    offsets = asset_table_load(ASSET_LEVEL_HEADERS_TABLE);
+    if (!offsets) return;
+    count = asset_table_size(ASSET_LEVEL_HEADERS_TABLE) / sizeof(*offsets);
+#ifdef TARGET_PC
+    extern void pc_swap32_buf(void *buf, u32 numBytes);
+    pc_swap32_buf(offsets, asset_table_size(ASSET_LEVEL_HEADERS_TABLE));
+#endif
+    if (demo[DEMO_LEVEL_ID] + 1 < count && offsets[demo[DEMO_LEVEL_ID] + 1] != (u32)-1) {
+        asset_load(ASSET_LEVEL_HEADERS, (u32)&sequence,
+                   offsets[demo[DEMO_LEVEL_ID]] + __builtin_offsetof(LevelHeader, music), 1);
+    }
+    mempool_free(offsets);
+    music_prefetch(sequence);
+}
+
 void menu_title_screen_init(void) {
     s32 i;
     s32 numberOfPlayers;
@@ -3390,13 +3417,15 @@ void menu_title_screen_init(void) {
     set_time_trial_enabled(FALSE);
     gTitleDemoIndex = 0;
     sTitleScreenDemoIds = (s8 *) get_misc_asset(ASSET_MISC_TITLE_SCREEN_DEMO_IDS);
-    numberOfPlayers = sTitleScreenDemoIds[DEMO_PLAYER_COUNT];
+    numberOfPlayers = sTitleScreenDemoIds[gTitleDemoIndex + DEMO_PLAYER_COUNT];
     gTitleDemoTimer = 0;
     if (numberOfPlayers == -2) {
         numberOfPlayers = 0;
         gTitleDemoTimer = 600;
     }
-    load_level_for_menu(sTitleScreenDemoIds[DEMO_LEVEL_ID], numberOfPlayers, sTitleScreenDemoIds[DEMO_CUTSCENE_ID]);
+    load_level_for_menu(sTitleScreenDemoIds[gTitleDemoIndex + DEMO_LEVEL_ID], numberOfPlayers,
+                        sTitleScreenDemoIds[gTitleDemoIndex + DEMO_CUTSCENE_ID]);
+    menu_prefetch_next_title_demo_music();
     D_801268D8 = 0;
     gOpeningNameID = 0;
     D_801268DC = 0;
@@ -3514,6 +3543,7 @@ s32 menu_title_screen_loop(s32 updateRate) {
             gTitleDemoTimer = 1500;
         }
         load_level_for_menu(demo[DEMO_LEVEL_ID], playerCount, demo[DEMO_CUTSCENE_ID]);
+        menu_prefetch_next_title_demo_music();
         if (sTitleScreenDemoIds[gTitleDemoIndex] == sTitleScreenDemoIds[DEMO_LEVEL_ID]) {
             D_801268D8 = 0.0f;
             gOpeningNameID = 0;

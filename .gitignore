@@ -88,3 +88,11 @@ cd/
 testcast
 pc/
 amap
+
+# Generated Dreamcast disc staging and images
+/cdrom/
+/*.cdi
+/dkracing-*.elf
+/bonus/dkr_music_player/cdrom/
+/bonus/dkr_music_player/include/songs.h
+/captures/

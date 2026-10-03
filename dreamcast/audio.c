@@ -6,6 +6,10 @@
 
 #include <sh4zam/shz_sh4zam.h>
 
+#ifdef DKR_AICAFLOW
+#include "audio_aicaflow.h"
+#endif
+
 typedef int16_t s16;
 typedef int32_t s32;
 typedef uint8_t u8;
@@ -124,6 +128,10 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t left, uintptr_t right, si
 // KOS's "Queue is not yet valid" assert. Failure here is non-fatal: silent-but-
 // paced.
 void dc_audio_init(void) {
+#ifdef DKR_AICAFLOW
+    dkr_afx_init();
+    return;
+#else
     if (sAudioOk) {
         return;
     }
@@ -153,6 +161,7 @@ void dc_audio_init(void) {
     }
     snd_stream_set_callback_direct(sStream, audio_cb);
     sAudioOk = 1;
+#endif
 }
 
 // Called once from amCreateAudioMgr with OUTPUT_RATE. The manager derives its
@@ -243,6 +252,12 @@ extern void pc_audio_lock(void);
 extern void pc_audio_unlock(void);
 
 static void pc_audio_tick(void) {
+#ifdef DKR_AICAFLOW
+    pc_audio_lock();
+    dkr_afx_update();
+    pc_audio_unlock();
+    return;
+#else
     u32 drained;
     u32 target;
     s32 ticks = 0;
@@ -269,6 +284,7 @@ static void pc_audio_tick(void) {
     if (sAudioOk && sStreamStarted) {
         snd_stream_poll(sStream);
     }
+#endif
 }
 
  
