@@ -61,7 +61,7 @@ def flow_stats(data: bytes) -> dict[str, int]:
     setup_bytes = h[9] * 36
     if setup_bytes > stream_at:
         raise ValueError("invalid AFX setups")
-    return {"bytes": image_bytes, "control_bytes": 0, "sample_bytes": 0,
+    return {"bytes": image_bytes, "sample_bytes": 0,
             "stream_bytes": stream_bytes, "setup_bytes": setup_bytes,
             "padding_bytes": image_bytes - setup_bytes - stream_bytes,
             "command_baseline_bytes": stream_bytes + notes * 36,
@@ -91,7 +91,8 @@ def stage(root: Path, disc: Path, verify: bool) -> bytes:
         stats = flow_stats(source.read_bytes())
         volume, _, reverb = properties[sequence * 3:sequence * 3 + 3]
         songs.append({"sequence": sequence, "title": track["title"], "file": source.name,
-                      "visual": track["visual"], "dsp": bool(reverb), "gain": volume * 96 // 127, **stats})
+                      "visual": track["visual"], "dsp": bool(reverb), "gain": volume * 96 // 127,
+                      "control_bytes": seek.stat().st_size, **stats})
         sources += [(source, disc / source.name), (seek, disc / seek.name), (visual, disc / track["visual"])]
     songs.sort(key=lambda song: (song["duration_ticks"] < SHORT_CUE_TICKS, "ambient" in song["title"].casefold()))
     header = ["static const struct song { const char *title, *file, *visual, *dsp; bool wraps; uint32_t bytes, control_bytes, sample_bytes, stream_bytes, setup_bytes, padding_bytes, command_baseline_bytes, note_count; uint16_t sample_count, setup_count; uint8_t sequence, channel_count, gain; } songs[] = {"]

@@ -10,13 +10,15 @@ ENJ_INCLUDES += -Iinclude -I$(AICAFLOW_ROOT)/driver/include -I$(AICAFLOW_ROOT)/d
 ENJ_LDLIBS += $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a
 AICA_FIRMWARE := $(ENJ_ROMDIR)/$(ENJ_BASENAME)/aicaflow.drv
 
-.PHONY: dkr-music-player-assets check
+.PHONY: dkr-music-player-assets check FORCE
 
-dkr-music-player-assets:
+dkr-music-player-assets: include/songs.h
+
+FORCE:
+
+include/songs.h: FORCE
 	$(MAKE) -C $(DKR_ROOT) -f Makefile.dc aicaflow-music-visuals
 	$(DKR_PYTHON) prepare.py $(DKR_ROOT) cdrom/$(ENJ_BASENAME)
-
-include/songs.h: dkr-music-player-assets
 
 assets: dkr-music-player-assets $(AICA_FIRMWARE)
 $(ENJ_BUILDDIR)/code/main.o: include/songs.h $(AICAFLOW_ROOT)/examples/player_framework/music_player.c

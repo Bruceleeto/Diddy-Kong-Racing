@@ -6,7 +6,9 @@ The game itself neither needs enDjinn nor builds this directory.
 
 The D-pad selects, A plays or pauses, B stops, LEFT/RIGHT seek ten seconds,
 and L/R page.  Regular tracks come first, ambient tracks next, and short cues
-last.  The playlist reports only the AFC size as requested.
+last. The playlist reports only the AFC file size in KiB (rounded up).
+AFC contains SH4-only seek checkpoints; it is not uploaded to AICA and the
+displayed size excludes the AFX control stream and shared AFB sample bank.
 
 Build only when you want the player.  First make enDjinn available next to the
 DKR checkout, then run:
