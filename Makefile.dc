@@ -353,10 +353,17 @@ aicaflow-music-visuals-verify: $(MUSIC_VISUALS)
 $(AICAFLOW_ROOT)/firmware/aicaflow.drv:
 	$(MAKE) -C $(AICAFLOW_ROOT) firmware
 
-$(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a:
+$(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a: \
+	$(wildcard $(AICAFLOW_ROOT)/driver/sh4/src/*.[ch] $(AICAFLOW_ROOT)/driver/sh4/include/aicaflow/*.h $(AICAFLOW_ROOT)/driver/include/aicaflow/*.h) \
+	$(AICAFLOW_ROOT)/driver/common/codec.c $(AICAFLOW_ROOT)/driver/sh4/Makefile
 	$(MAKE) -C $(dir $@)
 
-$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR):
+$(AICAFLOW_N64_AUTHOR): \
+	$(wildcard $(AICAFLOW_ROOT)/tools/author/*.[ch] $(AICAFLOW_ROOT)/driver/include/aicaflow/*.h) \
+	$(AICAFLOW_ROOT)/driver/common/codec.c $(AICAFLOW_ROOT)/Makefile
+	$(MAKE) -C $(AICAFLOW_ROOT) compiler
+
+$(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR): $(AICAFLOW_N64_AUTHOR)
 	$(MAKE) -C $(AICAFLOW_ROOT) compiler
 
 $(MUSIC_RAW_DIR)/sequence_%.afx: \
