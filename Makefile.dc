@@ -287,7 +287,9 @@ D_FILES := $(O_FILES:.o=.d)
 TARGET := dkracing.elf
 MAP    := $(TARGET:.elf=.map)
 MUSIC_SEQUENCES := 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65
-MUSIC_AFX := $(MUSIC_SEQUENCES:%=$(BUILD)/aicaflow/sequence_%.afx)
+MUSIC_RAW_DIR := $(BUILD)/aicaflow/music_raw
+MUSIC_RAW_AFX := $(MUSIC_SEQUENCES:%=$(MUSIC_RAW_DIR)/sequence_%.afx)
+MUSIC_AFX = $(MUSIC_SEQUENCES:%=$(MUSIC_CONTROLS)/sequence_%.afx)
 MUSIC_BANK := $(BUILD)/aicaflow/music.afb
 MUSIC_CONTROLS := $(BUILD)/aicaflow/music_controls
 MUSIC_VISUALS := $(BUILD)/aicaflow/music_visuals.json
@@ -295,6 +297,8 @@ DKR_AICAFLOW_TOOLS := dreamcast/aicaflow_tools
 AICAFLOW_RESEARCH := $(AICAFLOW_ROOT)/tools/research
 AICAFLOW_N64_SEQUENCE := $(AICAFLOW_RESEARCH)/afx_n64.py $(AICAFLOW_RESEARCH)/afx_n64_cseq.py \
 	$(AICAFLOW_RESEARCH)/afx_compile.py $(AICAFLOW_RESEARCH)/afx_adpcm.py
+AICAFLOW_N64_AUTHOR := $(AICAFLOW_ROOT)/build/afx_n64
+AICAFLOW_BANK_AUTHOR := $(AICAFLOW_ROOT)/build/afx_bank
 AICAFLOW_N64_SFX := $(DKR_AICAFLOW_TOOLS)/afx_n64_sfx.py $(AICAFLOW_N64_SEQUENCE)
 SFX_MANIFEST := $(BUILD)/aicaflow/sfx_manifest.h
 SFX_FALLBACK := $(BUILD)/aicaflow/fallback/manifest.json
@@ -354,17 +358,23 @@ $(AICAFLOW_ROOT)/firmware/aicaflow.drv:
 $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a:
 	$(MAKE) -C $(dir $@)
 
-$(BUILD)/aicaflow/sequence_%.afx: \
+$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR):
+	$(MAKE) -C $(AICAFLOW_ROOT) compiler
+
+$(MUSIC_RAW_DIR)/sequence_%.afx: \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_0.bin \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_1.bin \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_5.bin \
-	$(AICAFLOW_N64_SEQUENCE)
+	$(AICAFLOW_N64_AUTHOR)
 	@mkdir -p $(dir $@)
-	$(PYTHON) $(AICAFLOW_RESEARCH)/afx_n64.py cseq --quiet $(word 1,$^) $(word 2,$^) $(word 3,$^) $* $@
+	$(AICAFLOW_N64_AUTHOR) $(word 1,$^) $(word 2,$^) $(word 3,$^) $* $@
 
-$(MUSIC_BANK): $(MUSIC_AFX) \
-	$(AICAFLOW_RESEARCH)/afx_music_bank.py $(AICAFLOW_RESEARCH)/afx_compile.py
-	PYTHONPATH=$(AICAFLOW_RESEARCH) $(PYTHON) $(AICAFLOW_RESEARCH)/afx_music_bank.py $@ --controls-dir $(MUSIC_CONTROLS) $(MUSIC_AFX)
+$(MUSIC_BANK): $(MUSIC_RAW_AFX) $(AICAFLOW_BANK_AUTHOR)
+	@mkdir -p $(MUSIC_CONTROLS)
+	$(AICAFLOW_BANK_AUTHOR) --merge $@ $(MUSIC_CONTROLS) $(MUSIC_RAW_AFX)
+
+$(MUSIC_AFX): $(MUSIC_BANK)
+	@test -s $@
 
 $(MUSIC_VISUALS): $(MUSIC_BANK) dreamcast/build_aicaflow_music_visuals.py \
 	$(AICAFLOW_RESEARCH)/afx_visualize.py

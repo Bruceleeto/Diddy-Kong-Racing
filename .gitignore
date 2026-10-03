@@ -94,4 +94,5 @@ amap
 /*.cdi
 /dkracing-*.elf
 /examples/dkr_music_player/cdrom/
+/examples/dkr_music_player/include/songs.h
 /captures/
