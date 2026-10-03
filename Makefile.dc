@@ -294,12 +294,10 @@ MUSIC_BANK := $(BUILD)/aicaflow/music.afb
 MUSIC_CONTROLS := $(BUILD)/aicaflow/music_controls
 MUSIC_VISUALS := $(BUILD)/aicaflow/music_visuals.json
 DKR_AICAFLOW_TOOLS := dreamcast/aicaflow_tools
-AICAFLOW_RESEARCH := $(AICAFLOW_ROOT)/tools/research
-AICAFLOW_N64_SEQUENCE := $(AICAFLOW_RESEARCH)/afx_n64.py $(AICAFLOW_RESEARCH)/afx_n64_cseq.py \
-	$(AICAFLOW_RESEARCH)/afx_compile.py $(AICAFLOW_RESEARCH)/afx_adpcm.py
 AICAFLOW_N64_AUTHOR := $(AICAFLOW_ROOT)/build/afx_n64
 AICAFLOW_BANK_AUTHOR := $(AICAFLOW_ROOT)/build/afx_bank
-AICAFLOW_N64_SFX := $(DKR_AICAFLOW_TOOLS)/afx_n64_sfx.py $(AICAFLOW_N64_SEQUENCE)
+AICAFLOW_AUTHOR := $(AICAFLOW_ROOT)/build/afx_compile
+DKR_SFX_MAP := $(DKR_AICAFLOW_TOOLS)/dkr.afsfx
 SFX_MANIFEST := $(BUILD)/aicaflow/sfx_manifest.h
 SFX_FALLBACK := $(BUILD)/aicaflow/fallback/manifest.json
 
@@ -339,18 +337,18 @@ $(SFX_FALLBACK): \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_2.bin \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_3.bin \
 	dreamcast/build_aicaflow_fallback.py \
-	$(AICAFLOW_N64_SFX)
-	$(PYTHON) dreamcast/build_aicaflow_fallback.py . $(DKR_AICAFLOW_TOOLS) $(dir $@)
+	$(AICAFLOW_N64_AUTHOR)
+	$(PYTHON) dreamcast/build_aicaflow_fallback.py . $(AICAFLOW_N64_AUTHOR) $(dir $@)
 
 .PHONY: aicaflow-fallback-verify
 aicaflow-fallback-verify: $(SFX_FALLBACK)
-	$(PYTHON) dreamcast/build_aicaflow_fallback.py . $(DKR_AICAFLOW_TOOLS) $(dir $(SFX_FALLBACK)) --verify
+	$(PYTHON) dreamcast/build_aicaflow_fallback.py . $(AICAFLOW_N64_AUTHOR) $(dir $(SFX_FALLBACK)) --verify
 
 .PHONY: aicaflow-music-visuals aicaflow-music-visuals-verify
 aicaflow-music-visuals: $(MUSIC_VISUALS)
 
 aicaflow-music-visuals-verify: $(MUSIC_VISUALS)
-	$(PYTHON) dreamcast/build_aicaflow_music_visuals.py . $(AICAFLOW_RESEARCH) $(dir $(MUSIC_VISUALS)) --verify
+	$(PYTHON) dreamcast/build_aicaflow_music_visuals.py . $(AICAFLOW_AUTHOR) $(dir $(MUSIC_VISUALS)) --verify
 
 $(AICAFLOW_ROOT)/firmware/aicaflow.drv:
 	$(MAKE) -C $(AICAFLOW_ROOT) firmware
@@ -358,7 +356,7 @@ $(AICAFLOW_ROOT)/firmware/aicaflow.drv:
 $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a:
 	$(MAKE) -C $(dir $@)
 
-$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR):
+$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR):
 	$(MAKE) -C $(AICAFLOW_ROOT) compiler
 
 $(MUSIC_RAW_DIR)/sequence_%.afx: \
@@ -376,18 +374,15 @@ $(MUSIC_BANK): $(MUSIC_RAW_AFX) $(AICAFLOW_BANK_AUTHOR)
 $(MUSIC_AFX): $(MUSIC_BANK)
 	@test -s $@
 
-$(MUSIC_VISUALS): $(MUSIC_BANK) dreamcast/build_aicaflow_music_visuals.py \
-	$(AICAFLOW_RESEARCH)/afx_visualize.py
-	$(PYTHON) dreamcast/build_aicaflow_music_visuals.py . $(AICAFLOW_RESEARCH) $(dir $@)
+$(MUSIC_VISUALS): $(MUSIC_BANK) dreamcast/build_aicaflow_music_visuals.py $(AICAFLOW_AUTHOR)
+	$(PYTHON) dreamcast/build_aicaflow_music_visuals.py . $(AICAFLOW_AUTHOR) $(dir $@)
 
 $(SFX_MANIFEST): \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_2.bin \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_3.bin \
-	assets/.vanilla/us.v77/audio/unknown/asset_audio_7.bin \
-	assets/.vanilla/us.v77/audio/unknown/asset_audio_8.bin \
-	dreamcast/build_aicaflow_sfx.py include/sound_ids.h \
-	$(AICAFLOW_N64_SFX)
-	$(PYTHON) dreamcast/build_aicaflow_sfx.py . $(DKR_AICAFLOW_TOOLS) $(dir $@)
+	dreamcast/build_aicaflow_sfx.py $(DKR_SFX_MAP) \
+	$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR)
+	$(PYTHON) dreamcast/build_aicaflow_sfx.py . $(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR) $(DKR_SFX_MAP) $(dir $@)
 
 $(BUILD)/dreamcast/audio_aicaflow.o: $(SFX_MANIFEST) $(MUSIC_BANK) \
 	$(AICAFLOW_ROOT)/firmware/aicaflow.drv \

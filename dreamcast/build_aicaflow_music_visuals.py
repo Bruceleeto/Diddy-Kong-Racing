@@ -5,7 +5,7 @@ import argparse
 import json
 import re
 import struct
-import sys
+import subprocess
 from pathlib import Path
 
 
@@ -33,7 +33,7 @@ def write_if_changed(path, data):
         path.write_bytes(data)
 
 
-def tracks(root, music, visualizer):
+def tracks(root, music, compiler):
     names = sequence_names(root / "include/sequence_ids.h")
     controls = music / "music_controls"
     for control in sorted(controls.glob("sequence_*.afx"), key=lambda path: int(path.stem[9:])):
@@ -41,12 +41,12 @@ def tracks(root, music, visualizer):
         if sequence >= len(names):
             raise ValueError(f"{control}: unknown sequence")
         visual = music / "music_visuals" / f"sequence_{sequence}.viz"
-        data = visualizer.build(control)
+        visual.parent.mkdir(exist_ok=True)
+        subprocess.run((str(compiler), "--visual", str(control), str(visual)), check=True)
+        data = visual.read_bytes()
         # Sequence 1 is an empty source slot, not a playable DKR track.
         if not any(data[VIZ_HEADER.size:]):
             continue
-        visual.parent.mkdir(exist_ok=True)
-        write_if_changed(visual, data)
         yield {"sequence": sequence, "title": title(names[sequence]), "control": control.relative_to(music).as_posix(),
                "visual": visual.relative_to(music).as_posix()}
 
@@ -68,17 +68,15 @@ def verify(music):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("root", type=Path)
-    parser.add_argument("aicaflow_tools", type=Path)
+    parser.add_argument("compiler", type=Path)
     parser.add_argument("music", type=Path)
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
-    root, music = args.root.resolve(), args.music.resolve()
+    root, music, compiler = args.root.resolve(), args.music.resolve(), args.compiler.resolve()
     if args.verify:
         verify(music)
         return
-    sys.path.insert(0, str(args.aicaflow_tools.resolve()))
-    import afx_visualize
-    playlist = {"version": 1, "bank": "music.afb", "tracks": list(tracks(root, music, afx_visualize))}
+    playlist = {"version": 1, "bank": "music.afb", "tracks": list(tracks(root, music, compiler))}
     write_if_changed(music / "music_visuals.json", (json.dumps(playlist, indent=2) + "\n").encode())
     verify(music)
 

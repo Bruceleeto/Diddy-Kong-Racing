@@ -1,6 +1,6 @@
 # DKR Music Player
 
-This optional enDjinn example plays DKR's 64 non-silent sequences.  It loads
+This optional enDjinn bonus player plays DKR's 64 non-silent sequences. It loads
 the shared `music.afb`, then one small bank-bound AFX/AFC/AFV set per song.
 The game itself neither needs enDjinn nor builds this directory.
 

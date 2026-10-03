@@ -1,96 +1,93 @@
 #!/usr/bin/env python3
-"""Export one independently loadable AFB per N64 sound for runtime fallback."""
+"""Export one native AFX/AFB pair per N64 sound for on-demand fallback."""
 import argparse
 import hashlib
 import json
 import os
-import sys
 import struct
-from concurrent.futures import ProcessPoolExecutor
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-# Keep fallback semantics identical to the resident bank.  563..568 are the
-# three player “get item” composites and their chained components.
-def initialize_worker(tools, control, samples):
-    global _control, _samples, _bank, _component_cache
-    root = Path(tools).resolve().parents[1]
-    sys.path.insert(0, str(root / 'third_party/aicaflow/tools/research'))
-    sys.path.insert(0, tools)
-    from afx_n64_cseq import ALBank
-    _control, _samples = control, samples
-    _bank = ALBank(control, samples)
-    _component_cache = {}
+
+def sound_count(control):
+    data = control.read_bytes()
+    if len(data) < 8 or data[:2] != b"B1":
+        raise ValueError("not an ALBank B1 file")
+    banks = struct.unpack_from(">H", data, 2)[0]
+    if not banks:
+        raise ValueError("empty ALBank")
+    bank = struct.unpack_from(">I", data, 4)[0]
+    if bank + 16 > len(data):
+        raise ValueError("truncated ALBank")
+    instruments = struct.unpack_from(">h", data, bank)[0]
+    if instruments < 1 or bank + 12 + 4 * instruments > len(data):
+        raise ValueError("invalid ALBank instruments")
+    instrument = next((struct.unpack_from(">I", data, bank + 12 + 4 * index)[0]
+                       for index in range(instruments)
+                       if struct.unpack_from(">I", data, bank + 12 + 4 * index)[0]), 0)
+    if not instrument or instrument + 16 > len(data):
+        raise ValueError("missing ALBank instrument")
+    count = struct.unpack_from(">h", data, instrument + 14)[0]
+    if count < 1 or instrument + 16 + 4 * count > len(data):
+        raise ValueError("invalid ALInstrument sound list")
+    return count
 
 
-def compile_sound(sound):
-    from afx_n64_sfx import compile_pack
-    return compile_pack(_control, _samples, [sound], bank=_bank,
-                        component_cache=_component_cache)
+def compile_sound(task):
+    author, control, samples, output, sound = task
+    controls = output / "controls"
+    controls.mkdir(exist_ok=True)
+    temporary = output / f".{sound}.afx"
+    subprocess.run((str(author), "--sfx", str(control), str(samples), str(sound), str(temporary)),
+                   check=True, stdout=subprocess.DEVNULL)
+    temporary.with_suffix(".afb").replace(output / f"{sound}.afb")
+    temporary.replace(controls / f"{sound}.afx")
+    image = (output / f"{sound}.afb").read_bytes()
+    flow = (controls / f"{sound}.afx").read_bytes()
+    return {"id": sound, "bytes": len(image), "sha256": hashlib.sha256(image).hexdigest(),
+            "flow_bytes": len(flow), "flow_sha256": hashlib.sha256(flow).hexdigest()}
+
+
+def verify(output, count):
+    records = json.loads((output / "manifest.json").read_text())
+    if [record["id"] for record in records] != list(range(1, count + 1)):
+        raise ValueError("fallback manifest does not cover the source bank")
+    for record in records:
+        image = (output / f"{record['id']}.afb").read_bytes()
+        flow = (output / "controls" / f"{record['id']}.afx").read_bytes()
+        bank = struct.unpack_from("<8I", image)
+        header = struct.unpack_from("<3I", flow)
+        if ((bank[0], bank[1], bank[6], bank[7]) != (0x00424641, 1, len(image), 0) or
+                bank[4] != 32 or bank[5] != len(image) - 32 or not (bank[2] or bank[3]) or
+                header != (0x32584641, 7, len(flow)) or
+                len(image) != record["bytes"] or hashlib.sha256(image).hexdigest() != record["sha256"] or
+                len(flow) != record["flow_bytes"] or hashlib.sha256(flow).hexdigest() != record["flow_sha256"]):
+            raise ValueError(f"invalid fallback bank {record['id']}")
+    print(f"Fallback banks verified: {count} independently loadable C-authored sounds")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('root', type=Path)
-    parser.add_argument('tools', type=Path)
-    parser.add_argument('output', type=Path)
-    parser.add_argument('--verify', action='store_true')
+    parser.add_argument("root", type=Path)
+    parser.add_argument("author", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
-    sys.path.insert(0, str(args.root.resolve() / 'third_party/aicaflow/tools/research'))
-    sys.path.insert(0, str(args.tools.resolve()))
-    from afx_n64_cseq import ALBank
-    assets = args.root/'assets/.vanilla/us.v77/audio/unknown'
-    control = (assets/'asset_audio_2.bin').read_bytes()
-    samples = (assets/'asset_audio_3.bin').read_bytes()
-    count = len(ALBank(control, samples).instrument(0)['sounds'])
+    assets = args.root.resolve() / "assets/.vanilla/us.v77/audio/unknown"
+    control, samples, output = assets / "asset_audio_2.bin", assets / "asset_audio_3.bin", args.output.resolve()
+    count = sound_count(control)
     if args.verify:
-        records = json.loads((args.output/'manifest.json').read_text())
-        if [record['id'] for record in records] != list(range(1, count + 1)):
-            raise ValueError('fallback manifest does not cover the source bank')
-        for record in records:
-            image = (args.output/f"{record['id']}.afb").read_bytes()
-            flow = (args.output/'controls'/f"{record['id']}.afx").read_bytes()
-            magic, version, low, high, data_at, data_bytes, total, reserved = struct.unpack_from('<8I', image)
-            flow_magic, flow_version, flow_total = struct.unpack_from('<3I', flow)
-            if ((magic, version, total, reserved) != (0x00424641, 1, len(image), 0) or
-                    not (low or high) or data_at != 32 or data_bytes != len(image) - data_at or
-                    (flow_magic, flow_version, flow_total) != (0x32584641, 7, len(flow)) or
-                    len(image) != record['bytes'] or
-                    hashlib.sha256(image).hexdigest() != record['sha256'] or
-                    len(flow) != record['flow_bytes'] or
-                    hashlib.sha256(flow).hexdigest() != record['flow_sha256']):
-                raise ValueError(f"invalid fallback bank {record['id']}")
-        print(f'Fallback banks verified: {count} independently loadable sounds')
+        verify(output, count)
         return
-    args.output.mkdir(parents=True, exist_ok=True)
-    records = []
+    output.mkdir(parents=True, exist_ok=True)
     workers = min(8, os.cpu_count() or 1, count)
-    with ProcessPoolExecutor(max_workers=workers, initializer=initialize_worker,
-                             initargs=(str(args.tools.resolve()), control, samples)) as pool:
-        # Keep neighbouring IDs in each process. Sound chains frequently point
-        # nearby in this bank, so this lets the worker retain native-encoded
-        # components instead of starting one cold compiler per output file.
-        chunk = max(1, count // (workers * 4))
-        for sound, (image, controls, info) in enumerate(pool.map(compile_sound, range(1, count + 1), chunksize=chunk), 1):
-            path = args.output/f'{sound}.afb'
-            temporary = path.with_suffix('.tmp')
-            temporary.write_bytes(image)
-            temporary.replace(path)
-            flow = controls[sound]
-            controls_dir = args.output/'controls'
-            controls_dir.mkdir(exist_ok=True)
-            flow_path = controls_dir/f'{sound}.afx'
-            flow_temporary = flow_path.with_suffix('.tmp')
-            flow_temporary.write_bytes(flow)
-            flow_temporary.replace(flow_path)
-            records.append({'id': sound, 'bytes': len(image),
-                            'sample_bytes': info['sample_bytes'],
-                            'sha256': hashlib.sha256(image).hexdigest(),
-                            'flow_bytes': len(flow),
-                            'flow_sha256': hashlib.sha256(flow).hexdigest()})
-            print(f'Fallback {sound}/{count}: {len(image)} bytes', flush=True)
-    # Only publish the manifest once every valid ID has been exported.
-    (args.output/'manifest.json').write_text(json.dumps(records, indent=2) + '\n')
+    tasks = [(args.author.resolve(), control, samples, output, sound) for sound in range(1, count + 1)]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        records = list(pool.map(compile_sound, tasks))
+    (output / "manifest.json").write_text(json.dumps(records, indent=2) + "\n")
+    verify(output, count)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

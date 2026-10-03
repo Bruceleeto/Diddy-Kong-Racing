@@ -93,6 +93,6 @@ amap
 /cdrom/
 /*.cdi
 /dkracing-*.elf
-/examples/dkr_music_player/cdrom/
-/examples/dkr_music_player/include/songs.h
+/bonus/dkr_music_player/cdrom/
+/bonus/dkr_music_player/include/songs.h
 /captures/

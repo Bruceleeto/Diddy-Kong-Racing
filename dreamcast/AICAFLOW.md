@@ -135,10 +135,16 @@ optional SH4 seek indexes; normal game playback needs only the AFB and AFX.
 Bank verification compares actual IDs and file lengths with source-derived
 sets. Runtime music may differ from a level header's default.
 
+`dreamcast/aicaflow_tools/dkr.afsfx` is the checked-in SFX residency map. It
+lists the raw N64 sound IDs in the resident core/vehicle banks and in every
+level-local bank, plus the per-scene vehicle masks. Edit that file when an
+intentional SFX residency decision changes; the build uses AICAflow's native
+`afx_n64 --sfx` and `afx_bank --merge` tools to emit the final assets.
+
 ## Optional DKR music player
 
-`examples/dkr_music_player` is a separate enDjinn project that reuses
+`bonus/dkr_music_player` is a separate enDjinn project that reuses
 `third_party/aicaflow/examples/player_framework/music_player.c`. It is not a
 dependency of DKR itself; only provide enDjinn when building this player. See
-its [README](../examples/dkr_music_player/README.md) for build and launch
+its [README](../bonus/dkr_music_player/README.md) for build and launch
 commands.
