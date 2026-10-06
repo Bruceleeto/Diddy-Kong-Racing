@@ -11,6 +11,13 @@
 #include "types.h"
 #include "pc_swap.h"
 
+#ifdef DKR_AICAFLOW
+#include "../dreamcast/audio_aicaflow.h"
+#define DKR_AICAFLOW_MUSIC_MAX_GAIN 96.0f
+extern void pc_audio_lock(void);
+extern void pc_audio_unlock(void);
+#endif
+
 /************ .data ************/
 
 ALCSPlayer *gMusicPlayer = NULL;  // Official Name: tuneSeqPlayer
@@ -309,7 +316,7 @@ void audio_init(OSSched *sc) {
     audConfig.maxEvents = 150;
     audConfig.maxSounds = 32;
     audConfig.maxChannels = AUDIO_CHANNELS;
-    audConfig.numGroups = 1;
+    audConfig.numGroups = 64;
     audConfig.heap = &gALHeap;
     sndp_init_player(&audConfig);
     audioStartThread();
@@ -406,6 +413,56 @@ void music_change_on(void) {
  * Stops any playing existing music beforehand.
  * Official Name: amTunePlay
  */
+void music_prepare(u8 seqID) {
+#ifdef DKR_AICAFLOW
+    int result;
+
+    pc_audio_lock();
+    result = dkr_afx_music_prepare(seqID);
+    pc_audio_unlock();
+    if (result) stubbed_printf("AICAFLOW: sequence %d was not prepared (%d)\n", seqID, result);
+#else
+    (void)seqID;
+#endif
+}
+
+void music_prefetch(u8 seqID) {
+#ifdef DKR_AICAFLOW
+    pc_audio_lock();
+    dkr_afx_music_prefetch(seqID);
+    pc_audio_unlock();
+#else
+    (void)seqID;
+#endif
+}
+
+void sound_scene_stop(void) {
+#ifdef DKR_AICAFLOW
+    int result;
+    pc_audio_lock();
+    sound_clear_delayed();
+    sndp_stop_with_flags(0); /* Also cancels sounds waiting for an AICA voice. */
+    result = dkr_afx_sfx_stop_all();
+    pc_audio_unlock();
+    if (result) stubbed_printf("AICAFLOW: scene SFX stop failed (%d)\n", result);
+#else
+    sndp_stop_all_looped();
+#endif
+}
+
+void sound_scene_prepare(u16 level) {
+#ifdef DKR_AICAFLOW
+    int result;
+
+    pc_audio_lock();
+    result = dkr_afx_sfx_scene_prepare(level);
+    pc_audio_unlock();
+    if (result) stubbed_printf("AICAFLOW: scene SFX for level %d was not prepared (%d)\n", level, result);
+#else
+    (void)level;
+#endif
+}
+
 void music_play(u8 seqID) {
     MUSIC_PC_GUARD();
     if (gBlockMusicChange == FALSE && gMusicSliderVolume != 0) {
@@ -597,6 +654,9 @@ void music_channel_off(u8 channel) {
     MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alSeqChOff(gMusicPlayer, channel);
+#ifdef DKR_AICAFLOW
+        dkr_afx_music_lane_mute(channel, TRUE);
+#endif
     }
 }
 
@@ -616,6 +676,9 @@ void music_channel_on(u8 channel) {
     MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alSeqChOn(gMusicPlayer, channel);
+#ifdef DKR_AICAFLOW
+        dkr_afx_music_lane_mute(channel, FALSE);
+#endif
     }
 }
 
@@ -637,6 +700,9 @@ void music_channel_volume_set(u8 channel, u8 volume) {
     MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alCSPSetChlVol(gMusicPlayer, channel, volume);
+#ifdef DKR_AICAFLOW
+        dkr_afx_music_lane_volume(channel, volume);
+#endif
     }
 }
 
@@ -659,6 +725,9 @@ void music_channel_fade_set(u8 channel, ALPan fade) {
     MUSIC_PC_GUARD();
     if (channel < AUDIO_CHANNELS) {
         alCSPSetFadeIn(gMusicPlayer, channel, fade);
+#ifdef DKR_AICAFLOW
+        dkr_afx_music_lane_fade(channel, fade);
+#endif
     }
 }
 
@@ -745,6 +814,9 @@ void music_tempo_set(s32 tempo) {
         f32 inv_tempo = (1.0f / tempo);
         alCSPSetTempo(gMusicPlayer, (s32) (inv_tempo * 60000000.0f));
         sMusicTempo = tempo;
+#ifdef DKR_AICAFLOW
+        dkr_afx_music_tempo((u16)tempo);
+#endif
     }
 }
 
@@ -762,7 +834,11 @@ s16 music_tempo(void) {
  */
 u8 music_is_playing(void) {
     MUSIC_PC_GUARD(0);
+#ifdef DKR_AICAFLOW
+    return dkr_afx_music_playing();
+#else
     return (alCSPGetState(gMusicPlayer) == AL_PLAYING);
+#endif
 }
 
 /**
@@ -871,11 +947,15 @@ void music_jingle_stop(void) {
  */
 u8 music_current_sequence(void) {
     MUSIC_PC_GUARD(0);
+#ifdef DKR_AICAFLOW
+    return dkr_afx_music_current();
+#else
     if (gCurrentSequenceID != SEQUENCE_NONE && gMusicPlayer->state == AL_PLAYING) {
         return gCurrentSequenceID;
     } else {
         return SEQUENCE_NONE;
     }
+#endif
 }
 
 /**
@@ -912,6 +992,12 @@ void music_volume_set(u8 volume) {
     gMusicBaseVolume = volume;
     normalized_vol = gMusicSliderVolume * gMusicBaseVolume * sMusicFadeVolume;
     alCSPSetVol(gMusicPlayer, (s16) ((s32) (gGlobalMusicVolume * normalized_vol) >> 8));
+#ifdef DKR_AICAFLOW
+    normalized_vol = gGlobalMusicVolume * normalized_vol * DKR_AICAFLOW_MUSIC_MAX_GAIN /
+                     (256.0f * 256.0f * 127.0f);
+    dkr_afx_music_gain((u8)((normalized_vol < 0.0f) ? 0 :
+                            (normalized_vol > 255.0f) ? 255 : normalized_vol));
+#endif
 }
 
 /**
@@ -927,6 +1013,12 @@ void music_volume_config_set(u32 slider_val) {
     gMusicSliderVolume = slider_val;
     normalized_vol = gMusicSliderVolume * gMusicBaseVolume * sMusicFadeVolume;
     alCSPSetVol(gMusicPlayer, (s16) ((s32) (gGlobalMusicVolume * normalized_vol) >> 8));
+#ifdef DKR_AICAFLOW
+    normalized_vol = gGlobalMusicVolume * normalized_vol * DKR_AICAFLOW_MUSIC_MAX_GAIN /
+                     (256.0f * 256.0f * 127.0f);
+    dkr_afx_music_gain((u8)((normalized_vol < 0.0f) ? 0 :
+                            (normalized_vol > 255.0f) ? 255 : normalized_vol));
+#endif
 }
 
 /**
@@ -1040,7 +1132,7 @@ void sound_play(u16 soundID, SoundHandle *handlePtr) {
         return;
     }
     soundBite = gSoundTable[soundID].soundBite;
-    if (soundBite == NULL) {
+    if (soundBite == 0) {
         if (handlePtr != NULL) {
             *handlePtr = NULL;
         }
@@ -1233,6 +1325,18 @@ void music_sequence_start(u8 seqID, ALCSPlayer *seqPlayer) {
     MUSIC_PC_GUARD();
     music_sequence_stop(seqPlayer);
     if (seqID < gSequenceTable->seqCount) {
+#ifdef DKR_AICAFLOW
+        if (seqPlayer == gMusicPlayer) {
+            gCurrentSequenceID = seqID;
+            gMusicNextSeqID = SEQUENCE_NONE;
+            music_volume_set(gSeqSoundTable[seqID].volume);
+            if (gSeqSoundTable[seqID].tempo) music_tempo_set(gSeqSoundTable[seqID].tempo);
+            sound_reverb_set(gSeqSoundTable[seqID].reverb);
+            music_prepare(seqID);
+            dkr_afx_music_play(seqID);
+            return;
+        }
+#endif
         if (seqPlayer == gMusicPlayer) {
             gMusicNextSeqID = seqID;
         } else {
@@ -1248,6 +1352,9 @@ void music_sequence_start(u8 seqID, ALCSPlayer *seqPlayer) {
  */
 void music_sequence_init(ALCSPlayer *seqp, void *sequence, u8 *seqID, ALCSeq *seq) {
     MUSIC_PC_GUARD();
+#ifdef DKR_AICAFLOW
+    if (seqp == gMusicPlayer) return;
+#endif
     s32 i;
 
     if ((alCSPGetState(seqp) == AL_STOPPED) && (*seqID != 0)) {
@@ -1299,7 +1406,11 @@ void music_sequence_init(ALCSPlayer *seqp, void *sequence, u8 *seqID, ALCSeq *se
 void music_sequence_stop(ALCSPlayer *seqPlayer) {
     MUSIC_PC_GUARD();
     if (gMusicPlayer == seqPlayer && gMusicPlaying) {
+#ifdef DKR_AICAFLOW
+        dkr_afx_music_stop();
+#else
         alCSPStop(seqPlayer);
+#endif
         gMusicPlaying = FALSE;
         gCurrentSequenceID = SEQUENCE_NONE;
         gMusicNextSeqID = SEQUENCE_NONE;
@@ -1316,7 +1427,11 @@ void music_sequence_stop(ALCSPlayer *seqPlayer) {
  * Official Name: amTuneSetReverbOnOff
  */
 void sound_reverb_set(u8 setting) {
+#ifdef DKR_AICAFLOW
+    dkr_afx_scene_reverb(setting);
+#else
     alFxReverbSet(setting);
+#endif
 }
 
 /**

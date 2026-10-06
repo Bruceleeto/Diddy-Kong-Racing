@@ -54,6 +54,9 @@ typedef struct ALSoundState {
     /* 0x3D */ u8 fxmix;
     /* 0x3E */ u8 flags;
     /* 0x3F */ u8 state;
+#ifdef DKR_AICAFLOW
+    u16 aicaflowId;
+#endif
 } ALSoundState;
 
 typedef struct ALSoundState* SoundHandle;

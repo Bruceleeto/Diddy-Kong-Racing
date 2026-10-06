@@ -17,6 +17,10 @@ tldr for dreamcast
 
 `make -f Makefile.dc -j8`
 
+Dreamcast audio uses the pinned [AICAflow runtime](dreamcast/AICAFLOW.md)
+submodule. Clone with `--recurse-submodules`, or initialise submodules before
+building.
+
 
 for n64:
 
@@ -60,7 +64,9 @@ As of June 21, 2026, this is our current score:
 
 - `build-essential` / `pkg-config` are helper packages needed for make.
 - `git` is used for version control.
-- `python3` is needed to run python scripts
+- Python 3.10 or newer is needed to run the build scripts. `make -f Makefile.dc`
+  automatically prefers a suitable interpreter; override it with `PYTHON=/path/to/python3`
+  when necessary.
 - `libpcre2-dev` and `libpcre2-8-0` are not technically required, but will speedup extracting/building some assets significantly.
 - `gcc-mips-linux-gnu` is optionally used if compiling NON_MATCHING with COMPILER=gcc
 
