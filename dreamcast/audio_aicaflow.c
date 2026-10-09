@@ -7,7 +7,9 @@
 #include <aicaflow/bank.h>
 #include <aicaflow/codec.h>
 #include "sfx_manifest.h"
+#include <fcntl.h>
 #include <kos.h>
+#include <malloc.h>
 #include <stdalign.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +24,89 @@
 #define DKR_SFX_DIRTY_PITCH 2
 #define DKR_SFX_DIRTY_PAN 4
 #define DKR_SFX_DIRTY_FX 8
+
+#ifndef DKR_AICAFLOW_BENCHMARK
+#define DKR_AICAFLOW_BENCHMARK 0
+#endif
+
+#if DKR_AICAFLOW_BENCHMARK
+enum { DKR_AFX_BENCHMARK_US = 120u * 1000u * 1000u };
+static uint64_t sBenchStarted;
+static uint32_t sBenchUpdates, sBenchUpdateUs, sBenchFlowUploads, sBenchFlowUploadUs;
+static uint32_t sBenchFlowUploadBytes, sBenchBankLoads, sBenchBankLoadUs, sBenchBankLoadBytes;
+static uint32_t sBenchHeapStart, sBenchHeapPeak;
+
+static uint32_t benchmark_heap_used(void) {
+    struct mallinfo heap = mallinfo();
+    return heap.uordblks > UINT32_MAX ? UINT32_MAX : (uint32_t)heap.uordblks;
+}
+
+static void benchmark_reset(void) {
+    sBenchStarted = timer_us_gettime64();
+    sBenchHeapStart = sBenchHeapPeak = benchmark_heap_used();
+    __atomic_store_n(&sBenchUpdates, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sBenchUpdateUs, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sBenchFlowUploads, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sBenchFlowUploadUs, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sBenchFlowUploadBytes, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sBenchBankLoads, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sBenchBankLoadUs, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sBenchBankLoadBytes, 0, __ATOMIC_RELAXED);
+}
+
+static void benchmark_add(volatile uint32_t *total, uint64_t started) {
+    uint64_t elapsed = timer_us_gettime64() - started;
+    __atomic_fetch_add(total, elapsed > UINT32_MAX ? UINT32_MAX : (uint32_t)elapsed, __ATOMIC_RELAXED);
+}
+
+static void benchmark_flow_upload(uint64_t started, uint32_t bytes) {
+    __atomic_fetch_add(&sBenchFlowUploads, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sBenchFlowUploadBytes, bytes, __ATOMIC_RELAXED);
+    benchmark_add(&sBenchFlowUploadUs, started);
+}
+
+static void benchmark_bank_load(uint64_t started, uint32_t bytes) {
+    __atomic_fetch_add(&sBenchBankLoads, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sBenchBankLoadBytes, bytes, __ATOMIC_RELAXED);
+    benchmark_add(&sBenchBankLoadUs, started);
+}
+
+static void benchmark_update(uint64_t started) {
+    uint64_t now = timer_us_gettime64();
+    uint32_t heap = benchmark_heap_used();
+    __atomic_fetch_add(&sBenchUpdates, 1, __ATOMIC_RELAXED);
+    benchmark_add(&sBenchUpdateUs, started);
+    if (heap > sBenchHeapPeak) sBenchHeapPeak = heap;
+    if (now - sBenchStarted < DKR_AFX_BENCHMARK_US) return;
+    char result[256];
+    int bytes = snprintf(result, sizeof(result),
+                         "DKR AICAFLOW BENCH: wall=%llu ms update=%lu us/%lu calls flow=%lu us/%lu calls/%lu bytes bank=%lu us/%lu calls/%lu bytes sh4_heap=%lu/%lu/%lu bytes\n",
+                         (unsigned long long)((now - sBenchStarted) / 1000u),
+                         __atomic_load_n(&sBenchUpdateUs, __ATOMIC_RELAXED),
+                         __atomic_load_n(&sBenchUpdates, __ATOMIC_RELAXED),
+                         __atomic_load_n(&sBenchFlowUploadUs, __ATOMIC_RELAXED),
+                         __atomic_load_n(&sBenchFlowUploads, __ATOMIC_RELAXED),
+                         __atomic_load_n(&sBenchFlowUploadBytes, __ATOMIC_RELAXED),
+                         __atomic_load_n(&sBenchBankLoadUs, __ATOMIC_RELAXED),
+                         __atomic_load_n(&sBenchBankLoads, __ATOMIC_RELAXED),
+                         __atomic_load_n(&sBenchBankLoadBytes, __ATOMIC_RELAXED),
+                         (unsigned long)sBenchHeapStart,
+                         (unsigned long)sBenchHeapPeak,
+                         (unsigned long)heap);
+    printf("%s", result);
+    file_t file = fs_open(DKR_ASSET_MOUNT "/build/dc/aicaflow/benchmark.txt", O_WRONLY | O_CREAT | O_TRUNC);
+    if (file != FILEHND_INVALID) {
+        (void)fs_write(file, result, bytes);
+        (void)fs_close(file);
+    }
+    benchmark_reset();
+}
+#else
+#define benchmark_reset() ((void)0)
+#define benchmark_flow_upload(started, bytes) ((void)0)
+#define benchmark_bank_load(started, bytes) ((void)0)
+#define benchmark_update(started) ((void)0)
+#endif
 
 alignas(32) static const unsigned char firmware[] = {
 #embed "../third_party/aicaflow/firmware/aicaflow.drv"
@@ -214,7 +299,9 @@ static int sfx_flow_load(dkr_sfx_bank_t *bank, dkr_sfx_sound_t *sound,
             for (uint32_t field = 0; field < AFX_FIELD_COUNT; ++field)
                 sound->fields[setup * AFX_FIELD_COUNT + field] =
                     afx_read16(setups + setup * AFX_SETUP_BYTES + field * 2);
+        uint64_t started = timer_us_gettime64();
         result = afx_bank_flow_upload(&bank->bank, data, bytes, &sound->flow);
+        benchmark_flow_upload(started, bytes);
     }
     free(data);
     if (result) { free(sound->fields); *sound = (dkr_sfx_sound_t){0}; return result; }
@@ -227,7 +314,9 @@ static int sfx_bank_load(dkr_sfx_bank_t *bank, const char *afb, const char *cont
                          const uint16_t *ids, uint16_t count) {
     int result;
     if (!bank || bank->bank.asset || !count) return -AFX_BAD_COMMAND;
+    uint64_t started = timer_us_gettime64();
     result = afx_bank_load_file(&bank->bank, afb);
+    benchmark_bank_load(started, result ? 0 : bank->bank.bytes);
     if (result) return result;
     bank->sounds = calloc(count, sizeof(*bank->sounds));
     if (!bank->sounds) { (void)afx_bank_release(&bank->bank); return -AFX_NO_HOST_RAM; }
@@ -334,7 +423,11 @@ int dkr_afx_init(void) {
     if (!result) result = sfx_bank_load(&sResidentSfx, DKR_RESIDENT_SFX_PATH,
                                         DKR_ASSET_MOUNT "/build/dc/aicaflow/core",
                                         dkr_afx_resident_sound_ids, DKR_AFX_RESIDENT_SOUND_COUNT);
-    if (!result) result = afx_bank_load_file(&sMusicBank, DKR_MUSIC_BANK_PATH);
+    if (!result) {
+        uint64_t started = timer_us_gettime64();
+        result = afx_bank_load_file(&sMusicBank, DKR_MUSIC_BANK_PATH);
+        benchmark_bank_load(started, result ? 0 : sMusicBank.bytes);
+    }
     for (uint32_t i = 0; !result && i < DKR_SHORT_MUSIC_COUNT; ++i)
         result = music_flow_load(sShortMusicSequences[i], &sShortMusicFlows[i]);
     if (!result) result = dsp_room_upload();
@@ -363,6 +456,7 @@ int dkr_afx_init(void) {
         }
     }
     sReady = result == 0;
+    if (!result) benchmark_reset();
     if (result) printf("DKR AICAFLOW: init failed (%d)\n", result);
     return result;
 }
@@ -724,7 +818,11 @@ static int music_flow_load(uint8_t sequence, afx_asset_t *out_flow) {
         return -AFX_BAD_FORMAT;
     snprintf(path, sizeof(path), DKR_MUSIC_CONTROL_DIR "/sequence_%u.afx", sequence);
     result = read_asset(path, &data, &bytes);
-    if (!result) result = afx_bank_flow_upload(&sMusicBank, data, bytes, out_flow);
+    if (!result) {
+        uint64_t started = timer_us_gettime64();
+        result = afx_bank_flow_upload(&sMusicBank, data, bytes, out_flow);
+        benchmark_flow_upload(started, bytes);
+    }
     free(data);
     return result;
 }
@@ -940,8 +1038,11 @@ static void collect_loaded_music(void) {
 void dkr_afx_update(void) {
     afx_instance_status_t status;
     uint8_t wanted;
+#if DKR_AICAFLOW_BENCHMARK
+    uint64_t started = timer_us_gettime64();
+#endif
 
-    if (!sReady || afx_update() < 0) return;
+    if (!sReady || afx_update() < 0) goto done;
     apply_room_control();
     update_sfx();
     sndp_aicaflow_retry_pending();
@@ -949,7 +1050,7 @@ void dkr_afx_update(void) {
     wanted = __atomic_load_n(&sWantedSequence, __ATOMIC_ACQUIRE);
 
     if (sMusic) {
-        if (afx_instance_status(sMusic, &status)) return;
+        if (afx_instance_status(sMusic, &status)) goto done;
         if (status.state == AFX_RUNNING || status.state == AFX_PARKED) {
             if (wanted != sCurrentSequence) {
                 /* Stop the whole flow before its asset is replaced: the driver
@@ -958,13 +1059,13 @@ void dkr_afx_update(void) {
             } else {
                 apply_controls();
             }
-            return;
+            goto done;
         }
-        if (status.state != AFX_DONE && status.state != AFX_ERROR) return;
-        if (afx_instance_recycle(sMusic)) return;
+        if (status.state != AFX_DONE && status.state != AFX_ERROR) goto done;
+        if (afx_instance_recycle(sMusic)) goto done;
         sMusic = 0;
         __atomic_store_n(&sCurrentSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
-        return;
+        goto done;
     }
 
     {
@@ -975,16 +1076,16 @@ void dkr_afx_update(void) {
             if (sPrefetchedMusicFlow && sPrefetchedMusicSequence == prepared) {
                 if (sMusicFlow && (result = afx_asset_free(sMusicFlow))) {
                     __atomic_store_n(&sFailedSequence, prepared, __ATOMIC_RELEASE);
-                    return;
+                    goto done;
                 }
                 sMusicFlow = sPrefetchedMusicFlow;
                 sMusicFlowSequence = sPrefetchedMusicSequence;
                 sPrefetchedMusicFlow = AFX_ASSET_INVALID;
                 sPrefetchedMusicSequence = DKR_SEQUENCE_NONE;
                 __atomic_store_n(&sPreparedSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
-                return;
+                goto done;
             }
-            return;
+            goto done;
         }
     }
 
@@ -997,20 +1098,24 @@ void dkr_afx_update(void) {
             if (!sAuthoredTempo) sAuthoredTempo = 120;
             result = afx_instance_activate(flow, &sMusic);
         }
-        if (result == -AFX_BUSY) return;
+        if (result == -AFX_BUSY) goto done;
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             /* Music is continuous; make room before retrying next update. */
             (void)sfx_preempt(UINT8_MAX);
-            return;
+            goto done;
         }
         if (result) {
             __atomic_store_n(&sFailedSequence, wanted, __ATOMIC_RELEASE);
             printf("DKR AICAFLOW: sequence %u activation failed (%d)\n", wanted, result);
-            return;
+            goto done;
         }
         __atomic_store_n(&sCurrentSequence, wanted, __ATOMIC_RELEASE);
         __atomic_fetch_or(&sControlDirty, 3u, __ATOMIC_RELEASE);
         __atomic_fetch_or(&sMuteDirty, 0xffffu, __ATOMIC_RELEASE);
         __atomic_fetch_or(&sVolumeDirty, 0xffffu, __ATOMIC_RELEASE);
     }
+done:
+#if DKR_AICAFLOW_BENCHMARK
+    benchmark_update(started);
+#endif
 }
