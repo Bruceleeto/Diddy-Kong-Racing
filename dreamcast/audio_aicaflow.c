@@ -198,6 +198,8 @@ static volatile uint8_t sLoadedSequence;
 static volatile afx_asset_t sLoadedMusicFlow;
 static volatile int sLoadedMusicResult;
 static volatile uint8_t sLoadedMusicReady;
+static semaphore_t sMusicLoadWake = SEM_INITIALIZER(0);
+static semaphore_t sSfxLoadWake = SEM_INITIALIZER(0);
 static volatile uint8_t sCurrentSequence;
 static volatile uint8_t sFailedSequence;
 static volatile uint8_t sGain = 255;
@@ -208,7 +210,8 @@ static volatile uint32_t sControlDirty;
 static volatile uint32_t sRoomDirty;
 static volatile uint32_t sMuteDirty;
 static volatile uint32_t sVolumeDirty;
-static volatile uint16_t sMuted;
+/* Native-width atomics avoid SH4 GCC's returned halfword RMW register constraint. */
+static volatile uint32_t sMuted;
 static volatile uint8_t sVolume[16] = {
     127, 127, 127, 127, 127, 127, 127, 127,
     127, 127, 127, 127, 127, 127, 127, 127
@@ -524,6 +527,7 @@ static int fallback_request(uint16_t id) {
             sFallback[i].id = id;
             sFallback[i].result = 0;
             sFallback[i].requested = 1;
+            sem_signal(&sSfxLoadWake);
             return -AFX_BUSY;
         }
     }
@@ -647,6 +651,17 @@ static dkr_sfx_slot_t *sfx_slot(void *owner) {
     return NULL;
 }
 
+void dkr_afx_sfx_start_controls(void *owner, uint8_t gain, float pitch, uint8_t pan, uint8_t fx) {
+    dkr_sfx_slot_t *slot = sfx_slot(owner);
+    if (!slot) return;
+    slot->volume = gain;
+    slot->pitch = pitch;
+    slot->pan = pan;
+    slot->fx = fx;
+    /* Activation marked all fields dirty; publish the final initial values together. */
+    apply_sfx_controls(slot);
+}
+
 void dkr_afx_sfx_stop(void *owner) {
     dkr_sfx_slot_t *slot = sfx_slot(owner);
     if (slot) {
@@ -664,32 +679,40 @@ void dkr_afx_sfx_priority(void *owner, uint8_t priority) {
 void dkr_afx_sfx_volume(void *owner, uint8_t gain) {
     dkr_sfx_slot_t *slot = sfx_slot(owner);
     if (!slot) return;
-    slot->volume = gain;
-    slot->dirty |= DKR_SFX_DIRTY_VOLUME;
+    if (slot->volume != gain) {
+        slot->volume = gain;
+        slot->dirty |= DKR_SFX_DIRTY_VOLUME;
+    }
     if (slot->initializing) apply_sfx_controls(slot);
 }
 
 void dkr_afx_sfx_pitch(void *owner, float pitch) {
     dkr_sfx_slot_t *slot = sfx_slot(owner);
     if (!slot) return;
-    slot->pitch = pitch;
-    slot->dirty |= DKR_SFX_DIRTY_PITCH;
+    if (slot->pitch != pitch) {
+        slot->pitch = pitch;
+        slot->dirty |= DKR_SFX_DIRTY_PITCH;
+    }
     if (slot->initializing) apply_sfx_controls(slot);
 }
 
 void dkr_afx_sfx_pan(void *owner, uint8_t pan) {
     dkr_sfx_slot_t *slot = sfx_slot(owner);
     if (!slot) return;
-    slot->pan = pan;
-    slot->dirty |= DKR_SFX_DIRTY_PAN;
+    if (slot->pan != pan) {
+        slot->pan = pan;
+        slot->dirty |= DKR_SFX_DIRTY_PAN;
+    }
     if (slot->initializing) apply_sfx_controls(slot);
 }
 
 void dkr_afx_sfx_fx(void *owner, uint8_t fx) {
     dkr_sfx_slot_t *slot = sfx_slot(owner);
     if (!slot) return;
-    slot->fx = fx;
-    slot->dirty |= DKR_SFX_DIRTY_FX;
+    if (slot->fx != fx) {
+        slot->fx = fx;
+        slot->dirty |= DKR_SFX_DIRTY_FX;
+    }
     if (slot->initializing) apply_sfx_controls(slot);
 }
 
@@ -727,39 +750,40 @@ uint8_t dkr_afx_music_current(void) {
 }
 
 void dkr_afx_music_gain(uint8_t gain) {
-    __atomic_store_n(&sGain, gain, __ATOMIC_RELEASE);
-    __atomic_fetch_or(&sControlDirty, 1u, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&sGain, gain, __ATOMIC_ACQ_REL) != gain)
+        __atomic_fetch_or(&sControlDirty, 1u, __ATOMIC_RELEASE);
 }
 
 void dkr_afx_music_tempo(uint16_t bpm) {
-    __atomic_store_n(&sTempo, bpm, __ATOMIC_RELEASE);
-    __atomic_fetch_or(&sControlDirty, 2u, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&sTempo, bpm, __ATOMIC_ACQ_REL) != bpm)
+        __atomic_fetch_or(&sControlDirty, 2u, __ATOMIC_RELEASE);
 }
 
 void dkr_afx_music_lane_mute(uint8_t lane, int muted) {
-    uint16_t bit;
+    uint32_t bit;
     if (lane >= 16) return;
-    bit = (uint16_t)(1u << lane);
-    if (muted) __atomic_fetch_or(&sMuted, bit, __ATOMIC_RELAXED);
-    else __atomic_fetch_and(&sMuted, (uint16_t)~bit, __ATOMIC_RELAXED);
-    __atomic_fetch_or(&sMuteDirty, bit, __ATOMIC_RELEASE);
+    bit = 1u << lane;
+    uint32_t previous = muted ? __atomic_fetch_or(&sMuted, bit, __ATOMIC_RELAXED)
+                              : __atomic_fetch_and(&sMuted, ~bit, __ATOMIC_RELAXED);
+    if (!!(previous & bit) != !!muted)
+        __atomic_fetch_or(&sMuteDirty, bit, __ATOMIC_RELEASE);
 }
 
 void dkr_afx_music_lane_volume(uint8_t lane, uint8_t volume) {
     if (lane >= 16) return;
-    __atomic_store_n(&sVolume[lane], volume, __ATOMIC_RELAXED);
-    __atomic_fetch_or(&sVolumeDirty, 1u << lane, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&sVolume[lane], volume, __ATOMIC_RELAXED) != volume)
+        __atomic_fetch_or(&sVolumeDirty, 1u << lane, __ATOMIC_RELEASE);
 }
 
 void dkr_afx_music_lane_fade(uint8_t lane, uint8_t fade) {
     if (lane >= 16) return;
-    __atomic_store_n(&sFade[lane], fade, __ATOMIC_RELAXED);
-    __atomic_fetch_or(&sVolumeDirty, 1u << lane, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&sFade[lane], fade, __ATOMIC_RELAXED) != fade)
+        __atomic_fetch_or(&sVolumeDirty, 1u << lane, __ATOMIC_RELEASE);
 }
 
 void dkr_afx_scene_reverb(uint8_t enabled) {
-    __atomic_store_n(&sRoomReturns, enabled != 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&sRoomDirty, 1, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&sRoomReturns, enabled != 0, __ATOMIC_ACQ_REL) != (enabled != 0))
+        __atomic_store_n(&sRoomDirty, 1, __ATOMIC_RELEASE);
 }
 
 static void apply_room_control(void) {
@@ -835,6 +859,7 @@ static void music_load_enqueue(uint8_t sequence, int prepared) {
          __atomic_load_n(&sLoadedSequence, __ATOMIC_ACQUIRE) == sequence) ||
         __atomic_load_n(queue, __ATOMIC_ACQUIRE) == sequence) return;
     __atomic_store_n(queue, sequence, __ATOMIC_RELEASE);
+    sem_signal(&sMusicLoadWake);
 }
 
 /* Music callers may wait with the game audio mutex held. Keep SFX I/O on
@@ -842,8 +867,8 @@ static void music_load_enqueue(uint8_t sequence, int prepared) {
 static void *sfx_loader(void *unused) {
     (void)unused;
     for (;;) {
+        sem_wait(&sSfxLoadWake);
         fallback_load();
-        thd_sleep(1);
     }
     __builtin_unreachable();
 }
@@ -860,13 +885,13 @@ static void *music_loader(void *unused) {
         else
             sequence = __atomic_exchange_n(&sLoadPrefetchSequence, DKR_SEQUENCE_NONE, __ATOMIC_ACQ_REL);
         if (!sequence) {
-            thd_sleep(1);
+            sem_wait(&sMusicLoadWake);
             continue;
         }
         __atomic_store_n(&sLoadingSequence, sequence, __ATOMIC_RELEASE);
         result = music_flow_load(sequence, &flow);
         __atomic_store_n(&sLoadingSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
-        while (__atomic_load_n(&sLoadedMusicReady, __ATOMIC_ACQUIRE)) thd_sleep(1);
+        while (__atomic_load_n(&sLoadedMusicReady, __ATOMIC_ACQUIRE)) sem_wait(&sMusicLoadWake);
         __atomic_store_n(&sLoadedMusicFlow, flow, __ATOMIC_RELAXED);
         __atomic_store_n(&sLoadedMusicResult, result, __ATOMIC_RELAXED);
         __atomic_store_n(&sLoadedSequence, sequence, __ATOMIC_RELAXED);
@@ -883,6 +908,7 @@ int dkr_afx_music_prepare(uint8_t sequence) {
     if (sequence >= DKR_SEQUENCE_COUNT) return -AFX_BAD_FORMAT;
     if ((sMusicFlow && sMusicFlowSequence == sequence) || short_music_flow(sequence)) {
         __atomic_store_n(&sPreparedSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
+        sem_signal(&sMusicLoadWake);
         return AFX_OK;
     }
     __atomic_store_n(&sFailedSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
@@ -1001,6 +1027,7 @@ static void collect_loaded_music(void) {
         sMusicFlow = AFX_ASSET_INVALID;
         sMusicFlowSequence = DKR_SEQUENCE_NONE;
         __atomic_store_n(&sLoadedMusicReady, 0, __ATOMIC_RELEASE);
+        sem_signal(&sMusicLoadWake);
         music_load_enqueue(sequence, 1);
         return;
     }
@@ -1033,6 +1060,7 @@ static void collect_loaded_music(void) {
         __atomic_store_n(&sPreparedSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&sLoadedMusicReady, 0, __ATOMIC_RELEASE);
+    sem_signal(&sMusicLoadWake);
 }
 
 void dkr_afx_update(void) {
@@ -1083,6 +1111,7 @@ void dkr_afx_update(void) {
                 sPrefetchedMusicFlow = AFX_ASSET_INVALID;
                 sPrefetchedMusicSequence = DKR_SEQUENCE_NONE;
                 __atomic_store_n(&sPreparedSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
+                sem_signal(&sMusicLoadWake);
                 goto done;
             }
             goto done;
