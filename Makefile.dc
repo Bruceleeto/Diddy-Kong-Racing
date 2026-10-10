@@ -21,6 +21,9 @@ endif
 endif
 
 AICAFLOW_ROOT := third_party/aicaflow
+AICAFORGE_ROOT := $(AICAFLOW_ROOT)/dependencies/AICAforge
+AICAFORGE_BIN := $(AICAFORGE_ROOT)/build
+AICAFLOW_BENCHMARK ?= 0
 
 DEFINES := \
 	-DTARGET_PC \
@@ -39,7 +42,7 @@ DEFINES := \
 	-DGBI_FLOAT_MTX \
 	-DAUDIO_NO_REVERB
 
-DEFINES += -DDKR_AICAFLOW
+DEFINES += -DDKR_AICAFLOW -DDKR_AICAFLOW_BENCHMARK=$(AICAFLOW_BENCHMARK)
 LIBS := $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a -lsh4zam -lm
 
 
@@ -68,7 +71,7 @@ INCLUDES_REIMPL := \
 	-I libultra/src/audio \
 	-I libultra/src/os
 
-INCLUDES_REIMPL += -I$(AICAFLOW_ROOT)/driver/include -I$(AICAFLOW_ROOT)/driver/sh4/include -I$(BUILD)/aicaflow
+INCLUDES_REIMPL += -I$(AICAFLOW_ROOT)/driver/include -I$(AICAFLOW_ROOT)/driver/format/include -I$(AICAFLOW_ROOT)/driver/sh4/include -I$(BUILD)/aicaflow
 INCLUDES := $(INCLUDES_REIMPL)
 
 OPT      ?= -O3
@@ -294,9 +297,9 @@ MUSIC_BANK := $(BUILD)/aicaflow/music.afb
 MUSIC_CONTROLS := $(BUILD)/aicaflow/music_controls
 MUSIC_VISUALS := $(BUILD)/aicaflow/music_visuals.json
 DKR_AICAFLOW_TOOLS := dreamcast/aicaflow_tools
-AICAFLOW_N64_AUTHOR := $(AICAFLOW_ROOT)/build/afx_n64
-AICAFLOW_BANK_AUTHOR := $(AICAFLOW_ROOT)/build/afx_bank
-AICAFLOW_AUTHOR := $(AICAFLOW_ROOT)/build/afx_compile
+AICAFLOW_N64_AUTHOR := $(AICAFORGE_BIN)/afx_n64
+AICAFLOW_BANK_AUTHOR := $(AICAFORGE_BIN)/afx_bank
+AICAFLOW_AUTHOR := $(AICAFORGE_BIN)/afx_compile
 DKR_SFX_MAP := $(DKR_AICAFLOW_TOOLS)/dkr.afsfx
 SFX_MANIFEST := $(BUILD)/aicaflow/sfx_manifest.h
 SFX_FALLBACK := $(BUILD)/aicaflow/fallback/manifest.json
@@ -354,17 +357,14 @@ $(AICAFLOW_ROOT)/firmware/aicaflow.drv:
 	$(MAKE) -C $(AICAFLOW_ROOT) firmware
 
 $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a: \
-	$(wildcard $(AICAFLOW_ROOT)/driver/sh4/src/*.[ch] $(AICAFLOW_ROOT)/driver/sh4/include/aicaflow/*.h $(AICAFLOW_ROOT)/driver/include/aicaflow/*.h) \
-	$(AICAFLOW_ROOT)/driver/common/codec.c $(AICAFLOW_ROOT)/driver/sh4/Makefile
+	$(wildcard $(AICAFLOW_ROOT)/driver/sh4/src/*.[ch] $(AICAFLOW_ROOT)/driver/sh4/include/aicaflow/*.h $(AICAFLOW_ROOT)/driver/include/aicaflow/*.h $(AICAFLOW_ROOT)/driver/format/include/aicaflow/*.h) \
+	$(AICAFLOW_ROOT)/driver/format/src/codec.c $(AICAFLOW_ROOT)/driver/sh4/Makefile
 	$(MAKE) -C $(dir $@)
 
-$(AICAFLOW_N64_AUTHOR): \
-	$(wildcard $(AICAFLOW_ROOT)/tools/author/*.[ch] $(AICAFLOW_ROOT)/driver/include/aicaflow/*.h) \
-	$(AICAFLOW_ROOT)/driver/common/codec.c $(AICAFLOW_ROOT)/Makefile
-	$(MAKE) -C $(AICAFLOW_ROOT) compiler
-
-$(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR): $(AICAFLOW_N64_AUTHOR)
-	$(MAKE) -C $(AICAFLOW_ROOT) compiler
+$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR): \
+	$(wildcard $(AICAFORGE_ROOT)/src/*.[ch] $(AICAFLOW_ROOT)/driver/format/include/aicaflow/*.h) \
+	$(AICAFLOW_ROOT)/driver/format/src/codec.c $(AICAFORGE_ROOT)/Makefile
+	$(MAKE) -C $(AICAFORGE_ROOT) BUILD="$(abspath $(AICAFORGE_BIN))" all
 
 $(MUSIC_RAW_DIR)/sequence_%.afx: \
 	assets/.vanilla/us.v77/audio/unknown/asset_audio_0.bin \
