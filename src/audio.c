@@ -417,6 +417,8 @@ void music_prepare(u8 seqID) {
 #ifdef DKR_AICAFLOW
     int result;
 
+    /* A blocked change keeps the current song, which shares the song's AICA space. */
+    if (gBlockMusicChange || gMusicSliderVolume == 0) return;
     pc_audio_lock();
     result = dkr_afx_music_prepare(seqID);
     pc_audio_unlock();
