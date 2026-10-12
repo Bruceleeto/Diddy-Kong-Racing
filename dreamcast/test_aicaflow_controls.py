@@ -50,6 +50,7 @@ void pc_audio_lock(void) {}
 void pc_audio_unlock(void) {}
 #define benchmark_bank_load(started, bytes) ((void)(started))
 #define benchmark_memory(what, id) ((void)0)
+#define benchmark_late(what, id, status) ((void)0)
 #define benchmark_activate(flow, instance, what, id) afx_instance_activate(flow, instance)
 #define benchmark_unplanned(id, level) ((void)0)
 #define benchmark_sound(id, what, a, b, c) ((void)0)

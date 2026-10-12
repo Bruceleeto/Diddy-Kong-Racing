@@ -142,8 +142,15 @@ static int benchmark_activate(afx_asset_t flow, afx_instance_t *instance, const 
                (unsigned long)us, (unsigned long)ticks, result);
     return result;
 }
+
+/* A finished instance reports the worst lateness of its own events. */
+static void benchmark_late(const char *what, unsigned id, const afx_instance_status_t *status) {
+    if (status->state == AFX_DONE && !status->result && status->detail >= 4)
+        printf("DKR AICAFLOW BENCH: %s %u ran up to %lu ticks late\n", what, id, (unsigned long)status->detail);
+}
 #else
 #define benchmark_activate(flow, instance, what, id) afx_instance_activate(flow, instance)
+#define benchmark_late(what, id, status) ((void)0)
 #define benchmark_reset() ((void)0)
 #define benchmark_flow_upload(started, bytes) ((void)0)
 #define benchmark_bank_load(started, bytes) ((void)0)
@@ -1214,6 +1221,7 @@ static void update_sfx(void) {
         if (status.state != AFX_DONE && status.state != AFX_ERROR) continue;
         if (afx_instance_recycle(slot->instance)) continue;
         benchmark_sound(slot->sound->id, "ended state/result/preempted", status.state, status.result, !slot->owner);
+        benchmark_late("sound", slot->sound->id, &status);
         owner = slot->owner;
         *slot = (dkr_sfx_slot_t){0};
         sndp_aicaflow_complete(owner);
@@ -1247,6 +1255,7 @@ void dkr_afx_update(void) {
         }
         if (status.state != AFX_DONE && status.state != AFX_ERROR) goto done;
         if (afx_instance_recycle(sMusic)) goto done;
+        benchmark_late("sequence", sCurrentSequence, &status);
         sMusic = 0;
         __atomic_store_n(&sCurrentSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
         goto done;
