@@ -42,9 +42,10 @@ static OSThread sHostThread;
 #if DKR_GFX_PROFILE
 enum { PROF_FRAMES = 60 };
 static struct {
-    u64 last, wait, begin, dl, end;
+    u64 last, wait, waitFrame, begin, dl, end;
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
     u32 slowBatches;
+    u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
     // Why a batch missed the fast path, in triangles.
     u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
     u64 pvrRender, pvrRegister;
@@ -54,7 +55,10 @@ static struct {
 } sProf;
 #define PROF_ADD(field, n) (sProf.field += (n))
 static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
-// Time of one handler call. A fallback is inside tBlast as well.
+// Time of one handler call. A fallback is inside tBlast as well. These read
+// the clock a few hundred times a frame, which costs a millisecond or two, so
+// they need GFX_PROFILE=2; the frame totals stay honest at 1.
+#if DKR_GFX_PROFILE >= 2
 #define PROF_TIME(field, call) \
     do { \
         u64 profStart = pc_uptime_ns(); \
@@ -69,11 +73,26 @@ static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
         sProf.field += profNow - profLap; \
         profLap = profNow; \
     } while (0)
+#else
+#define PROF_TIME(field, call) call
+#define PROF_LAP_START() ((void) 0)
+#define PROF_LAP(field) ((void) 0)
+#endif
 
 static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
     sProf.begin += t1 - t0;
     sProf.dl += t2 - t1;
     sProf.end += t3 - t2;
+    {
+        static u64 sFrameStart;
+        u32 work = sFrameStart ? (u32) ((t3 - sFrameStart - sProf.waitFrame) / 1000u) : 0;
+
+        if (work > sProf.workMax) sProf.workMax = work;
+        if (work > 16667) sProf.over16++;
+        if (work > 14000) sProf.over14++;
+        sFrameStart = t3;
+        sProf.waitFrame = 0;
+    }
     if (sProf.sentFrame > sProf.maxSent) sProf.maxSent = sProf.sentFrame;
     sProf.sentFrame = 0;
     {
@@ -95,7 +114,8 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu | "
                "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
                "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
-               "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu\n",
+               "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
+               "workmax=%lu over16=%lu over14=%lu\n",
                (unsigned long) period, (unsigned long) wait,
                (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
                (unsigned long) begin, (unsigned long) end,
@@ -117,7 +137,8 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyCombiner / n), (unsigned long) (sProf.whyBillboard / n),
                (unsigned long) (sProf.whyState / n), (unsigned long) (sProf.whyFull / n),
                (unsigned long) (sProf.whyAppend / n), (unsigned long) (sProf.whyShared / n),
-               (unsigned long) (sProf.whyLoose / n));
+               (unsigned long) (sProf.whyLoose / n),
+               (unsigned long) sProf.workMax, (unsigned long) sProf.over16, (unsigned long) sProf.over14);
     }
     memset(&sProf, 0, sizeof(sProf));
     sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
@@ -151,7 +172,11 @@ s32 pc_retrace_wait(void) {
         req.tv_nsec = (targetNs - nowNs) % 1000000000ll;
         nanosleep(&req, NULL);
 #if DKR_GFX_PROFILE
-        sProf.wait += pc_uptime_ns() - nowNs;
+        {
+            u64 slept = pc_uptime_ns() - nowNs;
+            sProf.wait += slept;
+            sProf.waitFrame += slept;
+        }
 #endif
         nowNs = targetNs;
     }
