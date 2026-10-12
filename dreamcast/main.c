@@ -1027,6 +1027,8 @@ static void apply_render_mode(void) {
  * G_TRIN — DKR's polygon command. w1 points at an array of Triangles (vertex
  * indices plus UVs); shade each one from its vertex colours.
  */
+static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled);
+
 static void handle_polygon(u32 w0, u32 w1) {
     const Triangle *tris = (const Triangle *) w1;
     u32 params = (w0 >> 16) & 0xFF;
@@ -1037,6 +1039,9 @@ static void handle_polygon(u32 w0, u32 w1) {
     s32 i;
 
     if (tris == NULL) {
+        return;
+    }
+    if (polygon_blast(tris, count, texEnabled)) {
         return;
     }
 
@@ -1274,8 +1279,8 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
     PROF_LAP_START();
     // The color must be per-batch trivial: shade byte or constant per channel.
     combiner_classify();
-    if (!sCcFast || sBillboard) {
-        if (sBillboard) PROF_ADD(whyBillboard, numTris); else PROF_ADD(whyCombiner, numTris);
+    if (sBillboard) {
+        PROF_ADD(whyBillboard, numTris);
         blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
@@ -1325,6 +1330,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         u32 konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) |
                      (u32) sCcConst[2]) & ~keep;
         f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
+        s32 ccFast = sCcFast;
         s32 run;
 
         i = 0;
@@ -1341,7 +1347,22 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
                 f32 invW;
 
                 cp[i] = c;
-                argb[i] = ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) | konst;
+                if (ccFast) {
+                    argb[i] = ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) |
+                              konst;
+                } else {
+                    // The combiner mixes shade with something else: run the real
+                    // mux, once per vertex rather than once per corner.
+                    f32 shade[4];
+                    u8 lit[4];
+
+                    shade[0] = v->r * (1.0f / 255.0f);
+                    shade[1] = v->g * (1.0f / 255.0f);
+                    shade[2] = v->b * (1.0f / 255.0f);
+                    shade[3] = v->a * (1.0f / 255.0f);
+                    combiner_eval_lit(shade, lit);
+                    argb[i] = ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
+                }
                 if (c.w < GFX_NEAR_W) {
                     behind |= 1u << i;
                     continue;
@@ -1421,6 +1442,86 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         sBlastRecord = NULL;
     }
     PROF_LAP(tEmit);
+}
+
+/**
+ * A G_TRIN over vertices that G_VTX already loaded and projected: sprites, whose
+ * quads share one appended load across several textures, and any batch the
+ * peephole could not fuse. Writes them straight out like the blast path when
+ * the state allows and no corner is behind the near plane; returns FALSE to
+ * leave the batch to the emulated path otherwise.
+ */
+static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
+    u32 texture = 0;
+    f32 uMul = 0.0f, vMul = 0.0f;
+    f32 uS, vS;
+    u32 keep, konst;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        if (!VERTEX_PROJECTED(&sVerts[tris[i].vi0 % GFX_MAX_VERTS]) ||
+            !VERTEX_PROJECTED(&sVerts[tris[i].vi1 % GFX_MAX_VERTS]) ||
+            !VERTEX_PROJECTED(&sVerts[tris[i].vi2 % GFX_MAX_VERTS])) {
+            return FALSE;
+        }
+    }
+    combiner_classify();
+    if (!sCcFast) {
+        return FALSE;
+    }
+    if (texEnabled) {
+        texture = texture_current();
+    }
+    apply_render_mode();
+    gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
+    gfx_bind_texture(texture);
+    apply_texture_filter();
+    gfx_set_texenv_modulate();
+    keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
+           (sCcPass[2] ? 0x000000FFu : 0);
+    konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) | (u32) sCcConst[2]) &
+            ~keep;
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, count * 3, (void **) &sBlastRecord,
+                         (int) (((((u32) sVerts[tris[0].vi0 % GFX_MAX_VERTS].a << 24) & keep) | konst) >> 24),
+                         &sBlastZMul, &sBlastZAdd)) {
+        return FALSE;
+    }
+    if (texture != 0) {
+        uMul = shz_invf_fsrra(32.0f * (f32) sTileWidth) * uS;
+        vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
+    }
+    PROF_ADD(tris, count);
+    for (i = 0; i < count; i++) {
+        const Triangle *t = &tris[i];
+        const GfxVertex *a = &sVerts[t->vi0 % GFX_MAX_VERTS];
+        const GfxVertex *b = &sVerts[t->vi1 % GFX_MAX_VERTS];
+        const GfxVertex *c = &sVerts[t->vi2 % GFX_MAX_VERTS];
+
+        if (!(t->flags & BACKFACE_DRAW)) {
+            f32 area = ((b->sx - a->sx) * (c->sy - a->sy)) - ((c->sx - a->sx) * (b->sy - a->sy));
+
+            if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                PROF_ADD(culled, 1);
+                continue;
+            }
+        }
+        PROF_ADD(sent, 1);
+        PROF_ADD(sentFrame, 1);
+        blast_emit(a->sx, a->sy, shz_invf_fsrra(a->sw), t->uv0.u * uMul, t->uv0.v * vMul,
+                   ((((u32) a->a << 24) | ((u32) a->r << 16) | ((u32) a->g << 8) | (u32) a->b) & keep) | konst,
+                   PVR_CMD_VERTEX);
+        blast_emit(b->sx, b->sy, shz_invf_fsrra(b->sw), t->uv1.u * uMul, t->uv1.v * vMul,
+                   ((((u32) b->a << 24) | ((u32) b->r << 16) | ((u32) b->g << 8) | (u32) b->b) & keep) | konst,
+                   PVR_CMD_VERTEX);
+        blast_emit(c->sx, c->sy, shz_invf_fsrra(c->sw), t->uv2.u * uMul, t->uv2.v * vMul,
+                   ((((u32) c->a << 24) | ((u32) c->r << 16) | ((u32) c->g << 8) | (u32) c->b) & keep) | konst,
+                   PVR_CMD_VERTEX_EOL);
+    }
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
+    return TRUE;
 }
 
 // ---------------------------------------------------------------------------
