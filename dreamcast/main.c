@@ -387,6 +387,8 @@ static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
 
+static s32 sTexStateDirty;
+
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
     u32 lo = (u32) addr;
     u32 hi = lo + (u32) size;
@@ -398,6 +400,7 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
         if ((t->timg >= lo && t->timg < hi) || (t->tlut >= lo && t->tlut < hi)) {
             gfx_delete_texture(t->handle);
             sTexCache[i] = sTexCache[--sTexCacheCount];
+            sTexStateDirty = TRUE;
         } else {
             i++;
         }
@@ -649,7 +652,7 @@ static void decode_texture(const u8 *src, u8 fmt, u8 siz, s32 width, s32 height,
  * The texture the current RDP state describes, decoded and uploaded once and
  * then kept. Returns 0 (untextured) if there is nothing sane to draw with.
  */
-static u32 texture_current(void) {
+static u32 texture_lookup(void) {
     const u8 *tlut = (const u8 *) sTlutAddr;
     s32 i;
 
@@ -748,6 +751,21 @@ static u32 texture_current(void) {
         tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
         return t->handle;
     }
+}
+
+// What texture_lookup() last returned, valid until the display list touches the
+// tile or loads an image. Consecutive batches mostly share a texture, and the
+// lookup is not free. A new frame starts dirty so that each texture's first use
+// in a frame goes through the lookup, which is what stamps it as recently used.
+static s32 sTexStateDirty = TRUE;
+static u32 sTexCurrent;
+
+static u32 texture_current(void) {
+    if (sTexStateDirty) {
+        sTexCurrent = texture_lookup();
+        sTexStateDirty = FALSE;
+    }
+    return sTexCurrent;
 }
 
 /**
@@ -2074,6 +2092,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     // dropped clamp entirely, so every clamped texture wrapped.
                     sTileCmT = (w1 >> 18) & 0x3;
                     sTileCmS = (w1 >> 8) & 0x3;
+                    sTexStateDirty = TRUE;
                 }
                 break;
             }
@@ -2087,6 +2106,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     u32 lrt = w1 & 0xFFF;
                     sTileWidth = ((lrs - uls) >> 2) + 1;
                     sTileHeight = ((lrt - ult) >> 2) + 1;
+                    sTexStateDirty = TRUE;
                     sTileUls = uls;
                     sTileUlt = ult;
                 }
@@ -2100,14 +2120,17 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // dxt is the low 12 bits. Zero means the RDP applied no odd-row
                 // swizzle on the way in, i.e. the asset is already swizzled.
                 sTexSwapped = ((w1 & 0xFFF) == 0);
+                sTexStateDirty = TRUE;
                 break;
             case (u8) G_LOADTILE:
                 sTexAddr = sTimgAddr;
                 sTexSwapped = FALSE; // a tile load is row-by-row, never swizzled
+                sTexStateDirty = TRUE;
                 break;
             case (u8) G_LOADTLUT:
                 // The palette is whatever G_SETTIMG last pointed at.
                 sTlutAddr = sTimgAddr;
+                sTexStateDirty = TRUE;
                 break;
             case (u8) G_TEXRECT:
             case (u8) G_TEXRECTFLIP: {
@@ -2293,6 +2316,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTlutAddr = 0;
     sTileWidth = 0;
     sTileHeight = 0;
+    sTexStateDirty = TRUE;
     sTileUls = 0;
     sTileUlt = 0;
     sOtherModeL = 0;
