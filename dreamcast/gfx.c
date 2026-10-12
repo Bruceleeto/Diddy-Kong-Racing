@@ -13,6 +13,12 @@
 // ---------------------------------------------------------------------------
 
 #define DC_SCREEN_W 640
+// With FSAA the PVR renders twice as wide and filters back down on output, so
+// everything horizontal - vertices, clip tiles - is in a 1280-wide space.
+#ifndef DKR_FSAA
+#define DKR_FSAA 0
+#endif
+#define DC_RENDER_W (DC_SCREEN_W << DKR_FSAA)
 #define DC_SCREEN_H 480
 
 #define MAX_TEXTURES 1024
@@ -171,7 +177,7 @@ void gfx_window_init(int width, int height, int scale) {
         // clears it with VRAM to spare for framebuffers and textures.
         1536 * 1024, // vertex buffer
         0,          // DMA disabled (we submit via the store queues)
-        0,          // no FSAA
+        DKR_FSAA,   // horizontal supersampling
         1,          // autosort DISABLED -> submission order preserved
         3           // OPB overflow count
     };
@@ -182,7 +188,7 @@ void gfx_window_init(int width, int height, int scale) {
         return;
     }
 
-    sScaleX = (float) DC_SCREEN_W / (float) width;
+    sScaleX = (float) DC_RENDER_W / (float) width;
     sScaleY = (float) DC_SCREEN_H / (float) height;
 
     if (pvr_init(&params) < 0) {
@@ -462,7 +468,7 @@ static void submit_user_clip(int x0, int y0, int x1, int y1) {
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > DC_SCREEN_W) x1 = DC_SCREEN_W;
+    if (x1 > DC_RENDER_W) x1 = DC_RENDER_W;
     if (y1 > DC_SCREEN_H) y1 = DC_SCREEN_H;
 
     clip = (unsigned int *) ta_target();
@@ -508,7 +514,7 @@ static int scissor_needs_exact_clip(void) {
     y1 = (int) (sScisY1 * sScaleY);
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 > DC_SCREEN_W) x1 = DC_SCREEN_W;
+    if (x1 > DC_RENDER_W) x1 = DC_RENDER_W;
     if (y1 > DC_SCREEN_H) y1 = DC_SCREEN_H;
 
     // An edge on a multiple of 32 is already exact; so is one clamped to the screen.
@@ -852,7 +858,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
                              (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
         } else {
-            submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+            submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
         }
         if (sRoute == ROUTE_PT) {
             sScisDirtyPt = 0;
@@ -943,7 +949,7 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
                 submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
                                  (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
             } else {
-                submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+                submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
             }
             sScisDirty = 0;
         }
@@ -959,7 +965,7 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
                 submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
                                  (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
             } else {
-                submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+                submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
             }
             sScisDirtyOp = 0;
         }

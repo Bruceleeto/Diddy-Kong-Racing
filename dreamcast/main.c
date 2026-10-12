@@ -18,7 +18,9 @@ extern OSThread *__osRunningThread;
 static OSThread sHostThread;
 
 #define PC_RETRACE_NSEC (1000000000ll / 60)
+#ifndef PC_LOGIC_UPDATE_RATE
 #define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
+#endif
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
 
 // ---------------------------------------------------------------------------
@@ -1032,14 +1034,24 @@ static void handle_polygon(u32 w0, u32 w1) {
 
 
 /** Render a blast batch through the emulated path, as the DL would have. */
-static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                           s32 texEnabled) {
+static void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+                           const Triangle *tris, s32 numTris, s32 texEnabled) {
     PROF_ADD(fallback, 1);
 #if DKR_GFX_PROFILE_SKIP == 3
     PROF_ADD(slowTris, numTris);
     return;
 #endif
     PROF_TIME(tFallback, handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts));
+    if (numVerts2 > 0) {
+        // The second run was loaded under another matrix and appended.
+        s32 matrix = sCurMatrix;
+
+        sCurMatrix = matrix2;
+        PROF_TIME(tFallback, handle_vertex(((u32) G_VTX << 24) |
+                                               ((u32) (((numVerts2 - 1) << 3) | G_VTX_APPEND) << 16),
+                                           (u32) verts2));
+        sCurMatrix = matrix;
+    }
     PROF_TIME(tFallback, handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
                                         (u32) tris));
 }
@@ -1150,8 +1162,8 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
-static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                         s32 texEnabled) {
+static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+                         const Triangle *tris, s32 numTris, s32 texEnabled) {
     f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
     u32 argb[GFX_BLAST_MAX_VERTS];
     shz_vec4_t cp[GFX_BLAST_MAX_VERTS];
@@ -1160,11 +1172,12 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     f32 uMul = 0.0f, vMul = 0.0f;
     f32 uS, vS;
     s32 i;
+    s32 total = numVerts + numVerts2;
 
     if (verts == NULL || tris == NULL || numTris <= 0 || numVerts <= 0) {
         return;
     }
-    if (numVerts > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
+    if (total > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
         // Can't occur in a valid asset (the DL macros can't encode it).
         printf("blast: oversized batch %dv/%dt\n", (int) numVerts, (int) numTris);
         return;
@@ -1175,7 +1188,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     combiner_classify();
     if (!sCcFast || sBillboard) {
         if (sBillboard) PROF_ADD(whyBillboard, numTris); else PROF_ADD(whyCombiner, numTris);
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
 
@@ -1196,12 +1209,12 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // to have run.
     if (!gfx_blast_viable()) {
         PROF_ADD(whyState, numTris);
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
 
     PROF_ADD(blast, 1);
-    PROF_ADD(verts, numVerts);
+    PROF_ADD(verts, total);
     PROF_ADD(tris, numTris);
     PROF_LAP(tState);
 #if DKR_GFX_PROFILE_SKIP == 2
@@ -1211,10 +1224,15 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // Transform + project every vertex. A vertex behind the near plane just marks
     // its bit; the triangles touching it go through the in-path clipper below.
     shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
-    for (i = 0; i < numVerts; i++) {
-        const Vertex *v = &verts[i];
-        shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+    for (i = 0; i < total; i++) {
+        const Vertex *v = (i < numVerts) ? &verts[i] : &verts2[i - numVerts];
+        shz_vec4_t c;
         f32 invW;
+
+        if (i == numVerts) {
+            shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[matrix2]);
+        }
+        c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
 
         cp[i] = c;
         argb[i] = ((u32) (sCcPass[3] ? v->a : sCcConst[3]) << 24) |
@@ -1236,7 +1254,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord)) {
         // handle_polygon redoes this state, so falling back here is safe.
         PROF_ADD(whyFull, numTris);
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
     if (texture != 0) {
@@ -1248,7 +1266,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         const Triangle *t = &tris[i];
         s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
 
-        if (i0 >= numVerts || i1 >= numVerts || i2 >= numVerts) {
+        if (i0 >= total || i1 >= total || i2 >= total) {
             continue;
         }
         if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
@@ -1838,24 +1856,67 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // pair can be fused into the native blast path — skipping the
                 // sVerts staging and the whole per-corner emit machinery.
                 //
-                // Guards: no append (the anchor scheme needs sVerts), no
-                // billboard, and — because the fast path leaves sVerts stale —
-                // the command after the pair must not be another G_TRIN reusing
-                // these vertices. When blast_render itself falls back it does so
-                // by running the real handlers, which repopulates sVerts, so
-                // every fallback is exactly the unfused behaviour.
+                // Object models whose batch hangs off a second matrix arrive in
+                // two more shapes (see the batch loop in src/objects.c), both
+                // with matrix selects around the load:
+                //   G_VTX, select, G_TRIN                      one matrix
+                //   G_VTX, select, G_VTX append, select, G_TRIN  two matrices
+                // A select only changes which matrix later loads use, so the
+                // vertices transform with the matrix current at their own G_VTX
+                // and the last select is applied afterwards.
+                //
+                // Guards: no append on the first load (the anchor scheme needs
+                // sVerts), no billboard, and — because the fast path leaves
+                // sVerts stale — the command after the batch must not be another
+                // G_TRIN reusing these vertices. When blast_render itself falls
+                // back it does so by running the real handlers, which
+                // repopulates sVerts, so every fallback is exactly the unfused
+                // behaviour.
                 u32 params = (w0 >> 16) & 0xFF;
 
-                if (!(params & G_VTX_APPEND) && !sBillboard && (count == 0 || i + 1 < count) &&
-                    ((dl[i + 1].words.w0 >> 24) & 0xFF) == G_TRIN &&
-                    ((dl[i + 2].words.w0 >> 24) & 0xFF) != G_TRIN) {
-                    u32 tw0 = dl[i + 1].words.w0;
+                if (!(params & G_VTX_APPEND) && !sBillboard) {
+#define DL_HAS(k) (count == 0 || i + (k) < count)
+#define DL_OP(k) ((dl[i + (k)].words.w0 >> 24) & 0xFF)
+#define DL_SELECT(k) (DL_OP(k) == (u8) G_MOVEWORD && (dl[i + (k)].words.w0 & 0xFF) == G_MW_MVPMATRIX)
+#define DL_LAST_TRIN(k) (DL_OP(k) == G_TRIN && !(DL_HAS((k) + 1) && DL_OP((k) + 1) == G_TRIN))
+                    s32 numVerts = (s32) ((params >> 3) & 0x1F) + 1;
+                    const Vertex *verts2 = NULL;
+                    s32 numVerts2 = 0, matrix2 = 0, trin = 0, select = 0;
 
-                    PROF_TIME(tBlast, blast_render((const Vertex *) w1, (s32) ((params >> 3) & 0x1F) + 1,
-                                                   (const Triangle *) dl[i + 1].words.w1,
-                                                   (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1, (s32) ((tw0 >> 16) & 1)));
-                    i++;
-                    break;
+                    if (DL_HAS(1) && DL_LAST_TRIN(1)) {
+                        trin = 1;
+                    } else if (DL_HAS(2) && DL_SELECT(1) && DL_LAST_TRIN(2)) {
+                        trin = 2;
+                        select = 1;
+                    } else if (DL_HAS(4) && DL_SELECT(1) && DL_OP(2) == G_VTX &&
+                               ((dl[i + 2].words.w0 >> 16) & G_VTX_APPEND) && DL_SELECT(3) && DL_LAST_TRIN(4)) {
+                        u32 params2 = (dl[i + 2].words.w0 >> 16) & 0xFF;
+
+                        numVerts2 = (s32) ((params2 >> 3) & 0x1F) + 1;
+                        if (numVerts + numVerts2 <= GFX_BLAST_MAX_VERTS && dl[i + 2].words.w1 != 0) {
+                            verts2 = (const Vertex *) dl[i + 2].words.w1;
+                            matrix2 = (dl[i + 1].words.w1 >> 6) & 3;
+                            trin = 4;
+                            select = 3;
+                        }
+                    }
+#undef DL_HAS
+#undef DL_OP
+#undef DL_SELECT
+#undef DL_LAST_TRIN
+                    if (trin) {
+                        u32 tw0 = dl[i + trin].words.w0;
+
+                        PROF_TIME(tBlast, blast_render((const Vertex *) w1, numVerts, verts2, numVerts2, matrix2,
+                                                       (const Triangle *) dl[i + trin].words.w1,
+                                                       (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1,
+                                                       (s32) ((tw0 >> 16) & 1)));
+                        if (select) {
+                            sCurMatrix = (dl[i + select].words.w1 >> 6) & 3;
+                        }
+                        i += trin;
+                        break;
+                    }
                 }
 #if DKR_GFX_PROFILE
                 sProfVtxWhy = (params & G_VTX_APPEND) ? 1 : sBillboard ? 2 :
