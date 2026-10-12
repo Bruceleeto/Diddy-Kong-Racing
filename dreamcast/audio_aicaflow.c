@@ -127,7 +127,23 @@ static void benchmark_update(uint64_t started) {
     }
     benchmark_reset();
 }
+
+/* The driver starts an instance one tick after the AICA clock it reads. If
+ * the command then reaches the queue later than that, the instance starts
+ * late by the difference, which the firmware reports as lateness. */
+static int benchmark_activate(afx_asset_t flow, afx_instance_t *instance, const char *what, unsigned id) {
+    uint32_t before = afx_status_timer_ticks();
+    uint64_t started = timer_us_gettime64();
+    int result = afx_instance_activate(flow, instance);
+    uint32_t us = (uint32_t)(timer_us_gettime64() - started);
+    uint32_t ticks = afx_status_timer_ticks() - before;
+    if (ticks > 1 || us > 1000)
+        printf("DKR AICAFLOW BENCH: activating %s %u took %lu us, %lu ticks (%d)\n", what, id,
+               (unsigned long)us, (unsigned long)ticks, result);
+    return result;
+}
 #else
+#define benchmark_activate(flow, instance, what, id) afx_instance_activate(flow, instance)
 #define benchmark_reset() ((void)0)
 #define benchmark_flow_upload(started, bytes) ((void)0)
 #define benchmark_bank_load(started, bytes) ((void)0)
@@ -805,7 +821,7 @@ static int sfx_play(uint16_t id, void *owner, uint8_t priority) {
         dkr_sfx_slot_t *slot = &sSfxSlots[i];
         int result;
         if (slot->instance) continue;
-        result = afx_instance_activate(bank->sounds[sound_index].flow, &slot->instance);
+        result = benchmark_activate(bank->sounds[sound_index].flow, &slot->instance, "sound", id);
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             return sfx_preempt(priority);
         }
@@ -1243,7 +1259,7 @@ void dkr_afx_update(void) {
         if (!result) {
             sAuthoredTempo = __atomic_load_n(&sTempo, __ATOMIC_ACQUIRE);
             if (!sAuthoredTempo) sAuthoredTempo = 120;
-            result = afx_instance_activate(flow, &sMusic);
+            result = benchmark_activate(flow, &sMusic, "sequence", wanted);
         }
         if (result == -AFX_BUSY) goto done;
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
