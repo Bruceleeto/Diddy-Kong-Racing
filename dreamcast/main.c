@@ -62,8 +62,8 @@ void pc_prof_add(int part, unsigned long long ns) {
 static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
 // Time of one handler call. A fallback is inside tBlast as well. These read
 // the clock a few hundred times a frame, which costs a millisecond or two, so
-// they need GFX_PROFILE=2; the frame totals stay honest at 1.
-#if DKR_GFX_PROFILE >= 2
+// they need GFX_PROFILE=2; the frame totals stay honest at 1 and 3.
+#if DKR_GFX_PROFILE == 2
 #define PROF_TIME(field, call) \
     do { \
         u64 profStart = pc_uptime_ns(); \
@@ -358,6 +358,26 @@ static u16 sTexHint[GFX_TEX_HINTS];
 static u32 tex_hint_slot(u32 timg, u32 tlut) {
     return ((timg >> 5) ^ (timg >> 15) ^ (tlut >> 5)) & (GFX_TEX_HINTS - 1);
 }
+
+#define GFX_TEX_HINT_PROBES 4
+
+/** Remember cache entry `index` near `slot`: in a free or stale hint if there is one. */
+static void tex_hint_store(u32 slot, s32 index) {
+    static u32 sNext;
+    s32 probe;
+
+    for (probe = 0; probe < GFX_TEX_HINT_PROBES; probe++) {
+        u32 at = (slot + probe) & (GFX_TEX_HINTS - 1);
+        s32 hi = (s32) sTexHint[at] - 1;
+
+        if (hi < 0 || hi >= sTexCacheCount || hi == index ||
+            ((tex_hint_slot(sTexCache[hi].timg, sTexCache[hi].tlut) ^ slot) & (GFX_TEX_HINTS - 1)) != 0) {
+            sTexHint[at] = (u16) (index + 1);
+            return;
+        }
+    }
+    sTexHint[(slot + (sNext++ % GFX_TEX_HINT_PROBES)) & (GFX_TEX_HINTS - 1)] = (u16) (index + 1);
+}
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
@@ -646,16 +666,22 @@ static u32 texture_current(void) {
 
     {
         u32 slot = tex_hint_slot(sTexAddr, (u32) tlut);
-        s32 hi = (s32) sTexHint[slot] - 1;
+        s32 probe;
 
-        if (hi >= 0 && hi < sTexCacheCount) {
-            GfxTexture *t = &sTexCache[hi];
+        // A few neighbouring hints, so two textures that hash alike do not push
+        // each other out and send every lookup to the scan below.
+        for (probe = 0; probe < GFX_TEX_HINT_PROBES; probe++) {
+            s32 hi = (s32) sTexHint[(slot + probe) & (GFX_TEX_HINTS - 1)] - 1;
 
-            if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt &&
-                t->siz == sTileSiz && t->width == sTileWidth && t->height == sTileHeight &&
-                t->cmS == sTileCmS && t->cmT == sTileCmT && t->swapped == (u8) sTexSwapped) {
-                t->lastUsed = sGfxFrameCount;
-                return t->handle;
+            if (hi >= 0 && hi < sTexCacheCount) {
+                GfxTexture *t = &sTexCache[hi];
+
+                if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt &&
+                    t->siz == sTileSiz && t->width == sTileWidth && t->height == sTileHeight &&
+                    t->cmS == sTileCmS && t->cmT == sTileCmT && t->swapped == (u8) sTexSwapped) {
+                    t->lastUsed = sGfxFrameCount;
+                    return t->handle;
+                }
             }
         }
 
@@ -665,7 +691,7 @@ static u32 texture_current(void) {
                 t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
                 t->swapped == (u8) sTexSwapped) {
                 t->lastUsed = sGfxFrameCount;
-                sTexHint[slot] = (u16) (i + 1);
+                tex_hint_store(slot, i);
                 return t->handle;
             }
         }
@@ -714,7 +740,7 @@ static u32 texture_current(void) {
         t->cmT = sTileCmT;
         t->lastUsed = sGfxFrameCount;
         t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileCmS, sTileCmT);
-        sTexHint[tex_hint_slot(t->timg, t->tlut)] = (u16) sTexCacheCount; // index of t, +1
+        tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
         return t->handle;
     }
 }
@@ -1614,6 +1640,14 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
 // The state the classification is valid for. Any change and it is recomputed.
 static u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
 static s32 sCcSigValid = FALSE;
+static u32 sCcCacheAt;
+
+// Materials alternate within a frame, so remember more than the last result.
+#define GFX_CC_CACHE 128
+static struct {
+    u32 w0, w1, cyc, prim, env;
+    u8 valid, fast, pass[4], konst[4];
+} sCcCache[GFX_CC_CACHE];
 
 static void combiner_classify(void) {
     // Three probes, not two: two mid-range ones would call a combiner that
@@ -1640,6 +1674,22 @@ static void combiner_classify(void) {
     sCcSigPrim = prim;
     sCcSigEnv = env;
     sCcSigValid = TRUE;
+
+    {
+        u32 hash = sCombineW0 ^ (sCombineW1 * 0x9E3779B1u) ^ (prim * 0x85EBCA6Bu) ^ (env * 0xC2B2AE35u) ^ cyc;
+        u32 at = (hash ^ (hash >> 15)) & (GFX_CC_CACHE - 1);
+
+        if (sCcCache[at].valid && sCcCache[at].w0 == sCombineW0 && sCcCache[at].w1 == sCombineW1 &&
+            sCcCache[at].cyc == cyc && sCcCache[at].prim == prim && sCcCache[at].env == env) {
+            sCcFast = sCcCache[at].fast;
+            for (i = 0; i < 4; i++) {
+                sCcPass[i] = sCcCache[at].pass[i];
+                sCcConst[i] = sCcCache[at].konst[i];
+            }
+            return;
+        }
+        sCcCacheAt = at;
+    }
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
@@ -1671,6 +1721,18 @@ static void combiner_classify(void) {
             break;
         }
     }
+
+    sCcCache[sCcCacheAt].w0 = sCombineW0;
+    sCcCache[sCcCacheAt].w1 = sCombineW1;
+    sCcCache[sCcCacheAt].cyc = cyc;
+    sCcCache[sCcCacheAt].prim = prim;
+    sCcCache[sCcCacheAt].env = env;
+    sCcCache[sCcCacheAt].fast = (u8) sCcFast;
+    for (i = 0; i < 4; i++) {
+        sCcCache[sCcCacheAt].pass[i] = (u8) sCcPass[i];
+        sCcCache[sCcCacheAt].konst[i] = sCcConst[i];
+    }
+    sCcCache[sCcCacheAt].valid = TRUE;
 }
 
 /**
@@ -2143,6 +2205,59 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
 extern void dc_audio_init(void);
 extern void dc_audio_start_thread(void);
 
+// Sampling profile (GFX_PROFILE=3): a timer interrupt notes where the program
+// is, a few thousand times a second, while a race level is loaded. Unlike the
+// timers above it costs next to nothing, so it shows where time really goes.
+// The counts land in build/dc/prof_samples.bin when the run exits by itself;
+// one count per 32 bytes of code from the load address.
+#if DKR_GFX_PROFILE >= 3
+#define PROF_SAMPLE_BASE 0x8c010000u
+#define PROF_SAMPLE_BUCKETS (4u * 1024u * 1024u / 32u)
+extern s32 gMapId;
+static u16 sProfSamples[PROF_SAMPLE_BUCKETS];
+static u32 sProfSampleInfo[4]; // samples taken, samples outside the range, bucket bytes, base
+
+static void prof_sample_irq(irq_t code, irq_context_t *context, void *data) {
+    u32 bucket = (context->pc - PROF_SAMPLE_BASE) / 32u;
+
+    (void) code;
+    (void) data;
+    timer_clear(TMU1);
+    if (gMapId != 18 && gMapId != 28) {
+        return;
+    }
+    sProfSampleInfo[0]++;
+    if (bucket >= PROF_SAMPLE_BUCKETS) {
+        sProfSampleInfo[1]++;
+    } else if (sProfSamples[bucket] != 0xFFFF) {
+        sProfSamples[bucket]++;
+    }
+}
+
+static void prof_sample_start(void) {
+    sProfSampleInfo[2] = 32;
+    sProfSampleInfo[3] = PROF_SAMPLE_BASE;
+    irq_set_handler(EXC_TMU1_TUNI1, prof_sample_irq, NULL);
+    timer_prime(TMU1, 3989, 1); // not a multiple of the frame rate
+    timer_start(TMU1);
+}
+
+static void prof_sample_write(void) {
+    file_t file;
+
+    timer_stop(TMU1);
+    file = fs_open("/pc/build/dc/prof_samples.bin", O_WRONLY | O_CREAT | O_TRUNC);
+    if (file != FILEHND_INVALID) {
+        fs_write(file, sProfSampleInfo, sizeof(sProfSampleInfo));
+        fs_write(file, sProfSamples, sizeof(sProfSamples));
+        fs_close(file);
+    }
+}
+#else
+#define prof_sample_start() ((void) 0)
+#define prof_sample_write() ((void) 0)
+#endif
+
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
 #if DKR_GFX_PROFILE
     u64 profT0 = pc_uptime_ns(), profT1, profT2;
@@ -2195,6 +2310,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
 #if DKR_AUTO_EXIT_SECONDS
     // Unattended measurement runs: return to the loader by ourselves.
     if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
+        prof_sample_write();
         arch_exit();
     }
 #endif
@@ -2208,6 +2324,7 @@ static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
 
 int main(int argc, char **argv) {
     cont_btn_callback(0, CONT_RESET_BUTTONS, cont_reset_btn_callback_);
+    prof_sample_start();
 
     printf("=== DKR PC ===\n");
     sHostThread.id = 3;

@@ -248,6 +248,8 @@ static int next_pot(int v) {
 // bleed the border), store it NON-twiddled (a plain linear copy, no twiddle
 // arithmetic to go out of bounds), and fold the padding ratio into the UVs at
 // draw time via u_scale/v_scale.
+static void header_cache_clear(void);
+
 unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS, int cmT) {
     const unsigned char *src = (const unsigned char *) rgba;
     unsigned short *tmp;
@@ -255,6 +257,8 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     int slot;
     int pw, ph;
     int x, y;
+
+    header_cache_clear();
     int opaque = 1;
 
     if (!sPvrReady || rgba == NULL || width <= 0 || height <= 0) {
@@ -328,6 +332,7 @@ void gfx_delete_texture(unsigned int handle) {
     if (handle == 0 || handle > MAX_TEXTURES) {
         return;
     }
+    header_cache_clear();
     slot = (int) handle - 1;
     if (sTextures[slot].data != NULL) {
         if (sInScene && sPendingFreeCount < PENDING_FREE_MAX) {
@@ -640,7 +645,41 @@ static int clip_tri_to_scissor(const GfxTriVert *tri, GfxTriVert *poly) {
     return n;
 }
 
+// Compiled headers, by the state that goes into one. A frame draws a few dozen
+// materials over and over, and building a header costs more than a batch's
+// worth of vertices. Creating or deleting a texture empties the cache, since a
+// handle can come back with other pixels behind it.
+#define HDR_CACHE 256
+static struct {
+    unsigned int key; // 0 = empty
+    pvr_poly_hdr_t hdr;
+} sHdrCache[HDR_CACHE] __attribute__((aligned(32)));
+
+static void header_cache_clear(void) {
+    int i;
+
+    for (i = 0; i < HDR_CACHE; i++) {
+        sHdrCache[i].key = 0;
+    }
+}
+
+static void compile_header_uncached(int list, pvr_poly_hdr_t *out);
+
 static void compile_header_for(int list, pvr_poly_hdr_t *out) {
+    // Everything compile_header_uncached reads, and a top bit so no key is 0.
+    unsigned int key = 0x80000000u | ((unsigned int) list << 20) | ((unsigned int) sBoundTex << 6) |
+                       ((sFilterPoint != 0) << 5) | ((sScisEnable != 0) << 4) | ((sDepthTest != 0) << 3) |
+                       ((sFarBackdrop != 0) << 2) | ((sAlphaRef > 0.0f) << 1) | (sDepthWrite != 0);
+    unsigned int at = (key ^ (key >> 6) ^ (key >> 13)) & (HDR_CACHE - 1);
+
+    if (sHdrCache[at].key != key) {
+        compile_header_uncached(list, &sHdrCache[at].hdr);
+        sHdrCache[at].key = key;
+    }
+    *out = sHdrCache[at].hdr;
+}
+
+static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
     pvr_poly_cxt_t cxt;
 
     if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
