@@ -108,6 +108,14 @@ Planned loads run on the game thread with the audio mutex held, after waiting
 for the fallback worker to go idle. A music change outside a level load stops
 the old song, releases it and loads the new one before returning.
 
+Race voices are one pack per racer character (`voice` lines in `dkr.afsfx`).
+They are not charged to a scene. Once the racers exist, `dkr_afx_voices_prepare`
+loads the packs of the characters in the race, players first, while each fits
+in what the level and its song left and 64 KB stays free. A pack that does not
+fit is skipped and its clips fall back to loading on demand. A later song or
+unplanned sound that needs the space takes it from the least important pack
+that is not playing; a scene change releases them all.
+
 Sounds missing from every pack still load on demand through sixteen fallback
 slots on the `sfx-loader` thread. Active instances and pending requests prevent
 eviction; scene generations discard loads completed for ended scenes. Build

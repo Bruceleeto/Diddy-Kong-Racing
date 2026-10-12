@@ -16,6 +16,7 @@ def read_map(path):
     masks = None
     banks = {}
     scenes = {}
+    voices = {}
     for raw in path.read_text().splitlines():
         fields = raw.split("#", 1)[0].split()
         if not fields:
@@ -36,17 +37,31 @@ def read_map(path):
             if scene in scenes:
                 raise ValueError(f"duplicate scene {scene}")
             scenes[scene] = sorted({int(value) for value in ids})
+        elif kind == "voice" and len(values) > 1:
+            character, *ids = values
+            character = int(character)
+            if character in voices:
+                raise ValueError(f"duplicate voice pack {character}")
+            voices[character] = sorted({int(value) for value in ids})
         else:
             raise ValueError(f"{path}: invalid mapping line: {raw}")
     if count is None or count < 1 or masks is None or len(masks) != count or set(banks) != {"core", "vehicle"}:
         raise ValueError(f"{path}: incomplete SFX map")
     if any(mask < 0 or mask > 7 for mask in masks) or any(scene < 0 or scene >= count for scene in scenes):
         raise ValueError(f"{path}: scene or vehicle mask outside range")
-    if any(sound < 1 for ids in [*banks.values(), *scenes.values()] for sound in ids):
+    if any(sound < 1 for ids in [*banks.values(), *scenes.values(), *voices.values()] for sound in ids):
         raise ValueError(f"{path}: sound IDs are one-based")
     if set(banks["core"]) & set(banks["vehicle"]):
         raise ValueError(f"{path}: core and vehicle banks overlap")
-    return count, masks, banks, scenes
+    if any(character < 0 or character >= VOICE_CHARACTERS for character in voices):
+        raise ValueError(f"{path}: voice character outside range")
+    resident = set(banks["core"]) | set(banks["vehicle"])
+    if any(resident & set(ids) for ids in voices.values()):
+        raise ValueError(f"{path}: a voice pack repeats a core or vehicle sound")
+    return count, masks, banks, scenes, voices
+
+
+VOICE_CHARACTERS = 10  # Krunch .. Diddy, the game's racer character IDs.
 
 
 def align(value):
@@ -86,8 +101,13 @@ def write_pack(path, ids, control, samples, author, merger):
     return aica_bytes(path.read_bytes(), controls)
 
 
-def write_header(path, present, masks, sizes, core, vehicle, scene_ids):
+def write_header(path, present, masks, sizes, core, vehicle, scene_ids, voices, voice_sizes):
     flat, first, counts = [], [], []
+    voice_flat, voice_first, voice_counts = [], [], []
+    for character in range(VOICE_CHARACTERS):
+        voice_first.append(len(voice_flat))
+        voice_flat.extend(voices.get(character, []))
+        voice_counts.append(len(voices.get(character, [])))
     for level in range(len(present)):
         first.append(len(flat))
         ids = scene_ids.get(level, [])
@@ -114,14 +134,25 @@ def write_header(path, present, masks, sizes, core, vehicle, scene_ids):
                     ", ".join(map(str, first)) + "\n};\n"
                     "static const unsigned short dkr_afx_scene_sound_count[DKR_AFX_SCENE_COUNT] = {\n    " +
                     ", ".join(map(str, counts)) + "\n};\n"
+                    f"#define DKR_AFX_VOICE_PACK_COUNT {VOICE_CHARACTERS}u\n"
+                    "static const unsigned short dkr_afx_voice_sound_ids[] = {\n    " +
+                    ", ".join(map(str, voice_flat)) + "\n};\n"
+                    "static const unsigned short dkr_afx_voice_sound_first[DKR_AFX_VOICE_PACK_COUNT] = {\n    " +
+                    ", ".join(map(str, voice_first)) + "\n};\n"
+                    "static const unsigned short dkr_afx_voice_sound_count[DKR_AFX_VOICE_PACK_COUNT] = {\n    " +
+                    ", ".join(map(str, voice_counts)) + "\n};\n"
+                    "static const unsigned int dkr_afx_voice_bytes[DKR_AFX_VOICE_PACK_COUNT] = {\n    " +
+                    ", ".join(map(str, voice_sizes)) + "\n};\n"
                     "#endif\n")
 
 
-def verify(output, count, masks, banks, scene_ids):
+def verify(output, count, masks, banks, scene_ids, voices):
     manifest = json.loads((output / "manifest.json").read_text())
     core, vehicle = banks["core"], banks["vehicle"]
-    if (manifest["core"], manifest["vehicles"], manifest["scene_ids"], manifest["vehicle_masks"]) != (
-            core, vehicle, {str(level): scene_ids.get(level, []) for level in range(count)}, masks):
+    if (manifest["core"], manifest["vehicles"], manifest["scene_ids"], manifest["vehicle_masks"],
+            manifest["voice_ids"]) != (
+            core, vehicle, {str(level): scene_ids.get(level, []) for level in range(count)}, masks,
+            {str(character): ids for character, ids in sorted(voices.items())}):
         raise ValueError("SFX manifest differs from .afsfx map")
     for name, ids in (("core.afb", core), ("vehicle.afb", vehicle)):
         controls = {sound_id: (output / name).with_suffix("").joinpath(f"{sound_id}.afx").read_bytes()
@@ -133,7 +164,14 @@ def verify(output, count, masks, banks, scene_ids):
              for level in range(count)]
     if manifest["scene_bytes"] != sizes:
         raise ValueError("SFX scene sizes differ")
-    print(f"DKR AICAFLOW SFX map: {len(core)} resident, {len(vehicle)} vehicle, {len(scene_ids)} local scene banks")
+    voice_sizes = [aica_bytes((output / "voices" / f"{character}.afb").read_bytes(),
+                              {sound_id: (output / "voices" / str(character) / f"{sound_id}.afx").read_bytes()
+                               for sound_id in voices[character]}) if character in voices else 0
+                   for character in range(VOICE_CHARACTERS)]
+    if manifest["voice_bytes"] != voice_sizes:
+        raise ValueError("SFX voice pack sizes differ")
+    print(f"DKR AICAFLOW SFX map: {len(core)} resident, {len(vehicle)} vehicle, {len(scene_ids)} local scene banks, "
+          f"{len(voices)} voice packs")
 
 
 def main():
@@ -146,9 +184,9 @@ def main():
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
     root, output = args.root.resolve(), args.output.resolve()
-    count, masks, banks, scene_ids = read_map(args.mapping.resolve())
+    count, masks, banks, scene_ids, voices = read_map(args.mapping.resolve())
     if args.verify:
-        verify(output, count, masks, banks, scene_ids)
+        verify(output, count, masks, banks, scene_ids, voices)
         return
     assets = root / "assets/.vanilla/us.v77/audio/unknown"
     control, samples = assets / "asset_audio_2.bin", assets / "asset_audio_3.bin"
@@ -159,12 +197,18 @@ def main():
     for level in range(count):
         ids = scene_ids.get(level, [])
         sizes.append(write_pack(output / "scenes" / f"{level}.afb", ids, control, samples, args.author, args.merger) if ids else 0)
+    voice_sizes = [write_pack(output / "voices" / f"{character}.afb", voices[character], control, samples,
+                              args.author, args.merger) if character in voices else 0
+                   for character in range(VOICE_CHARACTERS)]
     present = [int(level in scene_ids) for level in range(count)]
-    write_header(output / "sfx_manifest.h", present, masks, sizes, banks["core"], banks["vehicle"], scene_ids)
+    write_header(output / "sfx_manifest.h", present, masks, sizes, banks["core"], banks["vehicle"], scene_ids,
+                 voices, voice_sizes)
     (output / "manifest.json").write_text(json.dumps({"core": banks["core"], "vehicles": banks["vehicle"],
         "scene_ids": {str(level): scene_ids.get(level, []) for level in range(count)},
-        "vehicle_masks": masks, "scene_bytes": sizes}, indent=2) + "\n")
-    verify(output, count, masks, banks, scene_ids)
+        "vehicle_masks": masks, "scene_bytes": sizes,
+        "voice_ids": {str(character): ids for character, ids in sorted(voices.items())},
+        "voice_bytes": voice_sizes}, indent=2) + "\n")
+    verify(output, count, masks, banks, scene_ids, voices)
 
 
 if __name__ == "__main__":

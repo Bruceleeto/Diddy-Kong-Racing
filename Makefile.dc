@@ -325,7 +325,7 @@ cdi:
 	cp $(BUILD)/aicaflow/core.afb $(BUILD)/aicaflow/vehicle.afb $(JINGLE_BANK) cdrom/build/dc/aicaflow/
 	cp $(JINGLE_CONTROLS)/*.afx cdrom/build/dc/aicaflow/jingle_controls/
 	cp $(MUSIC_RAW_DIR)/*.afb $(MUSIC_RAW_DIR)/*.afx cdrom/build/dc/aicaflow/music_raw/
-	cp -R $(BUILD)/aicaflow/core $(BUILD)/aicaflow/vehicle $(BUILD)/aicaflow/scenes $(BUILD)/aicaflow/fallback cdrom/build/dc/aicaflow/
+	cp -R $(BUILD)/aicaflow/core $(BUILD)/aicaflow/vehicle $(BUILD)/aicaflow/scenes $(BUILD)/aicaflow/voices $(BUILD)/aicaflow/fallback cdrom/build/dc/aicaflow/
 	$(MKDCDISC) -N -e $(TARGET) -D cdrom -n "Diddy Kong Racing" -o $(TARGET:.elf=.cdi)
 
 # Only rebuild path users when the selected mount changes.
