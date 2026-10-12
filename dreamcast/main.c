@@ -9,6 +9,7 @@
 
 
 extern u64 pc_uptime_ns(void);
+#include "prof.h"
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
 // main_game_loop() forever-loop. Called directly on the host thread.
@@ -45,6 +46,7 @@ static struct {
     u64 last, wait, waitFrame, begin, dl, end;
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
     u32 slowBatches;
+    u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
     u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
     // Why a batch missed the fast path, in triangles.
     u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
@@ -54,6 +56,9 @@ static struct {
     u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
 } sProf;
 #define PROF_ADD(field, n) (sProf.field += (n))
+void pc_prof_add(int part, unsigned long long ns) {
+    sProf.part[part] += ns;
+}
 static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
 // Time of one handler call. A fallback is inside tBlast as well. These read
 // the clock a few hundred times a frame, which costs a millisecond or two, so
@@ -115,7 +120,8 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
                "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
                "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
-               "workmax=%lu over16=%lu over14=%lu\n",
+               "workmax=%lu over16=%lu over14=%lu | "
+               "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu\n",
                (unsigned long) period, (unsigned long) wait,
                (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
                (unsigned long) begin, (unsigned long) end,
@@ -138,7 +144,13 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyState / n), (unsigned long) (sProf.whyFull / n),
                (unsigned long) (sProf.whyAppend / n), (unsigned long) (sProf.whyShared / n),
                (unsigned long) (sProf.whyLoose / n),
-               (unsigned long) sProf.workMax, (unsigned long) sProf.over16, (unsigned long) sProf.over14);
+               (unsigned long) sProf.workMax, (unsigned long) sProf.over16, (unsigned long) sProf.over14,
+               (unsigned long) (sProf.part[PC_PROF_LOGIC] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_SCENE] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_WAVES] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_SHADOWS] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_VIEWPORT] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_HUD] / 1000u / n));
     }
     memset(&sProf, 0, sizeof(sProf));
     sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket

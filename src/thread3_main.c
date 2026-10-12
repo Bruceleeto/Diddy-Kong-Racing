@@ -46,6 +46,7 @@
 #include <PR/gu.h>
 #include <PR/os_cont.h>
 #include <PR/os_time.h>
+#include "../dreamcast/prof.h"
 
 /************ .rodata ************/
 
@@ -456,7 +457,7 @@ void mode_game(s32 updateRate) {
 #endif
     // Update all objects
     if (!gIsPaused) {
-        obj_update(updateRate);
+        PC_PROF(PC_PROF_LOGIC, obj_update(updateRate));
         if (check_if_showing_cutscene_camera() == 0 || get_race_countdown()) {
             if (buttonPressedInputs & START_BUTTON && level_properties_get() == 0 && gDrumstickSceneLoadTimer == 0 &&
                 gGameMode == GAMEMODE_INGAME && gPostRaceViewPort == FALSE && gLevelLoadTimer == 0 &&
@@ -478,7 +479,8 @@ void mode_game(s32 updateRate) {
     }
     gParticlePtrList_flush();
     ainode_update();
-    render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+    PC_PROF(PC_PROF_SCENE,
+            render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate));
     if (gGameMode == GAMEMODE_INGAME) {
         // Ignore the user's L/R/Z buttons.
         buttonHeldInputs &= ~(L_TRIG | R_TRIG | Z_TRIG);
@@ -926,10 +928,11 @@ void unload_level_menu(void) {
  */
 void update_menu_scene(s32 updateRate) {
     if (bgload_active() == FALSE) {
-        obj_update(updateRate);
+        PC_PROF(PC_PROF_LOGIC, obj_update(updateRate));
         gParticlePtrList_flush();
         ainode_update();
-        render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+        PC_PROF(PC_PROF_SCENE,
+            render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate));
         process_onscreen_textbox(updateRate);
         rdp_init(&gCurrDisplayList);
         divider_draw(&gCurrDisplayList);
