@@ -1317,30 +1317,41 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
 
     // Transform + project every vertex. A vertex behind the near plane just marks
     // its bit; the triangles touching it go through the in-path clipper below.
-    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
-    for (i = 0; i < total; i++) {
-        const Vertex *v = (i < numVerts) ? &verts[i] : &verts2[i - numVerts];
-        shz_vec4_t c;
-        f32 invW;
+    {
+        // Each channel is the vertex's own or a per-batch constant; settle which
+        // once, so a vertex costs a mask and an or.
+        u32 keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) |
+                   (sCcPass[1] ? 0x0000FF00u : 0) | (sCcPass[2] ? 0x000000FFu : 0);
+        u32 konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) |
+                     (u32) sCcConst[2]) & ~keep;
+        f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
+        s32 run;
 
-        if (i == numVerts) {
-            shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[matrix2]);
-        }
-        c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+        i = 0;
+        for (run = 0; run < 2; run++) {
+            const Vertex *v = run ? verts2 : verts;
+            const Vertex *end = v + (run ? numVerts2 : numVerts);
 
-        cp[i] = c;
-        argb[i] = ((u32) (sCcPass[3] ? v->a : sCcConst[3]) << 24) |
-                  ((u32) (sCcPass[0] ? v->r : sCcConst[0]) << 16) |
-                  ((u32) (sCcPass[1] ? v->g : sCcConst[1]) << 8) |
-                  (u32) (sCcPass[2] ? v->b : sCcConst[2]);
-        if (c.w < GFX_NEAR_W) {
-            behind |= 1u << i;
-            continue;
+            if (v == end) {
+                continue;
+            }
+            shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[run ? matrix2 : sCurMatrix]);
+            for (; v < end; v++, i++) {
+                shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+                f32 invW;
+
+                cp[i] = c;
+                argb[i] = ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) | konst;
+                if (c.w < GFX_NEAR_W) {
+                    behind |= 1u << i;
+                    continue;
+                }
+                invW = shz_invf_fsrra(c.w);
+                sx[i] = (c.x * invW * vpSX) + vpTX;
+                sy[i] = vpTY - (c.y * invW * vpSY);
+                iw[i] = invW;
+            }
         }
-        invW = shz_invf_fsrra(c.w);
-        sx[i] = (c.x * invW * sVpScaleX) + sVpTransX;
-        sy[i] = sVpTransY - (c.y * invW * sVpScaleY);
-        iw[i] = invW;
     }
 
     PROF_LAP(tXform);

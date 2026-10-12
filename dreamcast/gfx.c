@@ -426,6 +426,14 @@ void gfx_set_alpha_test(float ref) {
     sAlphaRef = ref;
 }
 
+// Asked once or twice per batch, so it is worked out when the scissor changes.
+static int sScisExact;
+static int scissor_compute_exact(void);
+
+static inline int scissor_needs_exact_clip(void) {
+    return sScisExact;
+}
+
 void gfx_set_scissor(float x0, float y0, float x1, float y1) {
     sScisEnable = 1;
     sScisX0 = x0;
@@ -435,6 +443,7 @@ void gfx_set_scissor(float x0, float y0, float x1, float y1) {
     sScisDirty = 1;
     sScisDirtyPt = 1;
     sScisDirtyOp = 1;
+    sScisExact = scissor_compute_exact();
 }
 
 void gfx_disable_scissor(void) {
@@ -443,6 +452,7 @@ void gfx_disable_scissor(void) {
         sScisDirty = 1;
         sScisDirtyPt = 1;
         sScisDirtyOp = 1;
+        sScisExact = 0;
     }
 }
 
@@ -507,7 +517,7 @@ static void submit_user_clip(int x0, int y0, int x1, int y1) {
 // ---------------------------------------------------------------------------
 
 /** True when the tile-rounded clip would take in pixels the real one excludes. */
-static int scissor_needs_exact_clip(void) {
+static int scissor_compute_exact(void) {
     int x0, y0, x1, y1;
 
     if (!sScisEnable) {
