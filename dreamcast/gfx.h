@@ -66,13 +66,24 @@ void gfx_draw_tris(const GfxTriVert *verts, int count);
 
 // Blast streaming (the native static-geometry path; see gfx.c). Routes and
 // submits scissor + header for the current state, and returns the bound
-// texture's NPOT UV scales plus the N64-pixels -> framebuffer scale; the caller
-// then owns the TA and streams PVR vertices to the store queues
-// (pvr_dr_target/pvr_dr_commit). Returns 0 when the state needs a path this
-// contract doesn't cover (recorded lists, texenv blend, exact scissor), and the
-// caller must use gfx_draw_tris instead.
+// texture's NPOT UV scales plus the N64-pixels -> framebuffer scale. The caller
+// then writes at most `maxWords` PVR vertices: to the store queues
+// (pvr_dr_target/pvr_dr_commit) when *record is NULL, otherwise consecutively
+// from *record, passing where it stopped to gfx_blast_end(). Returns 0 when the
+// state needs a path this contract doesn't cover (punch-through, texenv blend,
+// exact scissor), and the caller must use gfx_draw_tris instead.
 int gfx_blast_viable(void); // begin() would accept the current state (cheap precheck)
-int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY);
+int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
+                    void **record);
+void gfx_blast_end(void *recordEnd);
+
+// TA words recorded so far this frame for the punch-through and translucent
+// lists (32 bytes each; a triangle is three). For the frame profile.
+void gfx_recorded_words(int *pt, int *tr);
+
+// Whether the surface blends with what is behind it (RDP FORCE_BL). One that
+// does not is opaque whatever its alpha says, and goes to the opaque list.
+void gfx_set_blend(int enable);
 
 // Depth test on/off (RDP Z_CMP). The 2D overlay (text, HUD, fades) draws with
 // the z-buffer disabled and relies on display-list order, as the game does: it

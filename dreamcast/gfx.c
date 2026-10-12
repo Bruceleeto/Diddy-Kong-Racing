@@ -57,6 +57,7 @@ static int sDepthTest = 1;
 static int sDepthWrite = 1;
 static int sDepthOffset;   // decal bias
 static float sAlphaRef;    // > 0 routes the batch to the punch-through list
+static int sBlend = 1;     // the RDP render mode blends (FORCE_BL): translucent
 
 // Scissor, in N64 pixels (top-left origin). Full screen by default.
 static int sScisEnable;
@@ -71,19 +72,19 @@ static int sScisDirtyOp = 1;
 
 static pvr_poly_hdr_t sHdr __attribute__((aligned(32)));
 
-// Punch-through recording. Headers, vertices and user-clip commands are all one
-// 32-byte TA word, so a batch is recorded as the word stream it would have been
-// submitted as and replayed verbatim. 4096 words is ~30x the ~130 a frame of
-// trees needs; on overflow the surplus is dropped and reported once.
+// List routing. The PVR renders OP, then PT, then TR, whatever order they were
+// submitted in, and only one list can be open for direct submission at a time.
 //
-// PT routing is off. It cuts the trees out correctly, but the PVR renders OP,
-// then PT, then TR, and this backend puts everything else in TR: a PT tree jumps
-// ahead of the whole scene and anything TR drew early (the black fill quad,
-// batch 1) lands on top of it. The fix is classifying the lists properly
-// (opaque -> OP, cutout -> PT, translucent -> TR), a rewrite of this file's "ONE
-// list" decision. The recording path is kept because that rewrite needs it.
-// Until then see compile_header_for(), which keeps alpha-tested batches out of
-// the W-buffer instead.
+//   OP  opaque surfaces: everything the RDP draws without blending. Streamed
+//       straight to the store queues, because it is most of a frame. The PVR
+//       resolves visibility here before it shades, so hidden surfaces are free.
+//   PT  alpha-tested cutouts (trees, fences). Recorded, replayed at frame end.
+//   TR  blended surfaces and the 2D layer drawn over the scene. Recorded in
+//       display-list order and replayed last.
+//
+// Headers, vertices and user-clip commands are all one 32-byte TA word, so a
+// batch is recorded as the word stream it would have been submitted as and
+// replayed verbatim. On overflow the surplus is dropped and reported once.
 #define USE_PT_LIST 1
 
 #define PT_MAX_WORDS 4096
@@ -92,22 +93,27 @@ static unsigned char sPtBuf[PT_MAX_WORDS][32] __attribute__((aligned(32)));
 static int sPtCount;
 static int sPtOverflow;
 
-// The backdrop: screen fills and skybox. Both draw with depth compare ALWAYS
-// (the fills are the game's 2D clear, and DKR clears G_ZBUFFER for the sky). In
-// TR they render after the PT list and paint over the alpha-tested sprites,
-// making a tree show sky through it. They belong in OP, which the PVR renders
-// first. Recorded like PT; the sky is a few hundred polys at most.
-#define OP_MAX_WORDS 4096
+#define TR_MAX_WORDS 8192
 
-static unsigned char sOpBuf[OP_MAX_WORDS][32] __attribute__((aligned(32)));
-static int sOpCount;
-static int sOpOverflow;
+static unsigned char sTrBuf[TR_MAX_WORDS][32] __attribute__((aligned(32)));
+static int sTrCount;
+static int sTrOverflow;
+
+// Display-list order matters only for draws without a depth test. Before the
+// first depth-tested batch they are the backdrop (screen fill, sky); after it
+// they are the overlay (HUD, text, fades).
+static int sSeenDepth;
+// A blended backdrop batch is replayed after the opaque scene, so it is drawn at
+// this depth with a depth compare: just in front of the background plane
+// (FLT_EPSILON in KOS) and behind any real surface.
+#define BACKDROP_Z 1.0e-6f
+static int sFarBackdrop;
 
 // VRAM freed while a scene is open. A recorded header holds a raw texture
 // pointer and isn't replayed until frame end, so freeing mid-frame lets the next
 // pvr_mem_malloc hand the same block back and the recording draws whatever
 // landed there. Frees are held until after the replay. Only matters for the
-// recorded lists; TR is submitted as it goes.
+// recorded lists; OP is submitted as it goes.
 #define PENDING_FREE_MAX 512
 
 static pvr_ptr_t sPendingFree[PENDING_FREE_MAX];
@@ -131,8 +137,8 @@ static void *ta_target(void) {
     if (sRoute == ROUTE_PT) {
         return sPtBuf[sPtCount];
     }
-    if (sRoute == ROUTE_OP) {
-        return sOpBuf[sOpCount];
+    if (sRoute == ROUTE_TR) {
+        return sTrBuf[sTrCount];
     }
     return pvr_dr_target(sDrState);
 }
@@ -140,8 +146,8 @@ static void *ta_target(void) {
 static void ta_commit(void *p) {
     if (sRoute == ROUTE_PT) {
         sPtCount++;
-    } else if (sRoute == ROUTE_OP) {
-        sOpCount++;
+    } else if (sRoute == ROUTE_TR) {
+        sTrCount++;
     } else {
         pvr_dr_commit(p);
     }
@@ -395,6 +401,10 @@ void gfx_set_depth_offset(int enable) {
     sDepthOffset = enable; // applied per-vertex, no header change
 }
 
+void gfx_set_blend(int enable) {
+    sBlend = enable; // picks the list, no header change
+}
+
 void gfx_set_alpha_test(float ref) {
     // Only whether a test is wanted matters, not the threshold: every material that
     // asks for one asks for the same 0.5. It changes the header (see
@@ -434,15 +444,16 @@ void gfx_frame_begin(void) {
         return;
     }
     pvr_scene_begin();
-    pvr_list_begin(PVR_LIST_TR_POLY);
+    pvr_list_begin(PVR_LIST_OP_POLY);
     sInScene = 1;
     sHdrDirty = 1;
     sScisDirty = 1;
     sScisDirtyPt = 1;
     sScisDirtyOp = 1;
     sPtCount = 0;
-    sOpCount = 0;
-    sRoute = ROUTE_TR;
+    sTrCount = 0;
+    sSeenDepth = 0;
+    sRoute = ROUTE_OP;
 }
 
 // User clip is specified in 32-pixel tiles, lower-right inclusive.
@@ -648,6 +659,9 @@ static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     // so the add is a no-op.
     cxt.gen.specular = PVR_SPECULAR_ENABLE;
     cxt.depth.comparison = sDepthTest ? PVR_DEPTHCMP_GEQUAL : PVR_DEPTHCMP_ALWAYS;
+    if (list == PVR_LIST_TR_POLY && sFarBackdrop) {
+        cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL; // only where the scene left the background
+    }
 
     // An alpha-tested batch in TR can't discard its transparent texels (only PT
     // can), so it must not write depth either. Otherwise those texels blend to
@@ -664,14 +678,25 @@ static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     } else {
         cxt.depth.write = sDepthWrite ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
     }
-    cxt.blend.src = PVR_BLEND_SRCALPHA;
-    cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+    if (list == PVR_LIST_OP_POLY) {
+        // An RDP surface that does not blend ignores alpha entirely, in the
+        // vertex and in the texel. So does this list.
+        cxt.gen.alpha = PVR_ALPHA_DISABLE;
+        cxt.txr.alpha = PVR_TXRALPHA_DISABLE;
+        cxt.txr.env = PVR_TXRENV_MODULATE;
+        cxt.blend.src = PVR_BLEND_ONE;
+        cxt.blend.dst = PVR_BLEND_ZERO;
+    } else {
+        cxt.blend.src = PVR_BLEND_SRCALPHA;
+        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+    }
 
     pvr_poly_compile(out, &cxt);
 }
 
+/** The streamed list's header is cached across batches; the recorded ones compile per batch. */
 static void compile_header(void) {
-    compile_header_for(PVR_LIST_TR_POLY, &sHdr);
+    compile_header_for(PVR_LIST_OP_POLY, &sHdr);
 }
 
 static inline unsigned int pack_argb(unsigned char a, unsigned char r, unsigned char g, unsigned char b) {
@@ -686,6 +711,9 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
 
     if (sDepthOffset) {
         invw *= 1.003f; // nudge decals toward the viewer
+    }
+    if (sFarBackdrop) {
+        invw = BACKDROP_Z;
     }
 
     v->flags = eol ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
@@ -716,9 +744,7 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
 }
 
 void gfx_draw_tris(const GfxTriVert *verts, int count) {
-    pvr_poly_hdr_t ptHdr __attribute__((aligned(32)));
     GfxTriVert poly[CLIP_MAX_VERTS];
-    const pvr_poly_hdr_t *hdrSrc;
     pvr_poly_hdr_t *hdrDst;
     float uScale = 1.0f, vScale = 1.0f;
     int tris = count / 3;
@@ -734,42 +760,46 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
     // to the true rect at emit time below.
     exact = scissor_needs_exact_clip();
 
-    // Pick the list. Alpha-tested batches go to PT. Backdrop — anything that cannot
-    // be depth-rejected and is drawn before the first alpha-tested batch — goes to
-    // OP, because the PVR renders OP, then PT, then TR, and in TR it would land on
-    // top of the sprites. Neither list can be opened until TR closes at frame end,
-    // so both are recorded and replayed.
+    // Pick the list.
     //
-    // The backdrop is recognised by what it is rather than by a front-end tag:
-    // depth test off (so it paints unconditionally), opaque in both the vertex and
-    // the texture (a fade overlay is the same shape of draw but translucent, and must
-    // stay in TR or it would render first and be invisible), and drawn before any
-    // sprite — which is what keeps the HUD, also depth-less, in TR where it belongs.
+    // With a depth test, order does not matter and the RDP render mode decides:
+    // a surface that does not blend is opaque. Without one the batch paints
+    // unconditionally and display-list order is all there is. An opaque batch may
+    // still go to OP while nothing has been drawn that it could cover: that is the
+    // backdrop (screen fill, sky), and OP keeps its submission order. Anything
+    // later is recorded to TR in order, which is what keeps the HUD on top.
     //
     // The alpha to test is the one the batch will actually emit, which in the
     // texenv-blend path comes from sBlendColor rather than the vertex: the results
     // screen's tiled backdrop is 320 blend-path quads with a black vertex colour and
-    // a fully opaque texture, and excluding the blend path outright left them in TR
-    // to paint over the sky and the trees.
+    // a fully opaque texture.
     {
         int emitAlpha = sTexEnvBlend ? sBlendColor[3] : verts[0].a;
 
-        sRoute = ROUTE_TR;
+        sFarBackdrop = 0;
         if (USE_PT_LIST && sAlphaRef > 0.0f) {
             sRoute = ROUTE_PT;
-        } else if (USE_PT_LIST && sPtCount == 0 && !sDepthTest && emitAlpha == 0xFF &&
+        } else if (sDepthTest) {
+            sRoute = sBlend ? ROUTE_TR : ROUTE_OP;
+        } else if (!sSeenDepth && sTrCount == 0 && sPtCount == 0 && emitAlpha == 0xFF &&
                    (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque)) {
             sRoute = ROUTE_OP;
+        } else {
+            sRoute = ROUTE_TR;
+            sFarBackdrop = !sSeenDepth;
+        }
+        if (sDepthTest) {
+            sSeenDepth = 1;
         }
     }
 
     // Only the recorded lists reserve space up front, and clipping changes the
     // triangle count, so count them first when it is active.
-    // TR streams straight out and needs no count, which keeps the second pass off
+    // OP streams straight out and needs no count, which keeps the second pass off
     // the path that matters: a split-screen viewport is a misaligned rect covering
     // the whole scene. Fully-inside triangles short-circuit in clip_tri_to_scissor,
     // so even this pass is a handful of compares each.
-    if (exact && sRoute != ROUTE_TR) {
+    if (exact && sRoute != ROUTE_OP) {
         outTris = 0;
         for (i = 0; i + 3 <= count; i += 3) {
             int n = clip_tri_to_scissor(&verts[i], poly);
@@ -788,20 +818,21 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
                 sPtOverflow = 1;
                 printf("gfx: PT record buffer full (%d words) — dropping batches\n", PT_MAX_WORDS);
             }
-            sRoute = ROUTE_TR;
+            sRoute = ROUTE_OP;
+            sFarBackdrop = 0;
             return;
         }
-    } else if (sRoute == ROUTE_OP) {
-        int need = 1 + (outTris * 3) + (sScisDirtyOp ? 1 : 0);
+    } else if (sRoute == ROUTE_TR) {
+        int need = 1 + (outTris * 3) + (sScisDirty ? 1 : 0);
 
-        if (sOpCount + need > OP_MAX_WORDS) {
-            // Falls back to TR rather than dropping the draw: a backdrop in the
-            // wrong list is a sprite artefact, a missing one is a hole.
-            if (!sOpOverflow) {
-                sOpOverflow = 1;
-                printf("gfx: OP record buffer full (%d words) — backdrop falling back to TR\n", OP_MAX_WORDS);
+        if (sTrCount + need > TR_MAX_WORDS) {
+            if (!sTrOverflow) {
+                sTrOverflow = 1;
+                printf("gfx: TR record buffer full (%d words) — dropping batches\n", TR_MAX_WORDS);
             }
-            sRoute = ROUTE_TR;
+            sRoute = ROUTE_OP;
+            sFarBackdrop = 0;
+            return;
         }
     }
 
@@ -832,16 +863,13 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         }
     }
 
-    // The TR header is cached across batches; the PT one is compiled per batch,
-    // which costs nothing at ~24 batches a frame and keeps the TR cache honest —
-    // sHdrDirty still means "TR's copy is stale" and only the TR path clears it.
     if (sRoute == ROUTE_PT) {
         hdrDst = (pvr_poly_hdr_t*)ta_target();
         compile_header_for(PVR_LIST_PT_POLY, hdrDst);
         ta_commit(hdrDst);
-    } else if (sRoute == ROUTE_OP) {
+    } else if (sRoute == ROUTE_TR) {
         hdrDst = (pvr_poly_hdr_t*)ta_target();
-        compile_header_for(PVR_LIST_OP_POLY, hdrDst);
+        compile_header_for(PVR_LIST_TR_POLY, hdrDst);
         ta_commit(hdrDst);
     } else {
         if (sHdrDirty) {
@@ -869,16 +897,18 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         }
     }
 
-    sRoute = ROUTE_TR;
+    sRoute = ROUTE_OP;
+    sFarBackdrop = 0;
 }
 
 // ---------------------------------------------------------------------------
 // Blast streaming — the native path for static level geometry (see handle_blast
-// in main.c). The caller transforms and streams the vertices; this end owns list
-// routing, scissor, header and store-queue mechanics, consistent with
-// gfx_draw_tris.
+// in main.c). The caller transforms and writes the PVR vertices; this end owns
+// list routing, scissor and header, consistent with gfx_draw_tris.
 //
-// Only plain TR streaming is supported. State needing the recorded PT/OP lists,
+// An opaque batch streams to the open OP list. A blended one is written into the
+// TR recording: begin() reserves room and hands back where to write, and the
+// caller reports how far it got with gfx_blast_end(). State needing the PT list,
 // the texenv-blend colour split, or exact scissor clipping makes begin() refuse,
 // and the caller falls back to the emulated path.
 // ---------------------------------------------------------------------------
@@ -893,26 +923,52 @@ int gfx_blast_viable(void) {
            !scissor_needs_exact_clip();
 }
 
-int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY) {
+int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
+                    void **record) {
     if (!gfx_blast_viable()) {
         return 0;
     }
 
-    sRoute = ROUTE_TR;
-    if (sScisDirty) {
-        if (sScisEnable) {
-            submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
-                             (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
-        } else {
-            submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+    sSeenDepth = 1;
+    *record = NULL;
+    if (sBlend) {
+        pvr_poly_hdr_t *hdr;
+
+        if (sTrCount + maxWords + 2 > TR_MAX_WORDS) {
+            return 0; // gfx_draw_tris reports the overflow
         }
-        sScisDirty = 0;
+        sRoute = ROUTE_TR;
+        if (sScisDirty) {
+            if (sScisEnable) {
+                submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
+                                 (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
+            } else {
+                submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+            }
+            sScisDirty = 0;
+        }
+        hdr = (pvr_poly_hdr_t *) ta_target();
+        compile_header_for(PVR_LIST_TR_POLY, hdr);
+        ta_commit(hdr);
+        *record = sTrBuf[sTrCount];
+        sRoute = ROUTE_OP;
+    } else {
+        sRoute = ROUTE_OP;
+        if (sScisDirtyOp) {
+            if (sScisEnable) {
+                submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
+                                 (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
+            } else {
+                submit_user_clip(0, 0, DC_SCREEN_W, DC_SCREEN_H);
+            }
+            sScisDirtyOp = 0;
+        }
+        if (sHdrDirty) {
+            compile_header();
+            sHdrDirty = 0;
+        }
+        shz_sq_memcpy32_1(pvr_ta_sq_addr, &sHdr);
     }
-    if (sHdrDirty) {
-        compile_header();
-        sHdrDirty = 0;
-    }
-    shz_sq_memcpy32_1(pvr_ta_sq_addr, &sHdr);
 
     if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
         *uScale = sTextures[sBoundTex - 1].u_scale;
@@ -926,6 +982,15 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY) 
     *scaleX = sScaleX;
     *scaleY = sScaleY;
     return 1;
+}
+
+void gfx_recorded_words(int *pt, int *tr) {
+    *pt = sPtCount;
+    *tr = sTrCount;
+}
+
+void gfx_blast_end(void *recordEnd) {
+    sTrCount = (int) ((unsigned char (*)[32]) recordEnd - sTrBuf);
 }
 
 /** Open a list, push a recording into it verbatim, close it. */
@@ -980,13 +1045,12 @@ void gfx_frame_end(void) {
         return;
     }
     fps_tick();
-    pvr_list_finish(); // TR
+    pvr_list_finish(); // OP
 
-    // Neither OP nor PT was opened this frame, so opening them now is legal — the
+    // Neither PT nor TR was opened this frame, so opening them now is legal — the
     // rule is that a list cannot be opened *again*, not that lists must go in order.
-    // The PVR renders OP, then PT, then TR regardless of submission order.
-    replay_list(PVR_LIST_OP_POLY, sOpBuf, sOpCount);
     replay_list(PVR_LIST_PT_POLY, sPtBuf, sPtCount);
+    replay_list(PVR_LIST_TR_POLY, sTrBuf, sTrCount);
 
     pvr_scene_finish();
     sInScene = 0;

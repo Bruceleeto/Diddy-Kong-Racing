@@ -809,6 +809,7 @@ static void apply_render_mode(void) {
     gfx_set_depth_test(zEnabled && (sOtherModeL & Z_CMP) != 0);
     gfx_set_depth_write(zEnabled && (sOtherModeL & Z_UPD) != 0);
     gfx_set_depth_offset(zEnabled && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC);
+    gfx_set_blend((sOtherModeL & FORCE_BL) != 0);
 
     // CVG_X_ALPHA is how the cutout materials (G_RM_*_TEX_EDGE) get their hard
     // edge: the RDP multiplies coverage by alpha, which on a non-antialiased
@@ -925,9 +926,12 @@ static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tr
 // cold clip path shares the hot loop's emit.
 static f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
-/** One PVR vertex straight to the store queue — inline, no cross-file call. */
+// Where a blended batch's vertices are recorded; NULL streams to the open list.
+static pvr_vertex_t *sBlastRecord;
+
+/** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
-    pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
+    pvr_vertex_t *vt = sBlastRecord ? sBlastRecord : (pvr_vertex_t *) pvr_dr_target();
 
     vt->flags = flags;
     vt->x = x * sBlastSX;
@@ -937,7 +941,11 @@ static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u
     vt->v = v;
     vt->argb = color;
     vt->oargb = 0;
-    pvr_dr_commit(vt);
+    if (sBlastRecord) {
+        sBlastRecord++;
+    } else {
+        pvr_dr_commit(vt);
+    }
 }
 
 // A corner in clip space on its way through the blast near-clipper: position,
@@ -1090,7 +1098,8 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         iw[i] = invW;
     }
 
-    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY)) {
+    // A triangle crossing the near plane can come back as two.
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord)) {
         // handle_polygon redoes this state, so falling back here is safe.
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
@@ -1138,6 +1147,10 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
                    PVR_CMD_VERTEX);
         blast_emit(sx[i2], sy[i2], iw[i2], t->uv2.u * uMul, t->uv2.v * vMul, argb[i2],
                    PVR_CMD_VERTEX_EOL);
+    }
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
     }
 }
 
