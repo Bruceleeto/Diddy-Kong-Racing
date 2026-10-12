@@ -50,6 +50,7 @@ static struct {
     u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
     // Why a batch missed the fast path, in triangles.
     u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
+    u32 whyStateKind[6]; // no scene, texenv blend, alpha test, no depth test, depth offset, scissor
     u64 pvrRender, pvrRegister;
     u32 pvrBytes, ptWords, trWords;
     u64 tBlast, tFallback, tVtx, tPoly, tRect, tMtx;
@@ -121,7 +122,8 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
                "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
                "workmax=%lu over16=%lu over14=%lu | "
-               "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu\n",
+               "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
+               "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu\n",
                (unsigned long) period, (unsigned long) wait,
                (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
                (unsigned long) begin, (unsigned long) end,
@@ -150,7 +152,10 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.part[PC_PROF_WAVES] / 1000u / n),
                (unsigned long) (sProf.part[PC_PROF_SHADOWS] / 1000u / n),
                (unsigned long) (sProf.part[PC_PROF_VIEWPORT] / 1000u / n),
-               (unsigned long) (sProf.part[PC_PROF_HUD] / 1000u / n));
+               (unsigned long) (sProf.part[PC_PROF_HUD] / 1000u / n),
+               (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
+               (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
+               (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n));
     }
     memset(&sProf, 0, sizeof(sProf));
     sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
@@ -1125,6 +1130,8 @@ static f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
 // Where a blended batch's vertices are recorded; NULL streams to the open list.
 static pvr_vertex_t *sBlastRecord;
+// Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
+static f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
 
 /** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
@@ -1133,7 +1140,7 @@ static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u
     vt->flags = flags;
     vt->x = x * sBlastSX;
     vt->y = y * sBlastSY;
-    vt->z = invw;
+    vt->z = (invw * sBlastZMul) + sBlastZAdd;
     vt->u = u;
     vt->v = v;
     vt->argb = color;
@@ -1272,6 +1279,12 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
     // to have run.
     if (!gfx_blast_viable()) {
         PROF_ADD(whyState, numTris);
+#if DKR_GFX_PROFILE
+        {
+            extern int gfx_blast_why(void);
+            sProf.whyStateKind[gfx_blast_why()] += numTris;
+        }
+#endif
         blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
@@ -1314,7 +1327,8 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
 
     PROF_LAP(tXform);
     // A triangle crossing the near plane can come back as two.
-    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord)) {
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord,
+                         (int) (argb[0] >> 24), &sBlastZMul, &sBlastZAdd)) {
         // handle_polygon redoes this state, so falling back here is safe.
         PROF_ADD(whyFull, numTris);
         blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);

@@ -74,7 +74,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count);
 // exact scissor), and the caller must use gfx_draw_tris instead.
 int gfx_blast_viable(void); // begin() would accept the current state (cheap precheck)
 int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
-                    void **record);
+                    void **record, int emitAlpha, float *zMul, float *zAdd);
 void gfx_blast_end(void *recordEnd);
 
 // TA words recorded so far this frame for the punch-through and translucent

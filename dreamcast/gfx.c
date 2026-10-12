@@ -963,42 +963,77 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
  * the caller transforms anything, so a doomed batch costs a compare, not a
  * wasted transform.
  */
-int gfx_blast_viable(void) {
-    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f) && sDepthTest && !sDepthOffset &&
-           !scissor_needs_exact_clip();
+/** Which condition keeps the current state off the fast path (profile only). */
+int gfx_blast_why(void) {
+    return !sInScene ? 0 : sTexEnvBlend ? 1 : (sAlphaRef > 0.0f) ? 2 : !sDepthTest ? 3 : sDepthOffset ? 4 : 5;
 }
 
+int gfx_blast_viable(void) {
+    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f && !USE_PT_LIST) && !scissor_needs_exact_clip();
+}
+
+static int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
+
 int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
-                    void **record) {
+                    void **record, int emitAlpha, float *zMul, float *zAdd) {
+    int route;
+    int farBackdrop = 0;
+
     if (!gfx_blast_viable()) {
         return 0;
     }
 
-    sSeenDepth = 1;
+    // The list, exactly as gfx_draw_tris picks it.
+    if (USE_PT_LIST && sAlphaRef > 0.0f) {
+        route = ROUTE_PT;
+    } else if (sDepthTest) {
+        route = sBlend ? ROUTE_TR : ROUTE_OP;
+    } else if (!sSeenDepth && sTrCount == 0 && sPtCount == 0 && emitAlpha == 0xFF &&
+               (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque)) {
+        route = ROUTE_OP;
+    } else {
+        route = ROUTE_TR;
+        farBackdrop = !sSeenDepth;
+    }
+    if (route == ROUTE_PT && sPtCount + maxWords + 2 > PT_MAX_WORDS) {
+        return 0; // gfx_draw_tris reports the overflow
+    }
+    if (route == ROUTE_TR && sTrCount + maxWords + 2 > TR_MAX_WORDS) {
+        return 0;
+    }
+    if (sDepthTest) {
+        sSeenDepth = 1;
+    }
+
+    // Depth as emit_vert sets it: decals sit a touch nearer, and a backdrop
+    // drawn after the scene's first depth-tested batch goes to the far plane.
+    *zMul = farBackdrop ? 0.0f : (sDepthOffset ? 1.003f : 1.0f);
+    *zAdd = farBackdrop ? BACKDROP_Z : 0.0f;
+
     *record = NULL;
-    if (sBlend) {
+    sBlastRoute = route;
+    if (route != ROUTE_OP) {
+        int *dirty = (route == ROUTE_PT) ? &sScisDirtyPt : &sScisDirty;
         pvr_poly_hdr_t *hdr;
 
-        if (sTrCount + maxWords + 2 > TR_MAX_WORDS) {
-            return 0; // gfx_draw_tris reports the overflow
-        }
-        sRoute = ROUTE_TR;
-        if (sScisDirty) {
+        sRoute = route;
+        if (*dirty) {
             if (sScisEnable) {
                 submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
                                  (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
             } else {
                 submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
             }
-            sScisDirty = 0;
+            *dirty = 0;
         }
+        sFarBackdrop = farBackdrop;
         hdr = (pvr_poly_hdr_t *) ta_target();
-        compile_header_for(PVR_LIST_TR_POLY, hdr);
+        compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : PVR_LIST_TR_POLY, hdr);
         ta_commit(hdr);
-        *record = sTrBuf[sTrCount];
+        sFarBackdrop = 0;
+        *record = (route == ROUTE_PT) ? sPtBuf[sPtCount] : sTrBuf[sTrCount];
         sRoute = ROUTE_OP;
     } else {
-        sRoute = ROUTE_OP;
         if (sScisDirtyOp) {
             if (sScisEnable) {
                 submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
@@ -1035,7 +1070,11 @@ void gfx_recorded_words(int *pt, int *tr) {
 }
 
 void gfx_blast_end(void *recordEnd) {
-    sTrCount = (int) ((unsigned char (*)[32]) recordEnd - sTrBuf);
+    if (sBlastRoute == ROUTE_PT) {
+        sPtCount = (int) ((unsigned char (*)[32]) recordEnd - sPtBuf);
+    } else {
+        sTrCount = (int) ((unsigned char (*)[32]) recordEnd - sTrBuf);
+    }
 }
 
 /** Open a list, push a recording into it verbatim, close it. */
