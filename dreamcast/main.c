@@ -21,6 +21,71 @@ static OSThread sHostThread;
 #define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
 
+// ---------------------------------------------------------------------------
+// Frame profile (GFX_PROFILE=1): where a frame's time goes and how much
+// geometry it submits. GFX_PROFILE_SKIP=1 transforms and culls but sends no
+// vertices; =2 only resolves each batch's state; =3 skips batches that take the
+// emulated path. These draw incomplete frames and exist to split the
+// display-list time by subtraction.
+// ---------------------------------------------------------------------------
+#ifndef DKR_GFX_PROFILE
+#define DKR_GFX_PROFILE 0
+#endif
+#ifndef DKR_GFX_PROFILE_SKIP
+#define DKR_GFX_PROFILE_SKIP 0
+#endif
+#if DKR_GFX_PROFILE
+enum { PROF_FRAMES = 60 };
+static struct {
+    u64 last, wait, begin, dl, end;
+    u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
+    u64 pvrRender, pvrRegister;
+    u32 pvrBytes, ptWords, trWords;
+} sProf;
+#define PROF_ADD(field, n) (sProf.field += (n))
+
+static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
+    sProf.begin += t1 - t0;
+    sProf.dl += t2 - t1;
+    sProf.end += t3 - t2;
+    if (sProf.sentFrame > sProf.maxSent) sProf.maxSent = sProf.sentFrame;
+    sProf.sentFrame = 0;
+    {
+        pvr_stats_t stats;
+        if (!pvr_get_stats(&stats)) {
+            sProf.pvrRender += stats.rnd_last_time;
+            sProf.pvrRegister += stats.reg_last_time;
+            if (stats.vtx_buffer_used > sProf.pvrBytes) sProf.pvrBytes = (u32) stats.vtx_buffer_used;
+        }
+    }
+    if (++sProf.frames < PROF_FRAMES) return;
+    if (sProf.last) {
+        u32 n = sProf.frames;
+        u32 period = (u32) ((t3 - sProf.last) / 1000u / n), wait = (u32) (sProf.wait / 1000u / n);
+        u32 begin = (u32) (sProf.begin / 1000u / n), dl = (u32) (sProf.dl / 1000u / n);
+        u32 end = (u32) (sProf.end / 1000u / n);
+        printf("GFX PROF: frame=%lu us wait=%lu game=%lu dl=%lu begin=%lu end=%lu | batches=%lu+%lu verts=%lu "
+               "tris=%lu culled=%lu clipped=%lu sent=%lu max=%lu slow=%lu rects=%lu | "
+               "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu\n",
+               (unsigned long) period, (unsigned long) wait,
+               (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
+               (unsigned long) begin, (unsigned long) end,
+               (unsigned long) (sProf.blast / n), (unsigned long) (sProf.fallback / n),
+               (unsigned long) (sProf.verts / n), (unsigned long) (sProf.tris / n),
+               (unsigned long) (sProf.culled / n), (unsigned long) (sProf.clipped / n),
+               (unsigned long) (sProf.sent / n), (unsigned long) sProf.maxSent,
+               (unsigned long) (sProf.slowTris / n), (unsigned long) (sProf.rects / n),
+               (unsigned long) (sProf.pvrRender / 1000u / n), (unsigned long) (sProf.pvrRegister / 1000u / n),
+               (unsigned long) sProf.pvrBytes, (unsigned long) sProf.ptWords,
+               (unsigned long) sProf.trWords);
+    }
+    memset(&sProf, 0, sizeof(sProf));
+    sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
+}
+#else
+#define PROF_ADD(field, n) ((void) 0)
+#endif
+
 s32 pc_retrace_wait(void) {
     static u64 sLastNs = 0;
     u64 targetNs;
@@ -42,6 +107,9 @@ s32 pc_retrace_wait(void) {
         req.tv_sec = (targetNs - nowNs) / 1000000000ll;
         req.tv_nsec = (targetNs - nowNs) % 1000000000ll;
         nanosleep(&req, NULL);
+#if DKR_GFX_PROFILE
+        sProf.wait += pc_uptime_ns() - nowNs;
+#endif
         nowNs = targetNs;
     }
 
@@ -313,6 +381,7 @@ static void handle_vertex(u32 w0, u32 w1) {
         sVertexBase = count;
     }
 
+    PROF_ADD(verts, count);
     shz_xmtrx_load_4x4((shz_mat4x4_t*)&sMatrices[sCurMatrix]);
     for (i = 0; i < count && dstIdx + i < GFX_MAX_VERTS; i++) {
         // Billboarded vertices are sprite-space offsets from vertex 0, the
@@ -887,6 +956,8 @@ static void handle_polygon(u32 w0, u32 w1) {
     gfx_bind_texture(texture);
     apply_texture_filter();
     gfx_set_texenv_modulate(); // the 2D path leaves the env in blend mode
+    PROF_ADD(slowTris, sTriVertCount / 3);
+    PROF_ADD(sentFrame, sTriVertCount / 3);
     gfx_draw_tris(sTriVerts, sTriVertCount);
 }
 
@@ -917,6 +988,11 @@ static void handle_polygon(u32 w0, u32 w1) {
 /** Render a blast batch through the emulated path, as the DL would have. */
 static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
                            s32 texEnabled) {
+    PROF_ADD(fallback, 1);
+#if DKR_GFX_PROFILE_SKIP == 3
+    PROF_ADD(slowTris, numTris);
+    return;
+#endif
     handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts);
     handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
                    (u32) tris);
@@ -1075,6 +1151,13 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         return;
     }
 
+    PROF_ADD(blast, 1);
+    PROF_ADD(verts, numVerts);
+    PROF_ADD(tris, numTris);
+#if DKR_GFX_PROFILE_SKIP == 2
+    return;
+#endif
+
     // Transform + project every vertex. A vertex behind the near plane just marks
     // its bit; the triangles touching it go through the in-path clipper below.
     shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
@@ -1131,16 +1214,25 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
             cv[2].u = t->uv2.u * uMul;
             cv[2].v = t->uv2.v * vMul;
             cv[2].argb = argb[i2];
+            PROF_ADD(clipped, 1);
+#if DKR_GFX_PROFILE_SKIP != 1
             blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
+#endif
             continue;
         }
         if (!(t->flags & BACKFACE_DRAW)) {
             f32 area = ((sx[i1] - sx[i0]) * (sy[i2] - sy[i0])) -
                        ((sx[i2] - sx[i0]) * (sy[i1] - sy[i0]));
             if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                PROF_ADD(culled, 1);
                 continue;
             }
         }
+        PROF_ADD(sent, 1);
+        PROF_ADD(sentFrame, 1);
+#if DKR_GFX_PROFILE_SKIP == 1
+        continue;
+#endif
         blast_emit(sx[i0], sy[i0], iw[i0], t->uv0.u * uMul, t->uv0.v * vMul, argb[i0],
                    PVR_CMD_VERTEX);
         blast_emit(sx[i1], sy[i1], iw[i1], t->uv1.u * uMul, t->uv1.v * vMul, argb[i1],
@@ -1541,6 +1633,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
  * carry the texture coordinates.
  */
 static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
+    PROF_ADD(rects, 1);
     // Screen coordinates are 10.2 fixed point, texture coordinates S10.5, and
     // the per-pixel texture steps S5.10.
     f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
@@ -1886,9 +1979,15 @@ extern void dc_audio_init(void);
 extern void dc_audio_start_thread(void);
 
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
+#if DKR_GFX_PROFILE
+    u64 profT0 = pc_uptime_ns(), profT1, profT2;
+#endif
     sGfxFrameCount++;
 
     gfx_frame_begin();
+#if DKR_GFX_PROFILE
+    profT1 = pc_uptime_ns();
+#endif
 
     sCurMatrix = 0;
     sBillboard = FALSE;
@@ -1914,8 +2013,20 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     gfx_disable_scissor();
 
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
+#if DKR_GFX_PROFILE
+    profT2 = pc_uptime_ns();
+    {
+        int pt, tr;
+        gfx_recorded_words(&pt, &tr);
+        if ((u32) pt > sProf.ptWords) sProf.ptWords = (u32) pt;
+        if ((u32) tr > sProf.trWords) sProf.trWords = (u32) tr;
+    }
+#endif
 
     gfx_frame_end();
+#if DKR_GFX_PROFILE
+    prof_frame(profT0, profT1, profT2, pc_uptime_ns());
+#endif
 }
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
