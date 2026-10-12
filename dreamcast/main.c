@@ -34,15 +34,39 @@ static OSThread sHostThread;
 #ifndef DKR_GFX_PROFILE_SKIP
 #define DKR_GFX_PROFILE_SKIP 0
 #endif
+#ifndef DKR_AUTO_EXIT_SECONDS
+#define DKR_AUTO_EXIT_SECONDS 0
+#endif
 #if DKR_GFX_PROFILE
 enum { PROF_FRAMES = 60 };
 static struct {
     u64 last, wait, begin, dl, end;
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
+    u32 slowBatches;
+    // Why a batch missed the fast path, in triangles.
+    u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
     u64 pvrRender, pvrRegister;
     u32 pvrBytes, ptWords, trWords;
+    u64 tBlast, tFallback, tVtx, tPoly, tRect, tMtx;
+    u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
 } sProf;
 #define PROF_ADD(field, n) (sProf.field += (n))
+static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
+// Time of one handler call. A fallback is inside tBlast as well.
+#define PROF_TIME(field, call) \
+    do { \
+        u64 profStart = pc_uptime_ns(); \
+        call; \
+        sProf.field += pc_uptime_ns() - profStart; \
+    } while (0)
+// Splits one function into consecutive parts.
+#define PROF_LAP_START() u64 profLap = pc_uptime_ns()
+#define PROF_LAP(field) \
+    do { \
+        u64 profNow = pc_uptime_ns(); \
+        sProf.field += profNow - profLap; \
+        profLap = profNow; \
+    } while (0)
 
 static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
     sProf.begin += t1 - t0;
@@ -66,7 +90,10 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         u32 end = (u32) (sProf.end / 1000u / n);
         printf("GFX PROF: frame=%lu us wait=%lu game=%lu dl=%lu begin=%lu end=%lu | batches=%lu+%lu verts=%lu "
                "tris=%lu culled=%lu clipped=%lu sent=%lu max=%lu slow=%lu rects=%lu | "
-               "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu\n",
+               "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu | "
+               "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
+               "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
+               "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu\n",
                (unsigned long) period, (unsigned long) wait,
                (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
                (unsigned long) begin, (unsigned long) end,
@@ -77,13 +104,27 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.slowTris / n), (unsigned long) (sProf.rects / n),
                (unsigned long) (sProf.pvrRender / 1000u / n), (unsigned long) (sProf.pvrRegister / 1000u / n),
                (unsigned long) sProf.pvrBytes, (unsigned long) sProf.ptWords,
-               (unsigned long) sProf.trWords);
+               (unsigned long) sProf.trWords,
+               (unsigned long) (sProf.tBlast / 1000u / n), (unsigned long) (sProf.tFallback / 1000u / n),
+               (unsigned long) (sProf.tVtx / 1000u / n), (unsigned long) (sProf.tPoly / 1000u / n),
+               (unsigned long) (sProf.tRect / 1000u / n), (unsigned long) (sProf.tMtx / 1000u / n),
+               (unsigned long) (sProf.tState / 1000u / n), (unsigned long) (sProf.tXform / 1000u / n),
+               (unsigned long) (sProf.tEmit / 1000u / n), (unsigned long) (sProf.tPolyState / 1000u / n),
+               (unsigned long) (sProf.tPolyEmit / 1000u / n), (unsigned long) (sProf.tPolyDraw / 1000u / n),
+               (unsigned long) (sProf.slowBatches / n),
+               (unsigned long) (sProf.whyCombiner / n), (unsigned long) (sProf.whyBillboard / n),
+               (unsigned long) (sProf.whyState / n), (unsigned long) (sProf.whyFull / n),
+               (unsigned long) (sProf.whyAppend / n), (unsigned long) (sProf.whyShared / n),
+               (unsigned long) (sProf.whyLoose / n));
     }
     memset(&sProf, 0, sizeof(sProf));
     sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
 }
 #else
 #define PROF_ADD(field, n) ((void) 0)
+#define PROF_TIME(field, call) call
+#define PROF_LAP_START() ((void) 0)
+#define PROF_LAP(field) ((void) 0)
 #endif
 
 s32 pc_retrace_wait(void) {
@@ -911,6 +952,7 @@ static void handle_polygon(u32 w0, u32 w1) {
         return;
     }
 
+    PROF_LAP_START();
     if (texEnabled) {
         texture = texture_current();
     }
@@ -928,6 +970,7 @@ static void handle_polygon(u32 w0, u32 w1) {
     // Settle how this batch's combiner collapses before touching any vertex. The
     // mux, prim and env cannot change inside a batch, so once is enough.
     combiner_classify();
+    PROF_LAP(tPolyState);
 
     for (i = 0; i < count; i++) {
         // The UVs are the only per-triangle part of a vertex, so write them into
@@ -951,6 +994,7 @@ static void handle_polygon(u32 w0, u32 w1) {
         emit_triangle(a, b, c, !(tris[i].flags & BACKFACE_DRAW));
     }
 
+    PROF_LAP(tPolyEmit);
     apply_render_mode();
     gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
     gfx_bind_texture(texture);
@@ -958,7 +1002,9 @@ static void handle_polygon(u32 w0, u32 w1) {
     gfx_set_texenv_modulate(); // the 2D path leaves the env in blend mode
     PROF_ADD(slowTris, sTriVertCount / 3);
     PROF_ADD(sentFrame, sTriVertCount / 3);
+    PROF_ADD(slowBatches, 1);
     gfx_draw_tris(sTriVerts, sTriVertCount);
+    PROF_LAP(tPolyDraw);
 }
 
 // ---------------------------------------------------------------------------
@@ -993,9 +1039,9 @@ static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tr
     PROF_ADD(slowTris, numTris);
     return;
 #endif
-    handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts);
-    handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
-                   (u32) tris);
+    PROF_TIME(tFallback, handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts));
+    PROF_TIME(tFallback, handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
+                                        (u32) tris));
 }
 
 // N64-pixels -> framebuffer scale, from gfx_blast_begin. File-scope so the
@@ -1124,9 +1170,11 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         return;
     }
 
+    PROF_LAP_START();
     // The color must be per-batch trivial: shade byte or constant per channel.
     combiner_classify();
     if (!sCcFast || sBillboard) {
+        if (sBillboard) PROF_ADD(whyBillboard, numTris); else PROF_ADD(whyCombiner, numTris);
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
@@ -1147,6 +1195,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // fallback's handle_polygon redoes this state, so these state calls are safe
     // to have run.
     if (!gfx_blast_viable()) {
+        PROF_ADD(whyState, numTris);
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
@@ -1154,6 +1203,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     PROF_ADD(blast, 1);
     PROF_ADD(verts, numVerts);
     PROF_ADD(tris, numTris);
+    PROF_LAP(tState);
 #if DKR_GFX_PROFILE_SKIP == 2
     return;
 #endif
@@ -1181,9 +1231,11 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         iw[i] = invW;
     }
 
+    PROF_LAP(tXform);
     // A triangle crossing the near plane can come back as two.
     if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord)) {
         // handle_polygon redoes this state, so falling back here is safe.
+        PROF_ADD(whyFull, numTris);
         blast_fallback(verts, numVerts, tris, numTris, texEnabled);
         return;
     }
@@ -1244,6 +1296,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         gfx_blast_end(sBlastRecord);
         sBlastRecord = NULL;
     }
+    PROF_LAP(tEmit);
 }
 
 // ---------------------------------------------------------------------------
@@ -1731,7 +1784,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             case G_MTX: {
                 s32 slot = (((w0 >> 16) & 0xFF) >> 6) & 3;
                 if (w1 != 0 && slot < 3) {
-                    mtx_to_float((const Mtx *) w1, sMatrices[slot]);
+                    PROF_TIME(tMtx, mtx_to_float((const Mtx *) w1, sMatrices[slot]));
                     sCurMatrix = slot;
                 }
                 break;
@@ -1798,17 +1851,30 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     ((dl[i + 2].words.w0 >> 24) & 0xFF) != G_TRIN) {
                     u32 tw0 = dl[i + 1].words.w0;
 
-                    blast_render((const Vertex *) w1, (s32) ((params >> 3) & 0x1F) + 1,
-                                 (const Triangle *) dl[i + 1].words.w1,
-                                 (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1, (s32) ((tw0 >> 16) & 1));
+                    PROF_TIME(tBlast, blast_render((const Vertex *) w1, (s32) ((params >> 3) & 0x1F) + 1,
+                                                   (const Triangle *) dl[i + 1].words.w1,
+                                                   (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1, (s32) ((tw0 >> 16) & 1)));
                     i++;
                     break;
                 }
-                handle_vertex(w0, w1);
+#if DKR_GFX_PROFILE
+                sProfVtxWhy = (params & G_VTX_APPEND) ? 1 : sBillboard ? 2 :
+                              (((dl[i + 1].words.w0 >> 24) & 0xFF) == G_TRIN) ? 3 : 4;
+#endif
+                PROF_TIME(tVtx, handle_vertex(w0, w1));
                 break;
             }
             case G_TRIN:
-                handle_polygon(w0, w1);
+#if DKR_GFX_PROFILE
+                {
+                    u32 n = (((w0 >> 16) & 0xFF) >> 4) + 1;
+                    if (sProfVtxWhy == 1) sProf.whyAppend += n;
+                    else if (sProfVtxWhy == 2) sProf.whyBillboard += n;
+                    else if (sProfVtxWhy == 3) sProf.whyShared += n;
+                    else sProf.whyLoose += n;
+                }
+#endif
+                PROF_TIME(tPoly, handle_polygon(w0, w1));
                 break;
             case G_DL:
                 run_dl((const Gfx *) w1, 0, depth + 1);
@@ -1877,12 +1943,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 if (count != 0 && i + 2 >= count) {
                     return; // truncated — the halves are not there to read
                 }
-                handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1, cmd == (u8) G_TEXRECTFLIP);
+                PROF_TIME(tRect, handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1,
+                                                cmd == (u8) G_TEXRECTFLIP));
                 i += 2;
                 break;
             }
             case (u8) G_FILLRECT:
-                handle_fillrect(w0, w1);
+                PROF_TIME(tRect, handle_fillrect(w0, w1));
                 break;
             case (u8) G_SETSCISSOR: {
                 // 10.2 fixed point, lower-right inclusive — a full-screen scissor
@@ -2026,6 +2093,12 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     gfx_frame_end();
 #if DKR_GFX_PROFILE
     prof_frame(profT0, profT1, profT2, pc_uptime_ns());
+#endif
+#if DKR_AUTO_EXIT_SECONDS
+    // Unattended measurement runs: return to the loader by ourselves.
+    if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
+        arch_exit();
+    }
 #endif
 }
 
