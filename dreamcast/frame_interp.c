@@ -24,6 +24,7 @@ extern s32 gObjectCount;
 extern Camera gCameras[8];
 extern u16 gControllerButtonsPressed[];
 extern u16 gControllerButtonsReleased[];
+extern s8 gCutsceneCameraActive;
 
 typedef struct {
     Object *obj;
@@ -59,6 +60,7 @@ static f32 sAlpha = 1.0f; // how far from the old state to the new this frame dr
 static s32 sStepped;     // the logic stepped this frame, so there is an old state to draw from
 static s32 sDisplaced;
 static u16 sCarryPressed[4], sCarryReleased[4];
+static s8 sCutsceneCamera; // whether the last step left the cutscene camera on
 
 /**
  * How many fields the logic should advance this frame, given how many went by.
@@ -113,9 +115,19 @@ void frame_interp_before_step(void) {
     sStepped = TRUE;
 }
 
+/** Call after a logic step. */
+void frame_interp_after_step(void) {
+    sCutsceneCamera = gCutsceneCameraActive;
+}
+
 /** Call on a frame the logic does not step. */
 void frame_interp_skipped(void) {
     s32 i;
+
+    // The main loop turns the cutscene camera off every frame and the cutscene's
+    // own update turns it back on. Without an update this frame it has to be
+    // carried over, or the scene is drawn through the player's camera instead.
+    gCutsceneCameraActive = sCutsceneCamera;
 
     for (i = 0; i < 4; i++) {
         sCarryPressed[i] |= gControllerButtonsPressed[i];
@@ -194,6 +206,7 @@ void frame_interp_draw_end(void) {
 
 /** A scene change: nothing carries over. */
 void frame_interp_reset(void) {
+    sCutsceneCamera = FALSE;
     sAhead = 0;
     sAlpha = 1.0f;
     sStepped = FALSE;

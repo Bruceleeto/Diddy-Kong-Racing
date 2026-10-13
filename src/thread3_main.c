@@ -440,6 +440,7 @@ void unload_level_game(void) {
 #ifdef TARGET_PC
 extern s32 frame_interp_step(s32 fields);
 extern void frame_interp_before_step(void);
+extern void frame_interp_after_step(void);
 extern void frame_interp_skipped(void);
 extern void frame_interp_draw_begin(void);
 extern void frame_interp_draw_end(void);
@@ -458,6 +459,7 @@ static void game_logic_step(s32 updateRate) {
     }
     frame_interp_before_step();
     PC_PROF(PC_PROF_LOGIC, obj_update(step));
+    frame_interp_after_step();
 }
 
 static void game_scene_draw(s32 updateRate) {
