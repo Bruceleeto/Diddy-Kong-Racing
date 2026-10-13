@@ -2525,7 +2525,84 @@ static void prof_sample_write(void) {
 #define prof_sample_write() ((void) 0)
 #endif
 
+// Debug view (DEBUG_VIEW=1): hold a frame and switch how cutout textures are
+// stored and drawn, to compare the modes on a still picture.
+//
+//   both triggers + X   hold or release the current frame
+//   both triggers + Y   next mode; the squares at the top left show which
+//
+//   1  as before: 4-4-4-4, blended once
+//   2  5-5-5-1, blended once
+//   3  5-5-5-1, blended once, invisible texels coloured from their neighbours
+//   4  5-5-5-1, punch-through then blended, neighbours' colour (the default)
+//   5  4-4-4-4, punch-through then blended, neighbours' colour
+#ifndef DKR_DEBUG_VIEW
+#define DKR_DEBUG_VIEW 0
+#endif
+#if DKR_DEBUG_VIEW
+extern void gfx_set_cutout_mode(int use1555, int dual, int bleed);
+static s32 sDebugHold;
+static s32 sDebugMode = 4;
+
+static void debug_view_apply(void) {
+    static const u8 modes[5][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 1, 1, 1 }, { 0, 1, 1 } };
+    s32 i;
+
+    gfx_set_cutout_mode(modes[sDebugMode - 1][0], modes[sDebugMode - 1][1], modes[sDebugMode - 1][2]);
+    // The format is chosen when a texture is created, so make them all anew.
+    for (i = 0; i < sTexCacheCount; i++) {
+        gfx_delete_texture(sTexCache[i].handle);
+    }
+    sTexCacheCount = 0;
+    memset(sTexHint, 0, sizeof(sTexHint));
+    sTexStateDirty = TRUE;
+    printf("DEBUG VIEW: mode %d\n", (int) sDebugMode);
+}
+
+static void debug_view_poll(void) {
+    static u32 sLast;
+    maple_device_t *pad = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    cont_state_t *state = pad ? (cont_state_t *) maple_dev_status(pad) : NULL;
+    u32 buttons = (state && state->ltrig > 128 && state->rtrig > 128) ? state->buttons : 0;
+    u32 pressed = buttons & ~sLast;
+
+    sLast = buttons;
+    if (pressed & CONT_X) {
+        sDebugHold = !sDebugHold;
+        printf("DEBUG VIEW: frame %s\n", sDebugHold ? "held" : "released");
+    }
+    if (pressed & CONT_Y) {
+        sDebugMode = (sDebugMode % 5) + 1;
+        debug_view_apply();
+    }
+}
+
+static void debug_view_draw(void) {
+    static const u8 white[4] = { 255, 255, 255, 255 }, black[3] = { 0, 0, 0 };
+    s32 i;
+
+    for (i = 0; i < sDebugMode; i++) {
+        draw_2d_quad(8.0f + (i * 8.0f), 8.0f, 14.0f + (i * 8.0f), 14.0f, 0.0f, 0.0f, 0.0f, 0.0f, white, black, 0);
+    }
+}
+#endif
+
+static void gfx_task_draw(void *dlBegin, void *dlEnd);
+
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
+    gfx_task_draw(dlBegin, dlEnd);
+#if DKR_DEBUG_VIEW
+    // The game does not run while a frame is held: its last display list is
+    // drawn again each field, so a mode change shows on the same picture.
+    debug_view_poll();
+    while (sDebugHold) {
+        gfx_task_draw(dlBegin, dlEnd);
+        debug_view_poll();
+    }
+#endif
+}
+
+static void gfx_task_draw(void *dlBegin, void *dlEnd) {
 #if DKR_GFX_PROFILE
     u64 profT0 = pc_uptime_ns(), profT1, profT2;
 #endif
@@ -2561,6 +2638,9 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     gfx_disable_scissor();
 
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
+#if DKR_DEBUG_VIEW
+    debug_view_draw();
+#endif
 #if DKR_GFX_PROFILE
     profT2 = pc_uptime_ns();
     {

@@ -22,6 +22,21 @@
 #ifndef DKR_CUTOUT_1555
 #define DKR_CUTOUT_1555 1
 #endif
+#ifndef DKR_CUTOUT_DUAL
+#define DKR_CUTOUT_DUAL 1
+#endif
+// How cutout textures are stored and drawn. Set at build time; the debug view
+// (DEBUG_VIEW=1) switches them while a frame is held, to compare the results.
+static int sCutout1555 = DKR_CUTOUT_1555; // 5-5-5-1 instead of 4-4-4-4
+static int sCutoutDual = DKR_CUTOUT_DUAL; // punch-through pass under the blended one
+static int sCutoutBleed = 1;              // invisible texels take their neighbours' colour
+
+/** Takes effect for textures created afterwards, so the caller drops its texture cache. */
+void gfx_set_cutout_mode(int use1555, int dual, int bleed) {
+    sCutout1555 = use1555;
+    sCutoutDual = dual;
+    sCutoutBleed = bleed;
+}
 #define DC_SCREEN_H 480
 
 #define MAX_TEXTURES 1024
@@ -317,7 +332,7 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
         }
     }
     cutout = cutout && !opaque;
-    format = opaque ? PVR_TXRFMT_RGB565 : (cutout && DKR_CUTOUT_1555) ? PVR_TXRFMT_ARGB1555 : PVR_TXRFMT_ARGB4444;
+    format = opaque ? PVR_TXRFMT_RGB565 : (cutout && sCutout1555) ? PVR_TXRFMT_ARGB1555 : PVR_TXRFMT_ARGB4444;
 
     // Into the padded buffer. Samples outside the original clamp to its edge
     // (replicate), which keeps the padding from darkening the border under
@@ -332,7 +347,7 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
             if (opaque) {
                 tmp[y * pw + x] = (unsigned short) (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
             } else {
-                if ((a >> 4) == 0) {
+                if ((a >> 4) == 0 && sCutoutBleed) {
                     // An invisible texel still lends its colour to the visible
                     // ones beside it when the texture is filtered, and on the
                     // cartridge that colour is usually black, which draws a dark
@@ -1074,9 +1089,6 @@ static int sBlastRoute; // the list the open blast batch is recorded to, or ROUT
 // blended list then draws the same triangles over it, which changes nothing
 // where the texel is solid and leaves the filtered, partly transparent rim as a
 // soft edge. DKR_CUTOUT_DUAL=0 draws such a batch once, blended, as before.
-#ifndef DKR_CUTOUT_DUAL
-#define DKR_CUTOUT_DUAL 1
-#endif
 static int sBlastDual;      // the open batch is such a batch
 static int sBlastDualStart; // where its vertices start in the punch-through recording
 
@@ -1138,7 +1150,7 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
         sNoDepthStats[route == ROUTE_OP ? 0 : sSeenDepth ? 1 : (sTrCount || sPtCount) ? 2 : !opaque ? 3 : 0] +=
             (unsigned int) maxWords;
     }
-    sBlastDual = DKR_CUTOUT_DUAL && USE_PT_LIST && route == ROUTE_TR && sDepthTest && emitAlpha == 0xFF &&
+    sBlastDual = sCutoutDual && USE_PT_LIST && route == ROUTE_TR && sDepthTest && emitAlpha == 0xFF &&
                  sBoundTex != 0 && sTextures[sBoundTex - 1].cutout && sPtCount + maxWords + 2 <= PT_MAX_WORDS &&
                  sTrCount + maxWords + 2 <= TR_MAX_WORDS;
     if (sBlastDual) {
