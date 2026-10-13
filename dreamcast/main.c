@@ -47,6 +47,7 @@ static struct {
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
     u32 slowBatches;
     u32 stripVerts; // vertices the fast path wrote; three per sent triangle without strips
+    u32 stripPlans; // strip plans (re)built
     u32 trStats[10]; // see gfx_tr_stats
     u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
     u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
@@ -126,7 +127,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "workmax=%lu over16=%lu over14=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
                "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
-               "stripverts=%lu | "
+               "stripverts=%lu stripplans=%lu | "
                "trbatches 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu "
                "trroom 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu\n",
                (unsigned long) period, (unsigned long) wait,
@@ -161,7 +162,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
                (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
                (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n),
-               (unsigned long) (sProf.stripVerts / n),
+               (unsigned long) (sProf.stripVerts / n), (unsigned long) (sProf.stripPlans / n),
                (unsigned long) (sProf.trStats[0] / n), (unsigned long) (sProf.trStats[1] / n),
                (unsigned long) (sProf.trStats[2] / n), (unsigned long) (sProf.trStats[3] / n),
                (unsigned long) (sProf.trStats[4] / n), (unsigned long) (sProf.trStats[5] / n),
@@ -246,7 +247,9 @@ s32 pc_retrace_wait(void) {
 
 #define GFX_MAX_VERTS 64    // the RSP's internal vertex array
 #define GFX_MAX_DEPTH 16    // display-list recursion guard
-#define GFX_MAX_TRI_VERTS 8192
+// One G_TRIN is at most 16 triangles, each at most two after the near clip, so
+// a batch never stages more than 96 corners; the memory matters more here.
+#define GFX_MAX_TRI_VERTS 1024
 
 // A vertex in clip space: post-matrix, pre-divide. Kept unprojected because
 // near-plane clipping interpolates here, before the divide by w (a vertex behind
@@ -1299,7 +1302,7 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
 // the array still hashes to what it was planned from.
 // ---------------------------------------------------------------------------
 #define STRIP_LINK 0x40 // in corners[]: the first two corners are the previous triangle's last two
-#define STRIP_PLANS 512
+#define STRIP_PLANS 4096 // a level has a few thousand batches; a plan thrown out is a search redone
 
 typedef struct {
     const Triangle *tris;
@@ -1414,6 +1417,7 @@ static const BlastStripPlan *strip_plan_for(const Triangle *tris, s32 count) {
         hash = ((hash << 5) | (hash >> 27)) ^ tris[i].uv2.texCoords;
     }
     if (plan->tris != tris || plan->count != count || plan->hash != hash) {
+        PROF_ADD(stripPlans, 1);
         strip_plan_build(tris, count, plan);
         plan->tris = tris;
         plan->count = (u8) count;
@@ -2575,7 +2579,7 @@ extern void dc_audio_start_thread(void);
 // one count per 32 bytes of code from the load address.
 #if DKR_GFX_PROFILE >= 3
 #define PROF_SAMPLE_BASE 0x8c010000u
-#define PROF_SAMPLE_BUCKETS (4u * 1024u * 1024u / 32u)
+#define PROF_SAMPLE_BUCKETS (1536u * 1024u / 32u) // the program's code is about 1.1 MB
 extern s32 gMapId;
 static u16 sProfSamples[PROF_SAMPLE_BUCKETS];
 static u32 sProfSampleInfo[4]; // samples taken, samples outside the range, bucket bytes, base

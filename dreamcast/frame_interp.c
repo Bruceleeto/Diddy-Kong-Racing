@@ -15,7 +15,7 @@
 #include "camera.h"
 #include "objects.h"
 
-#define INTERP_MAX_OBJECTS 1024
+#define INTERP_MAX_OBJECTS 512 // OBJECT_SLOT_COUNT in src/objects.c
 // A larger move in one step is a respawn, warp or camera cut, not motion.
 #define INTERP_MAX_MOVE 400.0f
 
@@ -34,7 +34,7 @@ typedef struct {
 static InterpObject sBefore[INTERP_MAX_OBJECTS]; // where each object was before the step
 // The game re-sorts its object list by distance every frame, so an object is
 // found again by address, not by its place in the list.
-#define INTERP_HASH 4096
+#define INTERP_HASH 2048
 static u16 sBeforeAt[INTERP_HASH]; // index into sBefore plus one; 0 is empty
 
 static u32 interp_hash(const Object *obj) {
