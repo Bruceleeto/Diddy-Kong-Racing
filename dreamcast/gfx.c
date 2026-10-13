@@ -984,6 +984,22 @@ int gfx_blast_viable(void) {
 
 static int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
 
+// Profile only: what the fast path sends to the blended list, in batches and
+// reserved words, by whether it could have been opaque. Classes: 0 no depth
+// test (2D, backdrop), 1 looks opaque and writes depth, 2 looks opaque but does
+// not write depth, 3 really translucent. "Looks opaque" goes by the first
+// vertex's alpha and the texture having no translucent texel.
+static unsigned int sTrStats[8];
+
+void gfx_tr_stats(unsigned int out[8]) {
+    int i;
+
+    for (i = 0; i < 8; i++) {
+        out[i] = sTrStats[i];
+        sTrStats[i] = 0;
+    }
+}
+
 int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
                     void **record, int emitAlpha, float *zMul, float *zAdd) {
     int route;
@@ -1010,6 +1026,13 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
     }
     if (route == ROUTE_TR && sTrCount + maxWords + 2 > TR_MAX_WORDS) {
         return 0;
+    }
+    if (route == ROUTE_TR) {
+        int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
+        int kind = !sDepthTest ? 0 : !opaque ? 3 : sDepthWrite ? 1 : 2;
+
+        sTrStats[kind]++;
+        sTrStats[4 + kind] += (unsigned int) maxWords;
     }
     if (sDepthTest) {
         sSeenDepth = 1;

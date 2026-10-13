@@ -47,6 +47,7 @@ static struct {
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
     u32 slowBatches;
     u32 stripVerts; // vertices the fast path wrote; three per sent triangle without strips
+    u32 trStats[8]; // see gfx_tr_stats
     u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
     u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
     // Why a batch missed the fast path, in triangles.
@@ -125,7 +126,8 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "workmax=%lu over16=%lu over14=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
                "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
-               "stripverts=%lu\n",
+               "stripverts=%lu | "
+               "trbatches 2d=%lu opaquez=%lu opaquenoz=%lu xlu=%lu trroom 2d=%lu opaquez=%lu opaquenoz=%lu xlu=%lu\n",
                (unsigned long) period, (unsigned long) wait,
                (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
                (unsigned long) begin, (unsigned long) end,
@@ -158,7 +160,11 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
                (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
                (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n),
-               (unsigned long) (sProf.stripVerts / n));
+               (unsigned long) (sProf.stripVerts / n),
+               (unsigned long) (sProf.trStats[0] / n), (unsigned long) (sProf.trStats[1] / n),
+               (unsigned long) (sProf.trStats[2] / n), (unsigned long) (sProf.trStats[3] / n),
+               (unsigned long) (sProf.trStats[4] / n), (unsigned long) (sProf.trStats[5] / n),
+               (unsigned long) (sProf.trStats[6] / n), (unsigned long) (sProf.trStats[7] / n));
     }
     memset(&sProf, 0, sizeof(sProf));
     sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
@@ -2636,6 +2642,16 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     {
         int pt, tr;
         gfx_recorded_words(&pt, &tr);
+        {
+            extern void gfx_tr_stats(unsigned int out[8]);
+            unsigned int tr8[8];
+            s32 j;
+
+            gfx_tr_stats(tr8);
+            for (j = 0; j < 8; j++) {
+                sProf.trStats[j] += tr8[j];
+            }
+        }
         if ((u32) pt > sProf.ptWords) sProf.ptWords = (u32) pt;
         if ((u32) tr > sProf.trWords) sProf.trWords = (u32) tr;
     }
