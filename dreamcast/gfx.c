@@ -37,6 +37,7 @@ typedef struct {
     // Every texel fully opaque or fully transparent, and at least one transparent:
     // a cutout, which the punch-through list can draw without blending.
     int cutout;
+    int format; // PVR_TXRFMT_RGB565, _ARGB1555 or _ARGB4444, chosen from the above
 } DcTexture;
 
 static DcTexture sTextures[MAX_TEXTURES];
@@ -270,6 +271,7 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     header_cache_clear();
     int opaque = 1;
     int cutout = 1;
+    int format;
 
     if (!sPvrReady || rgba == NULL || width <= 0 || height <= 0) {
         return 0;
@@ -292,25 +294,43 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     if (tmp == NULL) {
         return 0;
     }
-    // RGBA8888 -> ARGB4444 into the padded buffer. Samples outside the original
-    // clamp to its edge (replicate), which keeps the padding from darkening the
-    // border under bilinear filtering.
-    for (y = 0; y < ph; y++) {
-        int sy = (y < height) ? y : height - 1;
-        for (x = 0; x < pw; x++) {
-            int sx = (x < width) ? x : width - 1;
-            const unsigned char *p = &src[(sy * width + sx) * 4];
-            unsigned int r = p[0] >> 4;
-            unsigned int g = p[1] >> 4;
-            unsigned int b = p[2] >> 4;
-            unsigned int a = p[3] >> 4;
-            if (a != 0xF && x < width && y < height) {
+    // What the alpha channel is used for decides the format. All three are 16
+    // bits a texel, so the choice costs no memory: a texture with no alpha keeps
+    // 5-6-5 bits of colour, a cutout 5-5-5 plus its one bit of alpha, and only
+    // one with real translucency drops to 4 bits a channel. Most of the game's
+    // textures are 5-5-5-1 on the cartridge and so come through unchanged.
+    for (y = 0; y < height; y++) {
+        for (x = 0; x < width; x++) {
+            unsigned int a = src[(y * width + x) * 4 + 3] >> 4;
+
+            if (a != 0xF) {
                 opaque = 0;
                 if (a != 0) {
                     cutout = 0;
                 }
             }
-            tmp[y * pw + x] = (unsigned short) ((a << 12) | (r << 8) | (g << 4) | b);
+        }
+    }
+    cutout = cutout && !opaque;
+    format = opaque ? PVR_TXRFMT_RGB565 : cutout ? PVR_TXRFMT_ARGB1555 : PVR_TXRFMT_ARGB4444;
+
+    // Into the padded buffer. Samples outside the original clamp to its edge
+    // (replicate), which keeps the padding from darkening the border under
+    // bilinear filtering.
+    for (y = 0; y < ph; y++) {
+        int sy = (y < height) ? y : height - 1;
+        for (x = 0; x < pw; x++) {
+            int sx = (x < width) ? x : width - 1;
+            const unsigned char *p = &src[(sy * width + sx) * 4];
+            unsigned int r = p[0], g = p[1], b = p[2], a = p[3];
+
+            if (opaque) {
+                tmp[y * pw + x] = (unsigned short) (((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+            } else if (cutout) {
+                tmp[y * pw + x] = (unsigned short) (((a >> 7) << 15) | ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3));
+            } else {
+                tmp[y * pw + x] = (unsigned short) (((a >> 4) << 12) | ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4));
+            }
         }
     }
 
@@ -336,7 +356,8 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     sTextures[slot].cmS = cmS;
     sTextures[slot].cmT = cmT;
     sTextures[slot].opaque = opaque;
-    sTextures[slot].cutout = cutout && !opaque;
+    sTextures[slot].cutout = cutout;
+    sTextures[slot].format = format;
     return (unsigned int) (slot + 1);
 }
 
@@ -710,7 +731,7 @@ static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
         DcTexture *t = &sTextures[sBoundTex - 1];
         // Padded (power-of-two) dims, and NON-twiddled to match the plain copy in
         // gfx_create_texture.
-        pvr_poly_cxt_txr(&cxt, list, PVR_TXRFMT_ARGB4444 | PVR_TXRFMT_NONTWIDDLED,
+        pvr_poly_cxt_txr(&cxt, list, t->format | PVR_TXRFMT_NONTWIDDLED,
                          t->padded_w, t->padded_h, t->data,
                          sFilterPoint ? PVR_FILTER_NEAREST : PVR_FILTER_BILINEAR);
         cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
