@@ -214,7 +214,13 @@ s32 pc_retrace_wait(void) {
         periods = PC_LOGIC_UPDATE_RATE;
     }
     if (periods > PC_MAX_UPDATE_RATE) {
-        periods = PC_MAX_UPDATE_RATE;
+        // Far more time went by than a frame can account for: a level load, or a
+        // paused debugger. That time is not the game's. Start counting again from
+        // now; advancing by the cap alone would leave the rest owed, and every
+        // following frame would run at the cap until the whole load was repaid,
+        // which plays the first moments of a race several times too fast.
+        sLastNs = nowNs;
+        return PC_LOGIC_UPDATE_RATE;
     }
 
     // Advance by whole periods so rounding doesn't accumulate into drift.
