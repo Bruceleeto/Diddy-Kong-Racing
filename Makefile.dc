@@ -33,8 +33,9 @@ FRAME_FIELDS ?= 2
 FSAA ?= 0
 # 1 adds controls to hold a frame and switch cutout modes; see dreamcast/main.c.
 DEBUG_VIEW ?= 0
-# 0 draws a blended cutout once, blended; 1 also draws its solid part punch-through.
-CUTOUT_DUAL ?= 1
+# 1 also draws a blended cutout's solid part punch-through, under the blended pass.
+# Compared on the console, the single blended pass looked better.
+CUTOUT_DUAL ?= 0
 # 0 stores cutout textures with 4 bits a channel instead of 5-5-5-1.
 CUTOUT_1555 ?= 1
 # Return to the loader after this many seconds; 0 runs until reset.

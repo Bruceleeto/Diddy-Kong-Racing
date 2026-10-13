@@ -23,7 +23,7 @@
 #define DKR_CUTOUT_1555 1
 #endif
 #ifndef DKR_CUTOUT_DUAL
-#define DKR_CUTOUT_DUAL 1
+#define DKR_CUTOUT_DUAL 0
 #endif
 // How cutout textures are stored and drawn. Set at build time; the debug view
 // (DEBUG_VIEW=1) switches them while a frame is held, to compare the results.
@@ -1088,7 +1088,8 @@ static int sBlastRoute; // the list the open blast batch is recorded to, or ROUT
 // hides what is behind it and sorts correctly against everything else. The
 // blended list then draws the same triangles over it, which changes nothing
 // where the texel is solid and leaves the filtered, partly transparent rim as a
-// soft edge. DKR_CUTOUT_DUAL=0 draws such a batch once, blended, as before.
+// soft edge. Off by default (CUTOUT_DUAL=1 turns it on): side by side on the
+// console the single blended pass gave the better edge.
 static int sBlastDual;      // the open batch is such a batch
 static int sBlastDualStart; // where its vertices start in the punch-through recording
 

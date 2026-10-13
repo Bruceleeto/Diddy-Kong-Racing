@@ -2533,8 +2533,8 @@ static void prof_sample_write(void) {
 //
 //   1  as before: 4-4-4-4, blended once
 //   2  5-5-5-1, blended once
-//   3  5-5-5-1, blended once, invisible texels coloured from their neighbours
-//   4  5-5-5-1, punch-through then blended, neighbours' colour (the default)
+//   3  5-5-5-1, blended once, invisible texels coloured from their neighbours (the default)
+//   4  5-5-5-1, punch-through then blended, neighbours' colour
 //   5  4-4-4-4, punch-through then blended, neighbours' colour
 #ifndef DKR_DEBUG_VIEW
 #define DKR_DEBUG_VIEW 0
@@ -2542,7 +2542,7 @@ static void prof_sample_write(void) {
 #if DKR_DEBUG_VIEW
 extern void gfx_set_cutout_mode(int use1555, int dual, int bleed);
 static s32 sDebugHold;
-static s32 sDebugMode = 4;
+static s32 sDebugMode = 3;
 
 static void debug_view_apply(void) {
     static const u8 modes[5][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 1, 1, 1 }, { 0, 1, 1 } };
