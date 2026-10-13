@@ -34,6 +34,9 @@ typedef struct {
     // of soft. Measured at upload rather than guessed from the vertex colour, which
     // says nothing about what the texture does.
     int opaque;
+    // Every texel fully opaque or fully transparent, and at least one transparent:
+    // a cutout, which the punch-through list can draw without blending.
+    int cutout;
 } DcTexture;
 
 static DcTexture sTextures[MAX_TEXTURES];
@@ -260,6 +263,7 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
 
     header_cache_clear();
     int opaque = 1;
+    int cutout = 1;
 
     if (!sPvrReady || rgba == NULL || width <= 0 || height <= 0) {
         return 0;
@@ -296,6 +300,9 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
             unsigned int a = p[3] >> 4;
             if (a != 0xF && x < width && y < height) {
                 opaque = 0;
+                if (a != 0) {
+                    cutout = 0;
+                }
             }
             tmp[y * pw + x] = (unsigned short) ((a << 12) | (r << 8) | (g << 4) | b);
         }
@@ -323,6 +330,7 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     sTextures[slot].cmS = cmS;
     sTextures[slot].cmT = cmT;
     sTextures[slot].opaque = opaque;
+    sTextures[slot].cutout = cutout && !opaque;
     return (unsigned int) (slot + 1);
 }
 
@@ -985,16 +993,17 @@ int gfx_blast_viable(void) {
 static int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
 
 // Profile only: what the fast path sends to the blended list, in batches and
-// reserved words, by whether it could have been opaque. Classes: 0 no depth
-// test (2D, backdrop), 1 looks opaque and writes depth, 2 looks opaque but does
-// not write depth, 3 really translucent. "Looks opaque" goes by the first
-// vertex's alpha and the texture having no translucent texel.
-static unsigned int sTrStats[8];
+// reserved words, by whether it needed to blend. Classes: 0 no depth test (2D,
+// backdrop), 1 looks opaque and writes depth, 2 looks opaque but does not write
+// depth, 3 a cutout (full vertex alpha, texels all opaque or all clear), which
+// punch-through could draw, 4 really translucent. "Looks" goes by the first
+// vertex's alpha and the texture's texels.
+static unsigned int sTrStats[10];
 
-void gfx_tr_stats(unsigned int out[8]) {
+void gfx_tr_stats(unsigned int out[10]) {
     int i;
 
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < 10; i++) {
         out[i] = sTrStats[i];
         sTrStats[i] = 0;
     }
@@ -1029,10 +1038,11 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
     }
     if (route == ROUTE_TR) {
         int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
-        int kind = !sDepthTest ? 0 : !opaque ? 3 : sDepthWrite ? 1 : 2;
+        int cutout = emitAlpha == 0xFF && sBoundTex != 0 && sTextures[sBoundTex - 1].cutout;
+        int kind = !sDepthTest ? 0 : opaque ? (sDepthWrite ? 1 : 2) : cutout ? 3 : 4;
 
         sTrStats[kind]++;
-        sTrStats[4 + kind] += (unsigned int) maxWords;
+        sTrStats[5 + kind] += (unsigned int) maxWords;
     }
     if (sDepthTest) {
         sSeenDepth = 1;
