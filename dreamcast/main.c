@@ -47,6 +47,7 @@ static struct {
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
     u32 slowBatches;
     u32 trStats[10]; // see gfx_tr_stats
+    u32 noDepth[4];  // see gfx_nodepth_stats
     u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
     u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
     // Why a batch missed the fast path, in triangles.
@@ -85,6 +86,66 @@ static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
 #define PROF_LAP_START() ((void) 0)
 #define PROF_LAP(field) ((void) 0)
 #endif
+
+// What the blended batches are: triangles by render mode, combiner, texture
+// kind and where their alpha comes from. Printed with the frame profile.
+#define PROF_BLEND_KINDS 48
+static struct {
+    u32 modeL, cc0, cc1;
+    u8 texKind, vtxAlphaFull, outAlphaFull, fog, primA, envA, used;
+    u32 tris;
+} sProfBlend[PROF_BLEND_KINDS];
+
+static void prof_blend(u32 modeL, u32 cc0, u32 cc1, s32 texKind, s32 vtxAlphaFull, s32 outAlphaFull, s32 fog,
+                       s32 primA, s32 envA, s32 tris) {
+    s32 i;
+
+    for (i = 0; i < PROF_BLEND_KINDS; i++) {
+        if (!sProfBlend[i].used) {
+            sProfBlend[i].modeL = modeL;
+            sProfBlend[i].cc0 = cc0;
+            sProfBlend[i].cc1 = cc1;
+            sProfBlend[i].texKind = (u8) texKind;
+            sProfBlend[i].vtxAlphaFull = (u8) vtxAlphaFull;
+            sProfBlend[i].outAlphaFull = (u8) outAlphaFull;
+            sProfBlend[i].fog = (u8) fog;
+            sProfBlend[i].primA = (u8) primA;
+            sProfBlend[i].envA = (u8) envA;
+            sProfBlend[i].used = 1;
+        }
+        if (sProfBlend[i].modeL == modeL && sProfBlend[i].cc0 == cc0 && sProfBlend[i].cc1 == cc1 &&
+            sProfBlend[i].texKind == texKind && sProfBlend[i].vtxAlphaFull == vtxAlphaFull &&
+            sProfBlend[i].outAlphaFull == outAlphaFull && sProfBlend[i].fog == fog && sProfBlend[i].primA == primA &&
+            sProfBlend[i].envA == envA) {
+            sProfBlend[i].tris += (u32) tris;
+            return;
+        }
+    }
+}
+
+static void prof_blend_print(u32 frames) {
+    s32 n, i;
+
+    for (n = 0; n < 8; n++) {
+        s32 best = -1;
+
+        for (i = 0; i < PROF_BLEND_KINDS; i++) {
+            if (sProfBlend[i].used && sProfBlend[i].tris && (best < 0 || sProfBlend[i].tris > sProfBlend[best].tris)) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        printf("GFX BLEND: tris=%lu modeL=%08lx cc=%08lx/%08lx tex=%d vtxA255=%d outA255=%d fog=%d primA=%d envA=%d\n",
+               (unsigned long) (sProfBlend[best].tris / frames), (unsigned long) sProfBlend[best].modeL,
+               (unsigned long) sProfBlend[best].cc0, (unsigned long) sProfBlend[best].cc1, sProfBlend[best].texKind,
+               sProfBlend[best].vtxAlphaFull, sProfBlend[best].outAlphaFull, sProfBlend[best].fog,
+               sProfBlend[best].primA, sProfBlend[best].envA);
+        sProfBlend[best].tris = 0;
+    }
+    memset(sProfBlend, 0, sizeof(sProfBlend));
+}
 
 static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
     sProf.begin += t1 - t0;
@@ -125,6 +186,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "workmax=%lu over16=%lu over14=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
                "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
+               "nodepth toop=%lu afterdepth=%lu afterrecorded=%lu notopaque=%lu | "
                "trbatches 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu "
                "trroom 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu\n",
                (unsigned long) period, (unsigned long) wait,
@@ -159,12 +221,15 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
                (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
                (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n),
+               (unsigned long) (sProf.noDepth[0] / n), (unsigned long) (sProf.noDepth[1] / n),
+               (unsigned long) (sProf.noDepth[2] / n), (unsigned long) (sProf.noDepth[3] / n),
                (unsigned long) (sProf.trStats[0] / n), (unsigned long) (sProf.trStats[1] / n),
                (unsigned long) (sProf.trStats[2] / n), (unsigned long) (sProf.trStats[3] / n),
                (unsigned long) (sProf.trStats[4] / n), (unsigned long) (sProf.trStats[5] / n),
                (unsigned long) (sProf.trStats[6] / n), (unsigned long) (sProf.trStats[7] / n),
                (unsigned long) (sProf.trStats[8] / n), (unsigned long) (sProf.trStats[9] / n));
     }
+    prof_blend_print(sProf.frames);
     memset(&sProf, 0, sizeof(sProf));
     sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
 }
@@ -1035,7 +1100,18 @@ static void apply_render_mode(void) {
     gfx_set_depth_test(zEnabled && (sOtherModeL & Z_CMP) != 0);
     gfx_set_depth_write(zEnabled && (sOtherModeL & Z_UPD) != 0);
     gfx_set_depth_offset(zEnabled && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC);
-    gfx_set_blend((sOtherModeL & FORCE_BL) != 0);
+    {
+        // FORCE_BL only says the blender runs. It blends with what is already
+        // drawn only if its equation reads the framebuffer; G_RM_OPA_SURF, the
+        // sky's mode, forces the blender and still outputs the pixel unchanged.
+        // The equation is P*A + M*B, two bits each, with one set per cycle; the
+        // last cycle's set decides.
+        s32 twoCycle = (sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
+        u32 p = (sOtherModeL >> (twoCycle ? 28 : 30)) & 3;
+        u32 m = (sOtherModeL >> (twoCycle ? 20 : 22)) & 3;
+
+        gfx_set_blend((sOtherModeL & FORCE_BL) != 0 && (p == G_BL_CLR_MEM || m == G_BL_CLR_MEM));
+    }
 
     // CVG_X_ALPHA is how the cutout materials (G_RM_*_TEX_EDGE) get their hard
     // edge: the RDP multiplies coverage by alpha, which on a non-antialiased
@@ -1404,6 +1480,19 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
     }
 
     PROF_LAP(tXform);
+#if DKR_GFX_PROFILE
+    if (sOtherModeL & FORCE_BL) {
+        extern int gfx_texture_kind(void);
+        u32 vtxAnd = 0xFF, outAnd = 0xFF000000u;
+
+        for (i = 0; i < numVerts; i++) {
+            vtxAnd &= verts[i].a;
+            outAnd &= argb[i];
+        }
+        prof_blend(sOtherModeL, sCombineW0, sCombineW1, gfx_texture_kind(), vtxAnd == 0xFF, outAnd == 0xFF000000u,
+                   (sGeometryMode & G_FOG) != 0, sPrimColor[3], sEnvColor[3], numTris);
+    }
+#endif
     // A triangle crossing the near plane can come back as two.
     if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord,
                          (int) (argb[0] >> 24), &sBlastZMul, &sBlastZAdd)) {
@@ -2482,6 +2571,15 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
             s32 j;
 
             gfx_tr_stats(tr8);
+            {
+                extern void gfx_nodepth_stats(unsigned int out[4]);
+                unsigned int nd[4];
+
+                gfx_nodepth_stats(nd);
+                for (j = 0; j < 4; j++) {
+                    sProf.noDepth[j] += nd[j];
+                }
+            }
             for (j = 0; j < 10; j++) {
                 sProf.trStats[j] += tr8[j];
             }

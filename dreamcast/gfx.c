@@ -981,6 +981,14 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
  * the caller transforms anything, so a doomed batch costs a compare, not a
  * wasted transform.
  */
+/** Profile only: 0 no texture bound, 1 opaque, 2 cutout, 3 has partly transparent texels. */
+int gfx_texture_kind(void) {
+    if (sBoundTex == 0 || sTextures[sBoundTex - 1].data == NULL) {
+        return 0;
+    }
+    return sTextures[sBoundTex - 1].opaque ? 1 : sTextures[sBoundTex - 1].cutout ? 2 : 3;
+}
+
 /** Which condition keeps the current state off the fast path (profile only). */
 int gfx_blast_why(void) {
     return !sInScene ? 0 : sTexEnvBlend ? 1 : (sAlphaRef > 0.0f) ? 2 : !sDepthTest ? 3 : sDepthOffset ? 4 : 5;
@@ -999,6 +1007,20 @@ static int sBlastRoute; // the list the open blast batch is recorded to, or ROUT
 // punch-through could draw, 4 really translucent. "Looks" goes by the first
 // vertex's alpha and the texture's texels.
 static unsigned int sTrStats[10];
+
+// Profile only: fast-path batches drawn without a depth test, in reserved
+// words: 0 went to the opaque list, 1 came after depth-tested geometry, 2 came
+// after something was already recorded, 3 was not opaque itself.
+static unsigned int sNoDepthStats[4];
+
+void gfx_nodepth_stats(unsigned int out[4]) {
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        out[i] = sNoDepthStats[i];
+        sNoDepthStats[i] = 0;
+    }
+}
 
 void gfx_tr_stats(unsigned int out[10]) {
     int i;
@@ -1029,6 +1051,12 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
     } else {
         route = ROUTE_TR;
         farBackdrop = !sSeenDepth;
+    }
+    if (!sDepthTest && !(USE_PT_LIST && sAlphaRef > 0.0f)) {
+        int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
+
+        sNoDepthStats[route == ROUTE_OP ? 0 : sSeenDepth ? 1 : (sTrCount || sPtCount) ? 2 : !opaque ? 3 : 0] +=
+            (unsigned int) maxWords;
     }
     if (route == ROUTE_PT && sPtCount + maxWords + 2 > PT_MAX_WORDS) {
         return 0; // gfx_draw_tris reports the overflow
