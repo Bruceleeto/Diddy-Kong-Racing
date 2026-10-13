@@ -2531,24 +2531,22 @@ static void prof_sample_write(void) {
 //   both triggers + X   hold or release the current frame
 //   both triggers + Y   next mode; the squares at the top left show which
 //
-//   1  as before: 4-4-4-4, blended once
-//   2  5-5-5-1, blended once
-//   3  5-5-5-1, blended once, invisible texels coloured from their neighbours (the default)
-//   4  5-5-5-1, punch-through then blended, neighbours' colour
-//   5  4-4-4-4, punch-through then blended, neighbours' colour
+//   1  as before: 4-4-4-4
+//   2  5-5-5-1
+//   3  5-5-5-1, invisible texels coloured from their neighbours (the default)
 #ifndef DKR_DEBUG_VIEW
 #define DKR_DEBUG_VIEW 0
 #endif
 #if DKR_DEBUG_VIEW
-extern void gfx_set_cutout_mode(int use1555, int dual, int bleed);
+extern void gfx_set_cutout_mode(int use1555, int bleed);
 static s32 sDebugHold;
 static s32 sDebugMode = 3;
 
 static void debug_view_apply(void) {
-    static const u8 modes[5][3] = { { 0, 0, 0 }, { 1, 0, 0 }, { 1, 0, 1 }, { 1, 1, 1 }, { 0, 1, 1 } };
+    static const u8 modes[3][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 } };
     s32 i;
 
-    gfx_set_cutout_mode(modes[sDebugMode - 1][0], modes[sDebugMode - 1][1], modes[sDebugMode - 1][2]);
+    gfx_set_cutout_mode(modes[sDebugMode - 1][0], modes[sDebugMode - 1][1]);
     // The format is chosen when a texture is created, so make them all anew.
     for (i = 0; i < sTexCacheCount; i++) {
         gfx_delete_texture(sTexCache[i].handle);
@@ -2572,7 +2570,7 @@ static void debug_view_poll(void) {
         printf("DEBUG VIEW: frame %s\n", sDebugHold ? "held" : "released");
     }
     if (pressed & CONT_Y) {
-        sDebugMode = (sDebugMode % 5) + 1;
+        sDebugMode = (sDebugMode % 3) + 1;
         debug_view_apply();
     }
 }

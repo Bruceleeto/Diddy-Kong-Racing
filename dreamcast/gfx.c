@@ -22,19 +22,14 @@
 #ifndef DKR_CUTOUT_1555
 #define DKR_CUTOUT_1555 1
 #endif
-#ifndef DKR_CUTOUT_DUAL
-#define DKR_CUTOUT_DUAL 0
-#endif
 // How cutout textures are stored and drawn. Set at build time; the debug view
 // (DEBUG_VIEW=1) switches them while a frame is held, to compare the results.
 static int sCutout1555 = DKR_CUTOUT_1555; // 5-5-5-1 instead of 4-4-4-4
-static int sCutoutDual = DKR_CUTOUT_DUAL; // punch-through pass under the blended one
 static int sCutoutBleed = 1;              // invisible texels take their neighbours' colour
 
 /** Takes effect for textures created afterwards, so the caller drops its texture cache. */
-void gfx_set_cutout_mode(int use1555, int dual, int bleed) {
+void gfx_set_cutout_mode(int use1555, int bleed) {
     sCutout1555 = use1555;
-    sCutoutDual = dual;
     sCutoutBleed = bleed;
 }
 #define DC_SCREEN_H 480
@@ -764,12 +759,10 @@ static void header_cache_clear(void) {
 }
 
 static void compile_header_uncached(int list, pvr_poly_hdr_t *out);
-static int sForceDepthWrite; // see the dual cutout batches in gfx_blast_begin
 
 static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     // Everything compile_header_uncached reads, and a top bit so no key is 0.
-    unsigned int key = 0x80000000u | ((unsigned int) list << 20) | ((unsigned int) sForceDepthWrite << 18) |
-                       ((unsigned int) sBoundTex << 6) |
+    unsigned int key = 0x80000000u | ((unsigned int) list << 20) | ((unsigned int) sBoundTex << 6) |
                        ((sFilterPoint != 0) << 5) | ((sScisEnable != 0) << 4) | ((sDepthTest != 0) << 3) |
                        ((sFarBackdrop != 0) << 2) | ((sAlphaRef > 0.0f) << 1) | (sDepthWrite != 0);
     unsigned int at = (key ^ (key >> 6) ^ (key >> 13)) & (HDR_CACHE - 1);
@@ -823,7 +816,7 @@ static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
     if (!USE_PT_LIST && sAlphaRef > 0.0f) {
         cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
     } else {
-        cxt.depth.write = (sDepthWrite || sForceDepthWrite) ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
+        cxt.depth.write = sDepthWrite ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
     }
     if (list == PVR_LIST_OP_POLY) {
         // An RDP surface that does not blend ignores alpha entirely, in the
@@ -1083,15 +1076,6 @@ int gfx_blast_viable(void) {
 }
 
 static int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
-// A blended batch whose texture is a cutout is drawn twice. The punch-through
-// list takes its solid texels: no blending, and they write depth, so the sprite
-// hides what is behind it and sorts correctly against everything else. The
-// blended list then draws the same triangles over it, which changes nothing
-// where the texel is solid and leaves the filtered, partly transparent rim as a
-// soft edge. Off by default (CUTOUT_DUAL=1 turns it on): side by side on the
-// console the single blended pass gave the better edge.
-static int sBlastDual;      // the open batch is such a batch
-static int sBlastDualStart; // where its vertices start in the punch-through recording
 
 // Profile only: what the fast path sends to the blended list, in batches and
 // reserved words, by whether it needed to blend. Classes: 0 no depth test (2D,
@@ -1151,12 +1135,6 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
         sNoDepthStats[route == ROUTE_OP ? 0 : sSeenDepth ? 1 : (sTrCount || sPtCount) ? 2 : !opaque ? 3 : 0] +=
             (unsigned int) maxWords;
     }
-    sBlastDual = sCutoutDual && USE_PT_LIST && route == ROUTE_TR && sDepthTest && emitAlpha == 0xFF &&
-                 sBoundTex != 0 && sTextures[sBoundTex - 1].cutout && sPtCount + maxWords + 2 <= PT_MAX_WORDS &&
-                 sTrCount + maxWords + 2 <= TR_MAX_WORDS;
-    if (sBlastDual) {
-        route = ROUTE_PT;
-    }
     if (route == ROUTE_PT && sPtCount + maxWords + 2 > PT_MAX_WORDS) {
         return 0; // gfx_draw_tris reports the overflow
     }
@@ -1197,13 +1175,10 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
             *dirty = 0;
         }
         sFarBackdrop = farBackdrop;
-        sForceDepthWrite = sBlastDual;
         hdr = (pvr_poly_hdr_t *) ta_target();
         compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : PVR_LIST_TR_POLY, hdr);
         ta_commit(hdr);
         sFarBackdrop = 0;
-        sForceDepthWrite = 0;
-        sBlastDualStart = sPtCount;
         *record = (route == ROUTE_PT) ? sPtBuf[sPtCount] : sTrBuf[sTrCount];
         sRoute = ROUTE_OP;
     } else {
@@ -1245,32 +1220,6 @@ void gfx_recorded_words(int *pt, int *tr) {
 void gfx_blast_end(void *recordEnd) {
     if (sBlastRoute == ROUTE_PT) {
         sPtCount = (int) ((unsigned char (*)[32]) recordEnd - sPtBuf);
-        if (sBlastDual) {
-            int words = sPtCount - sBlastDualStart;
-
-            sBlastDual = 0;
-            if (words > 0) {
-                pvr_poly_hdr_t *hdr;
-
-                // The blended half: the same vertices under a blended header.
-                sRoute = ROUTE_TR;
-                if (sScisDirty) {
-                    if (sScisEnable) {
-                        submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
-                                         (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
-                    } else {
-                        submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
-                    }
-                    sScisDirty = 0;
-                }
-                hdr = (pvr_poly_hdr_t *) ta_target();
-                compile_header_for(PVR_LIST_TR_POLY, hdr);
-                ta_commit(hdr);
-                memcpy(sTrBuf[sTrCount], sPtBuf[sBlastDualStart], (size_t) words * 32);
-                sTrCount += words;
-                sRoute = ROUTE_OP;
-            }
-        }
     } else {
         sTrCount = (int) ((unsigned char (*)[32]) recordEnd - sTrBuf);
     }
