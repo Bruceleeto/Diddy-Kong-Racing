@@ -183,7 +183,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
                "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
                "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
-               "workmax=%lu over16=%lu over14=%lu | "
+               "workmax=%lu over16=%lu over14=%lu vramfree=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
                "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
                "nodepth toop=%lu afterdepth=%lu afterrecorded=%lu notopaque=%lu | "
@@ -212,6 +212,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyAppend / n), (unsigned long) (sProf.whyShared / n),
                (unsigned long) (sProf.whyLoose / n),
                (unsigned long) sProf.workMax, (unsigned long) sProf.over16, (unsigned long) sProf.over14,
+               (unsigned long) pvr_mem_available(),
                (unsigned long) (sProf.part[PC_PROF_LOGIC] / 1000u / n),
                (unsigned long) (sProf.part[PC_PROF_SCENE] / 1000u / n),
                (unsigned long) (sProf.part[PC_PROF_WAVES] / 1000u / n),
