@@ -49,7 +49,8 @@ static struct {
     u32 trStats[10]; // see gfx_tr_stats
     u32 noDepth[4];  // see gfx_nodepth_stats
     u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
-    u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
+    u32 workMax; // the longest frame, start to start, less the pacer's sleep
+    u32 missed;  // frames that took more video fields than the target
     // Why a batch missed the fast path, in triangles.
     u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
     u32 whyStateKind[6]; // no scene, texenv blend, alpha test, no depth test, depth offset, scissor
@@ -156,8 +157,6 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         u32 work = sFrameStart ? (u32) ((t3 - sFrameStart - sProf.waitFrame) / 1000u) : 0;
 
         if (work > sProf.workMax) sProf.workMax = work;
-        if (work > 16667) sProf.over16++;
-        if (work > 14000) sProf.over14++;
         sFrameStart = t3;
         sProf.waitFrame = 0;
     }
@@ -183,7 +182,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
                "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
                "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
-               "workmax=%lu over16=%lu over14=%lu vramfree=%lu | "
+               "workmax=%lu missed=%lu vramfree=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
                "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
                "nodepth toop=%lu afterdepth=%lu afterrecorded=%lu notopaque=%lu | "
@@ -211,7 +210,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyState / n), (unsigned long) (sProf.whyFull / n),
                (unsigned long) (sProf.whyAppend / n), (unsigned long) (sProf.whyShared / n),
                (unsigned long) (sProf.whyLoose / n),
-               (unsigned long) sProf.workMax, (unsigned long) sProf.over16, (unsigned long) sProf.over14,
+               (unsigned long) sProf.workMax, (unsigned long) sProf.missed,
                (unsigned long) pvr_mem_available(),
                (unsigned long) (sProf.part[PC_PROF_LOGIC] / 1000u / n),
                (unsigned long) (sProf.part[PC_PROF_SCENE] / 1000u / n),
@@ -298,6 +297,13 @@ s32 pc_retrace_wait(void) {
         return PC_LOGIC_UPDATE_RATE;
     }
 
+#if DKR_GFX_PROFILE
+    // Counted here because only the pacer knows: a frame's own time includes
+    // waiting for the PVR, so comparing it with 16.7 ms says nothing.
+    if (periods > PC_LOGIC_UPDATE_RATE) {
+        sProf.missed++;
+    }
+#endif
     // Advance by whole periods so rounding doesn't accumulate into drift.
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
     return periods;
