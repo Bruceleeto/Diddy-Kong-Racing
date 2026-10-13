@@ -1298,15 +1298,17 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
 // whether a triangle continues the run of the one before it.
 //
 // Triangle arrays are mostly static model data, but the game also builds some
-// afresh every frame in reused buffers. A plan is therefore only trusted while
-// the array still hashes to what it was planned from.
+// afresh every frame in reused buffers, so a plan can be older than the array
+// it is used on. That is harmless: the order and corner numbers of a plan are
+// valid for any array of its size, and a link is only followed after checking
+// that the two triangles really do share those corners now (see blast_render).
+// Hashing the array to detect a change cost more than strips save.
 // ---------------------------------------------------------------------------
 #define STRIP_LINK 0x40 // in corners[]: the first two corners are the previous triangle's last two
 #define STRIP_PLANS 4096 // a level has a few thousand batches; a plan thrown out is a search redone
 
 typedef struct {
     const Triangle *tris;
-    u32 hash;
     u8 count;
     u8 order[GFX_BLAST_MAX_TRIS];   // triangle index, in drawing order
     u8 corners[GFX_BLAST_MAX_TRIS]; // corner numbers c0 | c1 << 2 | c2 << 4, plus STRIP_LINK
@@ -1407,21 +1409,12 @@ static void strip_plan_build(const Triangle *tris, s32 count, BlastStripPlan *pl
 static const BlastStripPlan *strip_plan_for(const Triangle *tris, s32 count) {
     u32 at = (((u32) tris >> 4) ^ ((u32) tris >> 13)) & (STRIP_PLANS - 1);
     BlastStripPlan *plan = &sStripPlans[at];
-    u32 hash = (u32) count;
-    s32 i;
 
-    for (i = 0; i < count; i++) {
-        hash = ((hash << 5) | (hash >> 27)) ^ tris[i].vertices;
-        hash = ((hash << 5) | (hash >> 27)) ^ tris[i].uv0.texCoords;
-        hash = ((hash << 5) | (hash >> 27)) ^ tris[i].uv1.texCoords;
-        hash = ((hash << 5) | (hash >> 27)) ^ tris[i].uv2.texCoords;
-    }
-    if (plan->tris != tris || plan->count != count || plan->hash != hash) {
+    if (plan->tris != tris || plan->count != count) {
         PROF_ADD(stripPlans, 1);
         strip_plan_build(tris, count, plan);
         plan->tris = tris;
         plan->count = (u8) count;
-        plan->hash = hash;
     }
     return plan;
 }
@@ -1634,9 +1627,19 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
 #endif
             // The run stays open only if the next planned triangle continues it
             // and is itself drawn as is.
-            lastFlag = (k + 1 < numTris && (plan->corners[k + 1] & STRIP_LINK) && state[plan->order[k + 1]] == 1)
-                           ? PVR_CMD_VERTEX : PVR_CMD_VERTEX_EOL;
-            if (!(chained && (corners & STRIP_LINK))) {
+            lastFlag = PVR_CMD_VERTEX_EOL;
+            if (k + 1 < numTris && (plan->corners[k + 1] & STRIP_LINK) && state[plan->order[k + 1]] == 1) {
+                // The plan may predate the array's contents, so trust the link
+                // only if the next triangle's first two corners are this one's
+                // last two, vertex and texture coordinate alike.
+                const Triangle *n = &tris[plan->order[k + 1]];
+                u32 nc = plan->corners[k + 1];
+
+                if (strip_corner_same(n, nc & 3, t, c1) && strip_corner_same(n, (nc >> 2) & 3, t, c2)) {
+                    lastFlag = PVR_CMD_VERTEX;
+                }
+            }
+            if (!chained) {
                 s32 v0 = t->verticesArray[1 + c0], v1 = t->verticesArray[1 + c1];
 
                 PROF_ADD(stripVerts, 2);
@@ -1652,7 +1655,8 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
                 blast_emit(sx[v2], sy[v2], iw[v2], (&t->uv0)[c2].u * uMul, (&t->uv0)[c2].v * vMul, argb[v2],
                            lastFlag);
             }
-            chained = TRUE;
+            // The next triangle continues this run only if the run was left open.
+            chained = lastFlag == PVR_CMD_VERTEX;
         }
     }
     if (sBlastRecord) {
