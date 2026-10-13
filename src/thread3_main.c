@@ -437,6 +437,41 @@ void unload_level_game(void) {
  * The main behaviour function involving all of the ingame stuff.
  * Involves the updating of all objects and setting up the render scene.
  */
+#ifdef TARGET_PC
+extern s32 frame_interp_step(s32 fields);
+extern void frame_interp_before_step(void);
+extern void frame_interp_skipped(void);
+extern void frame_interp_draw_begin(void);
+extern void frame_interp_draw_end(void);
+
+/**
+ * Steps the objects. The logic keeps the two-field step its physics is tuned
+ * for; on a faster display every other frame draws between two steps instead.
+ * See dreamcast/frame_interp.c.
+ */
+static void game_logic_step(s32 updateRate) {
+    s32 step = frame_interp_step(updateRate);
+
+    if (step == 0) {
+        frame_interp_skipped();
+        return;
+    }
+    frame_interp_before_step();
+    PC_PROF(PC_PROF_LOGIC, obj_update(step));
+}
+
+static void game_scene_draw(s32 updateRate) {
+    frame_interp_draw_begin();
+    PC_PROF(PC_PROF_SCENE,
+            render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate));
+    frame_interp_draw_end();
+}
+#else
+#define game_logic_step(updateRate) obj_update(updateRate)
+#define game_scene_draw(updateRate) \
+    render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate)
+#endif
+
 void mode_game(s32 updateRate) {
     s32 buttonPressedInputs, buttonHeldInputs, i, loadContext, sp3C;
 
@@ -457,7 +492,7 @@ void mode_game(s32 updateRate) {
 #endif
     // Update all objects
     if (!gIsPaused) {
-        PC_PROF(PC_PROF_LOGIC, obj_update(updateRate));
+        game_logic_step(updateRate);
         if (check_if_showing_cutscene_camera() == 0 || get_race_countdown()) {
             if (buttonPressedInputs & START_BUTTON && level_properties_get() == 0 && gDrumstickSceneLoadTimer == 0 &&
                 gGameMode == GAMEMODE_INGAME && gPostRaceViewPort == FALSE && gLevelLoadTimer == 0 &&
@@ -479,8 +514,7 @@ void mode_game(s32 updateRate) {
     }
     gParticlePtrList_flush();
     ainode_update();
-    PC_PROF(PC_PROF_SCENE,
-            render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate));
+    game_scene_draw(updateRate);
     if (gGameMode == GAMEMODE_INGAME) {
         // Ignore the user's L/R/Z buttons.
         buttonHeldInputs &= ~(L_TRIG | R_TRIG | Z_TRIG);
@@ -928,11 +962,10 @@ void unload_level_menu(void) {
  */
 void update_menu_scene(s32 updateRate) {
     if (bgload_active() == FALSE) {
-        PC_PROF(PC_PROF_LOGIC, obj_update(updateRate));
+        game_logic_step(updateRate);
         gParticlePtrList_flush();
         ainode_update();
-        PC_PROF(PC_PROF_SCENE,
-            render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate));
+        game_scene_draw(updateRate);
         process_onscreen_textbox(updateRate);
         rdp_init(&gCurrDisplayList);
         divider_draw(&gCurrDisplayList);

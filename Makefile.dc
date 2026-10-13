@@ -111,6 +111,7 @@ CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 # Every game-code source file, individually.
 SRC_FILES := \
 	dreamcast/main.c \
+	dreamcast/frame_interp.c \
 	dreamcast/audio.c \
 	dreamcast/audio_aicaflow.c \
 	dreamcast/dkr_dsp_room.c \
