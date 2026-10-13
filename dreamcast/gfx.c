@@ -194,9 +194,15 @@ void gfx_window_init(int width, int height, int scale) {
     sScaleX = (float) DC_RENDER_W / (float) width;
     sScaleY = (float) DC_SCREEN_H / (float) height;
 
+    // A 24-bit framebuffer instead of the default RGB565: no banding in skies,
+    // fog and fades. The packed format costs 307 KB more video memory for each
+    // of the two buffers than 16-bit does; RGB0888 would cost twice that.
+    vid_set_mode(DM_640x480, PM_RGB888P);
+
     if (pvr_init(&params) < 0) {
         return;
     }
+    printf("gfx: 24-bit framebuffer, %d bytes of video memory free\n", (int) pvr_mem_available());
 
     // Set after pvr_init so it cannot be clobbered by it.
     *((volatile unsigned int *) PVR_PT_ALPHA_REF) = PT_ALPHA_REF_VALUE;
