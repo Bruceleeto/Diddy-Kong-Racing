@@ -31,6 +31,26 @@ typedef struct {
 } InterpObject;
 
 static InterpObject sBefore[INTERP_MAX_OBJECTS]; // where each object was before the step
+// The game re-sorts its object list by distance every frame, so an object is
+// found again by address, not by its place in the list.
+#define INTERP_HASH 4096
+static u16 sBeforeAt[INTERP_HASH]; // index into sBefore plus one; 0 is empty
+
+static u32 interp_hash(const Object *obj) {
+    return (((u32) obj >> 4) ^ ((u32) obj >> 13)) & (INTERP_HASH - 1);
+}
+
+static s32 interp_find(const Object *obj) {
+    u32 at = interp_hash(obj);
+
+    while (sBeforeAt[at] != 0) {
+        if (sBefore[sBeforeAt[at] - 1].obj == obj) {
+            return sBeforeAt[at] - 1;
+        }
+        at = (at + 1) & (INTERP_HASH - 1);
+    }
+    return -1;
+}
 static InterpObject sAfter[INTERP_MAX_OBJECTS];  // the stepped transforms the draw displaced
 static s32 sBeforeCount, sAfterCount;
 static ObjectTransform sCamBefore[8], sCamAfter[8];
@@ -67,9 +87,18 @@ void frame_interp_before_step(void) {
     s32 i;
 
     sBeforeCount = (gObjectCount < INTERP_MAX_OBJECTS) ? gObjectCount : INTERP_MAX_OBJECTS;
+    for (i = 0; i < INTERP_HASH; i++) {
+        sBeforeAt[i] = 0;
+    }
     for (i = 0; i < sBeforeCount; i++) {
+        u32 at = interp_hash(gObjPtrList[i]);
+
         sBefore[i].obj = gObjPtrList[i];
         sBefore[i].trans = gObjPtrList[i]->trans;
+        while (sBeforeAt[at] != 0) {
+            at = (at + 1) & (INTERP_HASH - 1);
+        }
+        sBeforeAt[at] = (u16) (i + 1);
     }
     for (i = 0; i < 8; i++) {
         sCamBefore[i] = gCameras[i].trans;
@@ -118,7 +147,7 @@ static s32 interp_transform(ObjectTransform *now, const ObjectTransform *before,
 
 /** Call before drawing the scene: moves everything to where this frame shows it. */
 void frame_interp_draw_begin(void) {
-    s32 i, from = 0;
+    s32 i;
 
     sDisplaced = FALSE;
     sAfterCount = 0;
@@ -130,12 +159,10 @@ void frame_interp_draw_begin(void) {
         Object *obj = gObjPtrList[i];
         s32 j;
 
-        // Survivors keep their order, so the match is at or after the last one.
-        for (j = from; j < sBeforeCount && sBefore[j].obj != obj; j++) {}
-        if (j == sBeforeCount) {
+        j = interp_find(obj);
+        if (j < 0) {
             continue; // spawned by this step: it has no earlier position
         }
-        from = j + 1;
         sAfter[sAfterCount].obj = obj;
         sAfter[sAfterCount].trans = obj->trans;
         if (interp_transform(&obj->trans, &sBefore[j].trans, sAlpha)) {
