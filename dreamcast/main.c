@@ -46,8 +46,6 @@ static struct {
     u64 last, wait, waitFrame, begin, dl, end;
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
     u32 slowBatches;
-    u32 stripVerts; // vertices the fast path wrote; three per sent triangle without strips
-    u32 stripPlans; // strip plans (re)built
     u32 trStats[10]; // see gfx_tr_stats
     u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
     u32 workMax, over16, over14; // SH4 work per frame: the worst, and frames above 16.7 and 14 ms
@@ -127,7 +125,6 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "workmax=%lu over16=%lu over14=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
                "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
-               "stripverts=%lu stripplans=%lu | "
                "trbatches 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu "
                "trroom 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu\n",
                (unsigned long) period, (unsigned long) wait,
@@ -162,7 +159,6 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
                (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
                (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n),
-               (unsigned long) (sProf.stripVerts / n), (unsigned long) (sProf.stripPlans / n),
                (unsigned long) (sProf.trStats[0] / n), (unsigned long) (sProf.trStats[1] / n),
                (unsigned long) (sProf.trStats[2] / n), (unsigned long) (sProf.trStats[3] / n),
                (unsigned long) (sProf.trStats[4] / n), (unsigned long) (sProf.trStats[5] / n),
@@ -1287,138 +1283,6 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Strip plans
-//
-// A batch's triangles carry their own texture coordinates per corner, so two
-// triangles can share strip vertices only where both the vertex index and the
-// coordinates agree at the shared corners. Finding such runs is a search, so it
-// is done once per triangle array and remembered: the order to draw the
-// triangles in, which corner of each goes out first, second and last, and
-// whether a triangle continues the run of the one before it.
-//
-// Triangle arrays are mostly static model data, but the game also builds some
-// afresh every frame in reused buffers, so a plan can be older than the array
-// it is used on. That is harmless: the order and corner numbers of a plan are
-// valid for any array of its size, and a link is only followed after checking
-// that the two triangles really do share those corners now (see blast_render).
-// Hashing the array to detect a change cost more than strips save.
-// ---------------------------------------------------------------------------
-#define STRIP_LINK 0x40 // in corners[]: the first two corners are the previous triangle's last two
-#define STRIP_PLANS 4096 // a level has a few thousand batches; a plan thrown out is a search redone
-
-typedef struct {
-    const Triangle *tris;
-    u8 count;
-    u8 order[GFX_BLAST_MAX_TRIS];   // triangle index, in drawing order
-    u8 corners[GFX_BLAST_MAX_TRIS]; // corner numbers c0 | c1 << 2 | c2 << 4, plus STRIP_LINK
-} BlastStripPlan;
-
-static BlastStripPlan sStripPlans[STRIP_PLANS];
-
-static inline s32 strip_corner_same(const Triangle *a, s32 ca, const Triangle *b, s32 cb) {
-    return a->verticesArray[1 + ca] == b->verticesArray[1 + cb] && (&a->uv0)[ca].texCoords == (&b->uv0)[cb].texCoords;
-}
-
-/** The corner of `t` equal to corner `c` of `from`, or -1. */
-static s32 strip_find_corner(const Triangle *t, const Triangle *from, s32 c) {
-    s32 i;
-
-    for (i = 0; i < 3; i++) {
-        if (strip_corner_same(t, i, from, c)) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-/**
- * Greedy runs: start at the first unplanned triangle, try each of its six corner
- * orders, follow whichever reaches furthest, repeat. With at most 16 triangles
- * the search is small, and it runs once per array.
- */
-static void strip_plan_build(const Triangle *tris, s32 count, BlastStripPlan *plan) {
-    static const u8 perms[6][3] = { { 0, 1, 2 }, { 1, 2, 0 }, { 2, 0, 1 }, { 0, 2, 1 }, { 2, 1, 0 }, { 1, 0, 2 } };
-    u32 used = 0;
-    s32 planned = 0;
-
-    while (planned < count) {
-        u8 bestOrder[GFX_BLAST_MAX_TRIS], bestCorners[GFX_BLAST_MAX_TRIS];
-        s32 bestLen = 0;
-        s32 start = 0;
-        s32 p;
-
-        while (used & (1u << start)) {
-            start++;
-        }
-        for (p = 0; p < 6; p++) {
-            u8 order[GFX_BLAST_MAX_TRIS], corners[GFX_BLAST_MAX_TRIS];
-            u32 taken = used | (1u << start);
-            s32 len = 1;
-            s32 last = start, lastB = perms[p][1], lastC = perms[p][2];
-
-            order[0] = (u8) start;
-            corners[0] = (u8) (perms[p][0] | (perms[p][1] << 2) | (perms[p][2] << 4));
-            for (;;) {
-                s32 next = -1, nb = 0, nc = 0, t;
-
-                for (t = 0; t < count; t++) {
-                    if (!(taken & (1u << t))) {
-                        nb = strip_find_corner(&tris[t], &tris[last], lastB);
-                        nc = strip_find_corner(&tris[t], &tris[last], lastC);
-                        if (nb >= 0 && nc >= 0 && nb != nc) {
-                            next = t;
-                            break;
-                        }
-                    }
-                }
-                if (next < 0) {
-                    break;
-                }
-                taken |= 1u << next;
-                order[len] = (u8) next;
-                corners[len] = (u8) (nb | (nc << 2) | ((3 - nb - nc) << 4) | STRIP_LINK);
-                len++;
-                last = next;
-                lastB = nc;
-                lastC = 3 - nb - nc;
-            }
-            if (len > bestLen) {
-                s32 j;
-
-                bestLen = len;
-                for (j = 0; j < len; j++) {
-                    bestOrder[j] = order[j];
-                    bestCorners[j] = corners[j];
-                }
-            }
-        }
-        {
-            s32 j;
-
-            for (j = 0; j < bestLen; j++) {
-                plan->order[planned] = bestOrder[j];
-                plan->corners[planned] = bestCorners[j];
-                used |= 1u << bestOrder[j];
-                planned++;
-            }
-        }
-    }
-}
-
-static const BlastStripPlan *strip_plan_for(const Triangle *tris, s32 count) {
-    u32 at = (((u32) tris >> 4) ^ ((u32) tris >> 13)) & (STRIP_PLANS - 1);
-    BlastStripPlan *plan = &sStripPlans[at];
-
-    if (plan->tris != tris || plan->count != count) {
-        PROF_ADD(stripPlans, 1);
-        strip_plan_build(tris, count, plan);
-        plan->tris = tris;
-        plan->count = (u8) count;
-    }
-    return plan;
-}
-
 static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
                          const Triangle *tris, s32 numTris, s32 texEnabled) {
     f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
@@ -1553,111 +1417,53 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
     }
 
-    {
-        // Writing a vertex to the PVR costs more than computing it, so adjacent
-        // triangles go out as strips: after the first triangle of a run, each
-        // further one is a single vertex. The order and the links come from a
-        // plan made once per triangle array (strip_plan_for); which triangles
-        // survive culling is only known now, so a culled or clipped triangle
-        // simply ends the run it was in.
-        const BlastStripPlan *plan = strip_plan_for(tris, numTris);
-        u8 state[GFX_BLAST_MAX_TRIS]; // 0 not drawn, 1 drawn as is, 2 through the near clipper
-        s32 chained = FALSE;
-        s32 k;
+    for (i = 0; i < numTris; i++) {
+        const Triangle *t = &tris[i];
+        s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
 
-        for (i = 0; i < numTris; i++) {
-            const Triangle *t = &tris[i];
-            s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
-
-            state[i] = 0;
-            if (i0 >= total || i1 >= total || i2 >= total) {
-                continue;
-            }
-            if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
-                state[i] = 2;
-                continue;
-            }
-            if (!(t->flags & BACKFACE_DRAW)) {
-                f32 area = ((sx[i1] - sx[i0]) * (sy[i2] - sy[i0])) - ((sx[i2] - sx[i0]) * (sy[i1] - sy[i0]));
-
-                if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
-                    PROF_ADD(culled, 1);
-                    continue;
-                }
-            }
-            state[i] = 1;
-        }
-
-        for (k = 0; k < numTris; k++) {
-            const Triangle *t = &tris[plan->order[k]];
-            u32 corners = plan->corners[k];
-            s32 c0 = corners & 3, c1 = (corners >> 2) & 3, c2 = (corners >> 4) & 3;
-            s32 kind = state[plan->order[k]];
-            u32 lastFlag;
-
-            if (kind != 1) {
-                chained = FALSE;
-                if (kind == 2) {
-                    BlastClipVert cv[3];
-                    s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
-
-                    cv[0].c = cp[i0];
-                    cv[0].u = t->uv0.u * uMul;
-                    cv[0].v = t->uv0.v * vMul;
-                    cv[0].argb = argb[i0];
-                    cv[1].c = cp[i1];
-                    cv[1].u = t->uv1.u * uMul;
-                    cv[1].v = t->uv1.v * vMul;
-                    cv[1].argb = argb[i1];
-                    cv[2].c = cp[i2];
-                    cv[2].u = t->uv2.u * uMul;
-                    cv[2].v = t->uv2.v * vMul;
-                    cv[2].argb = argb[i2];
-                    PROF_ADD(clipped, 1);
-#if DKR_GFX_PROFILE_SKIP != 1
-                    blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
-#endif
-                }
-                continue;
-            }
-            PROF_ADD(sent, 1);
-            PROF_ADD(sentFrame, 1);
-#if DKR_GFX_PROFILE_SKIP == 1
+        if (i0 >= total || i1 >= total || i2 >= total) {
             continue;
-#endif
-            // The run stays open only if the next planned triangle continues it
-            // and is itself drawn as is.
-            lastFlag = PVR_CMD_VERTEX_EOL;
-            if (k + 1 < numTris && (plan->corners[k + 1] & STRIP_LINK) && state[plan->order[k + 1]] == 1) {
-                // The plan may predate the array's contents, so trust the link
-                // only if the next triangle's first two corners are this one's
-                // last two, vertex and texture coordinate alike.
-                const Triangle *n = &tris[plan->order[k + 1]];
-                u32 nc = plan->corners[k + 1];
-
-                if (strip_corner_same(n, nc & 3, t, c1) && strip_corner_same(n, (nc >> 2) & 3, t, c2)) {
-                    lastFlag = PVR_CMD_VERTEX;
-                }
-            }
-            if (!chained) {
-                s32 v0 = t->verticesArray[1 + c0], v1 = t->verticesArray[1 + c1];
-
-                PROF_ADD(stripVerts, 2);
-                blast_emit(sx[v0], sy[v0], iw[v0], (&t->uv0)[c0].u * uMul, (&t->uv0)[c0].v * vMul, argb[v0],
-                           PVR_CMD_VERTEX);
-                blast_emit(sx[v1], sy[v1], iw[v1], (&t->uv0)[c1].u * uMul, (&t->uv0)[c1].v * vMul, argb[v1],
-                           PVR_CMD_VERTEX);
-            }
-            {
-                s32 v2 = t->verticesArray[1 + c2];
-
-                PROF_ADD(stripVerts, 1);
-                blast_emit(sx[v2], sy[v2], iw[v2], (&t->uv0)[c2].u * uMul, (&t->uv0)[c2].v * vMul, argb[v2],
-                           lastFlag);
-            }
-            // The next triangle continues this run only if the run was left open.
-            chained = lastFlag == PVR_CMD_VERTEX;
         }
+        if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
+            BlastClipVert cv[3];
+
+            cv[0].c = cp[i0];
+            cv[0].u = t->uv0.u * uMul;
+            cv[0].v = t->uv0.v * vMul;
+            cv[0].argb = argb[i0];
+            cv[1].c = cp[i1];
+            cv[1].u = t->uv1.u * uMul;
+            cv[1].v = t->uv1.v * vMul;
+            cv[1].argb = argb[i1];
+            cv[2].c = cp[i2];
+            cv[2].u = t->uv2.u * uMul;
+            cv[2].v = t->uv2.v * vMul;
+            cv[2].argb = argb[i2];
+            PROF_ADD(clipped, 1);
+#if DKR_GFX_PROFILE_SKIP != 1
+            blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
+#endif
+            continue;
+        }
+        if (!(t->flags & BACKFACE_DRAW)) {
+            f32 area = ((sx[i1] - sx[i0]) * (sy[i2] - sy[i0])) -
+                       ((sx[i2] - sx[i0]) * (sy[i1] - sy[i0]));
+            if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                PROF_ADD(culled, 1);
+                continue;
+            }
+        }
+        PROF_ADD(sent, 1);
+        PROF_ADD(sentFrame, 1);
+#if DKR_GFX_PROFILE_SKIP == 1
+        continue;
+#endif
+        blast_emit(sx[i0], sy[i0], iw[i0], t->uv0.u * uMul, t->uv0.v * vMul, argb[i0],
+                   PVR_CMD_VERTEX);
+        blast_emit(sx[i1], sy[i1], iw[i1], t->uv1.u * uMul, t->uv1.v * vMul, argb[i1],
+                   PVR_CMD_VERTEX);
+        blast_emit(sx[i2], sy[i2], iw[i2], t->uv2.u * uMul, t->uv2.v * vMul, argb[i2],
+                   PVR_CMD_VERTEX_EOL);
     }
     if (sBlastRecord) {
         gfx_blast_end(sBlastRecord);
