@@ -663,6 +663,13 @@ void level_load(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicl
     video_delta_reset();
     func_8007AB24(gCurrentLevelHeader->unk4[numberOfPlayers]);
     stubbed_printf("level_load body end\n");
+#ifdef TARGET_PC
+    {
+        // The time a load took is not game time; see pc_retrace_reset.
+        extern void pc_retrace_reset(void);
+        pc_retrace_reset();
+    }
+#endif
 }
 
 /**

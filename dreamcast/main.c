@@ -178,6 +178,17 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
 #define PROF_LAP(field) ((void) 0)
 #endif
 
+static s32 sRetraceReset;
+
+/**
+ * Makes the next frame start the pacer's clock afresh. Every scene change calls
+ * this: the time a load took is not game time, and counting it would have the
+ * game pay it back by running the first frames of the new scene too fast.
+ */
+void pc_retrace_reset(void) {
+    sRetraceReset = TRUE;
+}
+
 s32 pc_retrace_wait(void) {
     static u64 sLastNs = 0;
     u64 targetNs;
@@ -186,7 +197,8 @@ s32 pc_retrace_wait(void) {
 
     nowNs = pc_uptime_ns();
 
-    if (sLastNs == 0) {
+    if (sLastNs == 0 || sRetraceReset) {
+        sRetraceReset = FALSE;
         sLastNs = nowNs;
         return PC_LOGIC_UPDATE_RATE;
     }
@@ -214,11 +226,11 @@ s32 pc_retrace_wait(void) {
         periods = PC_LOGIC_UPDATE_RATE;
     }
     if (periods > PC_MAX_UPDATE_RATE) {
-        // Far more time went by than a frame can account for: a level load, or a
-        // paused debugger. That time is not the game's. Start counting again from
-        // now; advancing by the cap alone would leave the rest owed, and every
-        // following frame would run at the cap until the whole load was repaid,
-        // which plays the first moments of a race several times too fast.
+        // Far more time went by than a frame can account for, outside a scene
+        // change: a disc read in a menu, or a paused debugger. That time is not
+        // the game's either. Start counting again from now; advancing by the cap
+        // alone would leave the rest owed, and every following frame would run
+        // at the cap until it was repaid.
         sLastNs = nowNs;
         return PC_LOGIC_UPDATE_RATE;
     }
