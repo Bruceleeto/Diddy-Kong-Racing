@@ -2526,6 +2526,9 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
 
     renderFlags = (RENDER_FOG_ACTIVE | RENDER_Z_COMPARE);
 
+#if defined(DKR_SKIP_PARTICLES) && DKR_SKIP_PARTICLES
+    return; // measurement builds only: what smoke, dust and sparks cost
+#endif
     // Never true
     if ((particle->descFlags & flags) && D_800E2CDC < 512) {
         return;
