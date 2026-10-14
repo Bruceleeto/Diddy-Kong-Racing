@@ -40,6 +40,11 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - **Optional FSAA** (`FSAA=1`): renders twice as wide and filters down. With
   60 fps it holds 58.9–59.5 fps in races and 56.8 in the character demo, and
   leaves about 0.55 MB of video memory free; without FSAA it is 1.5 MB.
+  With FSAA, translucent particles (smoke, dust) are thinned to every other
+  one, each drawn with the coverage of two, and sprites that fill much of the
+  screen fade out (`FSAA_PARTICLE_THIN`, `FSAA_PARTICLE_NEAR`). In a 5-minute
+  attract run that cut late frames from 417 to 306 over the same seven scenes;
+  without FSAA there are 118.
 - Measurement tools: a frame profile (`GFX_PROFILE=1`), per-handler timers
   (`=2`) and a sampling profiler (`=3`, writes `build/dc/prof_samples.bin`);
   `AUTO_EXIT_SECONDS`, `DEMO_LEVEL`, `SKIP_WATER`, `SKIP_PARTICLES`, `TEX_TRACE`; and a debug view
