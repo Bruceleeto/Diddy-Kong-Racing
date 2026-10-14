@@ -15,6 +15,9 @@ extern u64 pc_uptime_ns(void);
 #include "scene_gate.h"
 
 #define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
+#ifndef DKR_TEX_TRACE
+#define DKR_TEX_TRACE 0 // log why textures are decoded instead of prebuilt
+#endif
 static u32 sTexDecodes, sTexPrebuiltHits; // what texture lookups did, for the profile
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
@@ -509,7 +512,7 @@ static s32 sTexStateDirty;
 // the display list will name. texture_lookup then finds them without decoding
 // anything; decoding stays only for what the pack does not cover.
 // ---------------------------------------------------------------------------
-#define PREBUILT_MAX 1024
+#define PREBUILT_MAX 2048 // texture frames resident at once; a race level loads about 950
 static struct {
     u32 timg;   // the frame's texels in RAM: the texture header plus one
     u32 handle;
@@ -602,7 +605,11 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
     }
     index = (id & 0x8000) ? sPackCount2d + (u32) (id & 0x7FFF) : (u32) id;
     offset = sPackIndex[index];
-    if (offset == 0 || frames <= 0 || frames > 16) {
+    if (offset == 0 || frames <= 0) {
+#if DKR_TEX_TRACE
+        printf("TEX LOAD id=%04lx frames=%ld at %08lx: %s\n", (unsigned long) id, (long) frames,
+               (unsigned long) (frame + 1), offset == 0 ? "not in the pack" : "no frames");
+#endif
         return;
     }
     // A texture's record, frame table and frames lie together in the pack, and
@@ -629,7 +636,12 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
     }
     record = (u16 *) chunk;
     table = (u32 *) (chunk + 8);
-    if (record[2] != (u16) frames || record[0] != frame->width || record[1] != frame->height) {
+    if (bytes < 8u + 8u * (u32) frames || record[2] != (u16) frames || record[0] != frame->width ||
+        record[1] != frame->height) {
+#if DKR_TEX_TRACE
+        printf("TEX LOAD id=%04lx at %08lx: pack %ux%u x%u, asset %ux%u x%ld\n", (unsigned long) id,
+               (unsigned long) (frame + 1), record[0], record[1], record[2], frame->width, frame->height, (long) frames);
+#endif
         free(chunk);
         return; // not the asset the pack was built from
     }
@@ -1035,6 +1047,24 @@ static u32 texture_lookup(void) {
         }
     }
     sTexDecodes++;
+#if DKR_TEX_TRACE
+    {
+        // Why this texture is not prebuilt: one line per texture.
+        static u32 sTraced[256];
+        static s32 sTracedCount;
+        u32 key = sTexAddr ^ ((u32) tlut << 3) ^ ((u32) sTileWidth << 20) ^ ((u32) sTileHeight << 12);
+        s32 k, p = prebuilt_find(sTexAddr);
+
+        for (k = 0; k < sTracedCount && sTraced[k] != key; k++) {}
+        if (k == sTracedCount && sTracedCount < 256) {
+            sTraced[sTracedCount++] = key;
+            printf("TEX DECODE timg=%08lx tlut=%08lx fmt=%d siz=%d tile=%dx%d swapped=%d prebuilt=%s%dx%d\n",
+                   (unsigned long) sTexAddr, (unsigned long) tlut, sTileFmt, sTileSiz, sTileWidth, sTileHeight,
+                   (int) sTexSwapped, p >= 0 ? "yes " : "no ", p >= 0 ? sPrebuilt[p].width : 0,
+                   p >= 0 ? sPrebuilt[p].height : 0);
+        }
+    }
+#endif
 
     {
         const u8 *texels = (const u8 *) sTexAddr;
