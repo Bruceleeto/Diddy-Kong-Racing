@@ -7,19 +7,21 @@
 
 tldr for dreamcast
 
-`put baserom.z64 in baseroms folder`
+Put your Diddy Kong Racing US 1.0 ROM (`.z64`) in `baseroms/`, source your
+KallistiOS `environ.sh`, then run:
 
-`make setup`
+`dreamcast/build.sh` (add `--cdi` for a disc image)
 
-`make extract`
-
-`make build_assets`
-
-`make -f Makefile.dc -j8`
+It checks what it needs first: a KallistiOS toolchain, KOS's `pvrtex` utility
+(`make -C $KOS_BASE/utils/pvrtex`), the sh4zam addon, Python 3.10 or newer, and
+`mkdcdisc` for `--cdi`. It then initialises the submodules and runs
+`make setup`, `make extract`, `make build_assets` and `make -f Makefile.dc`.
+Everything the port adds (PVR textures, scene bundles, AICAflow sound and
+music) is generated from your ROM during the build; none of it is in the
+repository.
 
 Dreamcast audio uses the pinned [AICAflow runtime](dreamcast/AICAFLOW.md)
-submodule. Clone with `--recurse-submodules`, or initialise submodules before
-building.
+submodule.
 
 
 for n64:

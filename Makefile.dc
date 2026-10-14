@@ -430,6 +430,11 @@ $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a: \
 	$(AICAFLOW_ROOT)/driver/format/src/codec.c $(AICAFLOW_ROOT)/driver/sh4/Makefile
 	$(MAKE) -C $(dir $@)
 
+# AICAflow pins AICAforge with update = none, so a recursive clone leaves it
+# out; fetch it the way AICAflow's own Makefile does.
+$(AICAFORGE_ROOT)/Makefile:
+	$(MAKE) -C $(AICAFLOW_ROOT) authoring-dependencies
+
 $(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR): \
 	$(wildcard $(AICAFORGE_ROOT)/src/*.[ch] $(AICAFLOW_ROOT)/driver/format/include/aicaflow/*.h) \
 	$(AICAFLOW_ROOT)/driver/format/src/codec.c $(AICAFORGE_ROOT)/Makefile

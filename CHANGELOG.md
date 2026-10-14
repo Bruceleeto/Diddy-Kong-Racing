@@ -139,5 +139,11 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 
 ## Build
 
+- `dreamcast/build.sh` builds the port from a clean clone and your ROM, after
+  checking the toolchain, `pvrtex`, sh4zam and Python. A fresh clone built with
+  it produces the same textures, scene bundles and AICAflow files, byte for
+  byte, as the development tree.
+- `Makefile.dc` fetches AICAforge, which AICAflow pins with `update = none`,
+  so a recursive clone no longer stops at the missing sound tools.
 - The disc build starts its audio folder afresh, so files from older builds do
   not stay on the disc.
