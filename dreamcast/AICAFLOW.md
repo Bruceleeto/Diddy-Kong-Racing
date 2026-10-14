@@ -48,10 +48,12 @@ The resulting ELF uses `/cd`; run a normal build to return to `/pc`.
 
 ## Generated audio
 
-`afx_n64` imports CSeq/ALBank music directly. `afx_bank --merge` combines
-encoded samples into one shared `music.afb`; each song has a bank-bound AFX
-and AFC/AFV sidecars. Source IDs 2..65 are the 64 playable tracks; slot 1 is
-silent. Normal game playback needs AFB/AFX; AFC is optional seeking data.
+`afx_n64` imports CSeq/ALBank music directly: each song gets its own AFB, a
+bank-bound AFX and AFC/AFV sidecars in `music_raw/`. Source IDs 2..65 are the
+64 playable tracks; slot 1 is silent. The game loads one song at a time.
+`afx_bank --merge` combines the `MUSIC_JINGLES` listed in `Makefile.dc` into
+the always-resident `jingles.afb`. It also builds the shared `music.afb` used
+by the bonus music player; the game does not load that bank.
 
 The SFX map is [`aicaflow_tools/dkr.afsfx`](aicaflow_tools/dkr.afsfx).
 It contains raw ALInstrument chain roots, grouped into core, vehicle and local
@@ -75,43 +77,66 @@ Example generated bank file sizes:
 
 | Bank | Bytes |
 | --- | ---: |
-| `music.afb` | 1,060,176 |
 | `core.afb` | 452,976 |
+| `jingles.afb` | 323,856 |
 | `vehicle.afb` | 174,672 |
+| largest song (`sequence_20.afb`) | 289,968 |
+| largest scene pack (`scenes/61.afb`) | 477,488 |
 
 AICA holds bank payloads and separate flow images alongside firmware, DSP
 memory and control state. File size alone is not the live allocation cost.
 
+## Scene budget
+
+`build_aicaflow_budget.py` plans AICA RAM at build time and writes
+`music_manifest.h` and `budget.json`. Core SFX, jingles and the DSP ring are
+permanent. Each scene is charged its vehicle pack, its scene pack and the
+largest song, so a music change inside a level also fits. The build fails when
+any scene exceeds the asset arena. To make room, move sounds out of a pack in
+`dkr.afsfx` or shorten `MUSIC_JINGLES`.
+
 ## Residency and scene changes
 
-Music and core SFX stay resident. Vehicle stays loaded while needed. Local
-scene packs are preloaded when they leave 64 KiB headroom for fallback;
-otherwise sounds load on demand. This threshold is not an allocator reservation.
-The map contains 54 core roots, 24 vehicle roots and 49 local packs for 65 scenes.
+Core SFX and jingles load once and stay resident. `level_load` then loads the
+vehicle pack, the scene pack and the level's song, in that order, and returns
+only when all of them are resident. The previous level's packs and idle song
+are released first, so the level region is one free block. Music that keeps
+playing across a scene change (menus) stays loaded; if it splits the free
+space, the level region is emptied and the song reloaded and restarted.
 
-Music and SFX use separate loader threads. Reads and DMA run outside the audio
-mutex; completed banks are published under it. Sixteen fallback slots cache
-sounds. Active instances and pending requests prevent eviction. A full queue
-returns BUSY; scene generations discard loads completed for ended scenes.
+Planned loads run on the game thread with the audio mutex held, after waiting
+for the fallback worker to go idle. A music change outside a level load stops
+the old song, releases it and loads the new one before returning.
+
+Race voices are one pack per racer character (`voice` lines in `dkr.afsfx`),
+stored as ADPCM (`afx_n64 --sfx-adpcm`) at half PCM8's size. They are not
+charged to a scene. Once the racers exist, `dkr_afx_voices_prepare`
+loads the packs of the characters in the race, players first, while each fits
+in what the level and its song left and 64 KB stays free. A pack that does not
+fit is skipped and its clips fall back to loading on demand. A later song or
+unplanned sound that needs the space takes it from the least important pack
+that is not playing; a scene change releases them all.
+
+Sounds missing from every pack still load on demand through sixteen fallback
+slots on the `sfx-loader` thread. Active instances and pending requests prevent
+eviction; scene generations discard loads completed for ended scenes. Build
+with `AICAFLOW_BENCHMARK=1` to log each such sound as `unplanned sound <id> in
+level <n>`, then add it to a pack so it is resident when needed.
 
 Scene teardown cancels pending/delayed sounds, stops SFX and waits for recycling
-before releasing banks. Under memory pressure, idle fallback banks and unused
-title-demo prefetch are released. Replacement music can reclaim its stopped
-predecessor. File/format failures remain errors.
-
-Race jingles stay prepared. The title menu can prefetch one next-demo flow.
-Loading waits are excluded from attract-demo timing. `/pc` asset reads use
-transactions of at most 32 KiB.
+before releasing banks. File/format failures remain errors. `/pc` asset reads
+use transactions of at most 32 KiB.
 
 ## Playback and DSP
 
 DKR constructs one stereo room program at runtime with
 `afx_dsp_program_room()`. Reverb settings gate its returns.
 
-PARK releases a bound SFX's stream-work reservation while retaining voices,
-samples and references. Bound SFX rejects REBUILD. Rebuildable flows retain
-their reservation. The per-tick register-write limit is 171; voice priorities,
-IPC limits and DKR's one-player eight-SFX limit also constrain admission.
+The driver does not refuse an instance because its register writes could
+coincide with another's. The ARM7 runs every due event, with key-on as the
+last write, and reports how many timer ticks late it was. The benchmark line
+prints that as `lateness`. Voice priorities, IPC limits and DKR's one-player
+eight-SFX limit constrain admission. Bound SFX rejects REBUILD.
 
 END/STOP mutes and rapidly releases voices. Musical KEYOFF uses the authored
 release envelope. Instance generations protect completed/recycled slots from

@@ -46,6 +46,8 @@
 #include <PR/gu.h>
 #include <PR/os_cont.h>
 #include <PR/os_time.h>
+#include "../dreamcast/prof.h"
+#include "../dreamcast/scene_gate.h"
 
 /************ .rodata ************/
 
@@ -395,6 +397,9 @@ void load_next_ingame_level(s32 numPlayers, s32 trackID, Vehicle vehicle) {
  * Used when ingame.
  */
 void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId) {
+#ifdef TARGET_PC
+    pc_scene_loading();
+#endif
     alloc_displaylist_heap(numberOfPlayers);
     mempool_free_timer(0);
     cam_init();
@@ -406,6 +411,9 @@ void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle v
     osSetTime(0);
     mempool_free_timer(2);
     rumble_init(TRUE);
+#ifdef TARGET_PC
+    pc_scene_ready();
+#endif
 }
 
 /**
@@ -436,6 +444,43 @@ void unload_level_game(void) {
  * The main behaviour function involving all of the ingame stuff.
  * Involves the updating of all objects and setting up the render scene.
  */
+#ifdef TARGET_PC
+extern s32 frame_interp_step(s32 fields);
+extern void frame_interp_before_step(void);
+extern void frame_interp_after_step(void);
+extern void frame_interp_skipped(void);
+extern void frame_interp_draw_begin(void);
+extern void frame_interp_draw_end(void);
+
+/**
+ * Steps the objects. The logic keeps the two-field step its physics is tuned
+ * for; on a faster display every other frame draws between two steps instead.
+ * See dreamcast/frame_interp.c.
+ */
+static void game_logic_step(s32 updateRate) {
+    s32 step = frame_interp_step(updateRate);
+
+    if (step == 0) {
+        frame_interp_skipped();
+        return;
+    }
+    frame_interp_before_step();
+    PC_PROF(PC_PROF_LOGIC, obj_update(step));
+    frame_interp_after_step();
+}
+
+static void game_scene_draw(s32 updateRate) {
+    frame_interp_draw_begin();
+    PC_PROF(PC_PROF_SCENE,
+            render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate));
+    frame_interp_draw_end();
+}
+#else
+#define game_logic_step(updateRate) obj_update(updateRate)
+#define game_scene_draw(updateRate) \
+    render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate)
+#endif
+
 void mode_game(s32 updateRate) {
     s32 buttonPressedInputs, buttonHeldInputs, i, loadContext, sp3C;
 
@@ -456,7 +501,7 @@ void mode_game(s32 updateRate) {
 #endif
     // Update all objects
     if (!gIsPaused) {
-        obj_update(updateRate);
+        game_logic_step(updateRate);
         if (check_if_showing_cutscene_camera() == 0 || get_race_countdown()) {
             if (buttonPressedInputs & START_BUTTON && level_properties_get() == 0 && gDrumstickSceneLoadTimer == 0 &&
                 gGameMode == GAMEMODE_INGAME && gPostRaceViewPort == FALSE && gLevelLoadTimer == 0 &&
@@ -478,7 +523,7 @@ void mode_game(s32 updateRate) {
     }
     gParticlePtrList_flush();
     ainode_update();
-    render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+    game_scene_draw(updateRate);
     if (gGameMode == GAMEMODE_INGAME) {
         // Ignore the user's L/R/Z buttons.
         buttonHeldInputs &= ~(L_TRIG | R_TRIG | Z_TRIG);
@@ -889,6 +934,9 @@ Vehicle get_level_default_vehicle(void) {
  * Used for menus.
  */
 void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId, s32 cutsceneId) {
+#ifdef TARGET_PC
+    pc_scene_loading();
+#endif
     mempool_free_timer(0);
     cam_init();
     load_game_text_table();
@@ -900,6 +948,9 @@ void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle v
     ainode_update();
     osSetTime(0);
     mempool_free_timer(2);
+#ifdef TARGET_PC
+    pc_scene_ready();
+#endif
 }
 
 /**
@@ -926,10 +977,10 @@ void unload_level_menu(void) {
  */
 void update_menu_scene(s32 updateRate) {
     if (bgload_active() == FALSE) {
-        obj_update(updateRate);
+        game_logic_step(updateRate);
         gParticlePtrList_flush();
         ainode_update();
-        render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+        game_scene_draw(updateRate);
         process_onscreen_textbox(updateRate);
         rdp_init(&gCurrDisplayList);
         divider_draw(&gCurrDisplayList);

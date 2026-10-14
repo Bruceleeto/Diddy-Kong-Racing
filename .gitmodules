@@ -13,3 +13,6 @@
 [submodule "third_party/aicaflow"]
 	path = third_party/aicaflow
 	url = git@github.com:dfchil/aicaflow.git
+[submodule "third_party/enDjinn"]
+	path = third_party/enDjinn
+	url = https://github.com/dfchil/enDjinn.git

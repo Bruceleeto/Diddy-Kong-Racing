@@ -19,8 +19,14 @@ void dkr_afx_music_lane_volume(uint8_t lane, uint8_t volume);
 void dkr_afx_music_lane_fade(uint8_t lane, uint8_t fade);
 void dkr_afx_scene_reverb(uint8_t enabled);
 int dkr_afx_sfx_scene_prepare(uint16_t level);
+/* Called by the scene gate (dreamcast/scene_gate.c): hold back new sounds and music. */
+void dkr_afx_scene_hold(int held);
+/* Call after dkr_afx_music_prepare(), while the DKR audio mutex is held. */
+void dkr_afx_voices_prepare(const uint8_t *characters, unsigned count);
 int dkr_afx_sfx_stop_all(void);
 int dkr_afx_sfx_play(uint16_t id, void *owner, uint8_t priority);
+/* Call once after successful play, while holding the game audio mutex. */
+void dkr_afx_sfx_start_controls(void *owner, uint8_t gain, float pitch, uint8_t pan, uint8_t fx);
 void dkr_afx_sfx_stop(void *owner);
 void dkr_afx_sfx_priority(void *owner, uint8_t priority);
 void dkr_afx_sfx_volume(void *owner, uint8_t gain);

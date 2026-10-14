@@ -1,3 +1,4 @@
+#include "dkr_asset_mount.h"
 #include <stdio.h>
 #include <ultra64.h>
 #include <structs.h>
@@ -6,9 +7,15 @@
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
+#include <enDjinn/enj_texture.h>
 
 
 extern u64 pc_uptime_ns(void);
+#include "prof.h"
+#include "scene_gate.h"
+
+#define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
+static u32 sTexDecodes, sTexPrebuiltHits; // what texture lookups did, for the profile
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
 // main_game_loop() forever-loop. Called directly on the host thread.
@@ -18,8 +25,240 @@ extern OSThread *__osRunningThread;
 static OSThread sHostThread;
 
 #define PC_RETRACE_NSEC (1000000000ll / 60)
+#ifndef PC_LOGIC_UPDATE_RATE
 #define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
+#endif
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
+
+// ---------------------------------------------------------------------------
+// Frame profile (GFX_PROFILE=1): where a frame's time goes and how much
+// geometry it submits. GFX_PROFILE_SKIP=1 transforms and culls but sends no
+// vertices; =2 only resolves each batch's state; =3 skips batches that take the
+// emulated path. These draw incomplete frames and exist to split the
+// display-list time by subtraction.
+// ---------------------------------------------------------------------------
+#ifndef DKR_GFX_PROFILE
+#define DKR_GFX_PROFILE 0
+#endif
+#ifndef DKR_GFX_PROFILE_SKIP
+#define DKR_GFX_PROFILE_SKIP 0
+#endif
+#ifndef DKR_AUTO_EXIT_SECONDS
+#define DKR_AUTO_EXIT_SECONDS 0
+#endif
+#if DKR_GFX_PROFILE
+enum { PROF_FRAMES = 60 };
+static struct {
+    u64 last, wait, waitFrame, begin, dl, end;
+    u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
+    u32 slowBatches;
+    u32 trStats[10]; // see gfx_tr_stats
+    u32 noDepth[4];  // see gfx_nodepth_stats
+    u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
+    u32 workMax; // the longest frame, start to start, less the pacer's sleep
+    u32 missed;  // frames that took more video fields than the target
+    // Why a batch missed the fast path, in triangles.
+    u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
+    u32 whyStateKind[6]; // no scene, texenv blend, alpha test, no depth test, depth offset, scissor
+    u64 pvrRender, pvrRegister;
+    u32 pvrBytes, ptWords, trWords;
+    u64 tBlast, tFallback, tVtx, tPoly, tRect, tMtx;
+    u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
+} sProf;
+#define PROF_ADD(field, n) (sProf.field += (n))
+void pc_prof_add(int part, unsigned long long ns) {
+    sProf.part[part] += ns;
+}
+static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
+// Time of one handler call. A fallback is inside tBlast as well. These read
+// the clock a few hundred times a frame, which costs a millisecond or two, so
+// they need GFX_PROFILE=2; the frame totals stay honest at 1 and 3.
+#if DKR_GFX_PROFILE == 2
+#define PROF_TIME(field, call) \
+    do { \
+        u64 profStart = pc_uptime_ns(); \
+        call; \
+        sProf.field += pc_uptime_ns() - profStart; \
+    } while (0)
+// Splits one function into consecutive parts.
+#define PROF_LAP_START() u64 profLap = pc_uptime_ns()
+#define PROF_LAP(field) \
+    do { \
+        u64 profNow = pc_uptime_ns(); \
+        sProf.field += profNow - profLap; \
+        profLap = profNow; \
+    } while (0)
+#else
+#define PROF_TIME(field, call) call
+#define PROF_LAP_START() ((void) 0)
+#define PROF_LAP(field) ((void) 0)
+#endif
+
+// What the blended batches are: triangles by render mode, combiner, texture
+// kind and where their alpha comes from. Printed with the frame profile.
+#define PROF_BLEND_KINDS 48
+static struct {
+    u32 modeL, cc0, cc1;
+    u8 texKind, vtxAlphaFull, outAlphaFull, fog, primA, envA, used;
+    u32 tris;
+} sProfBlend[PROF_BLEND_KINDS];
+
+static void prof_blend(u32 modeL, u32 cc0, u32 cc1, s32 texKind, s32 vtxAlphaFull, s32 outAlphaFull, s32 fog,
+                       s32 primA, s32 envA, s32 tris) {
+    s32 i;
+
+    for (i = 0; i < PROF_BLEND_KINDS; i++) {
+        if (!sProfBlend[i].used) {
+            sProfBlend[i].modeL = modeL;
+            sProfBlend[i].cc0 = cc0;
+            sProfBlend[i].cc1 = cc1;
+            sProfBlend[i].texKind = (u8) texKind;
+            sProfBlend[i].vtxAlphaFull = (u8) vtxAlphaFull;
+            sProfBlend[i].outAlphaFull = (u8) outAlphaFull;
+            sProfBlend[i].fog = (u8) fog;
+            sProfBlend[i].primA = (u8) primA;
+            sProfBlend[i].envA = (u8) envA;
+            sProfBlend[i].used = 1;
+        }
+        if (sProfBlend[i].modeL == modeL && sProfBlend[i].cc0 == cc0 && sProfBlend[i].cc1 == cc1 &&
+            sProfBlend[i].texKind == texKind && sProfBlend[i].vtxAlphaFull == vtxAlphaFull &&
+            sProfBlend[i].outAlphaFull == outAlphaFull && sProfBlend[i].fog == fog && sProfBlend[i].primA == primA &&
+            sProfBlend[i].envA == envA) {
+            sProfBlend[i].tris += (u32) tris;
+            return;
+        }
+    }
+}
+
+static void prof_blend_print(u32 frames) {
+    s32 n, i;
+
+    for (n = 0; n < 8; n++) {
+        s32 best = -1;
+
+        for (i = 0; i < PROF_BLEND_KINDS; i++) {
+            if (sProfBlend[i].used && sProfBlend[i].tris && (best < 0 || sProfBlend[i].tris > sProfBlend[best].tris)) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        printf("GFX BLEND: tris=%lu modeL=%08lx cc=%08lx/%08lx tex=%d vtxA255=%d outA255=%d fog=%d primA=%d envA=%d\n",
+               (unsigned long) (sProfBlend[best].tris / frames), (unsigned long) sProfBlend[best].modeL,
+               (unsigned long) sProfBlend[best].cc0, (unsigned long) sProfBlend[best].cc1, sProfBlend[best].texKind,
+               sProfBlend[best].vtxAlphaFull, sProfBlend[best].outAlphaFull, sProfBlend[best].fog,
+               sProfBlend[best].primA, sProfBlend[best].envA);
+        sProfBlend[best].tris = 0;
+    }
+    memset(sProfBlend, 0, sizeof(sProfBlend));
+}
+
+static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
+    sProf.begin += t1 - t0;
+    sProf.dl += t2 - t1;
+    sProf.end += t3 - t2;
+    {
+        static u64 sFrameStart;
+        u32 work = sFrameStart ? (u32) ((t3 - sFrameStart - sProf.waitFrame) / 1000u) : 0;
+
+        if (work > sProf.workMax) sProf.workMax = work;
+        sFrameStart = t3;
+        sProf.waitFrame = 0;
+    }
+    if (sProf.sentFrame > sProf.maxSent) sProf.maxSent = sProf.sentFrame;
+    sProf.sentFrame = 0;
+    {
+        pvr_stats_t stats;
+        if (!pvr_get_stats(&stats)) {
+            sProf.pvrRender += stats.rnd_last_time;
+            sProf.pvrRegister += stats.reg_last_time;
+            if (stats.vtx_buffer_used > sProf.pvrBytes) sProf.pvrBytes = (u32) stats.vtx_buffer_used;
+        }
+    }
+    if (++sProf.frames < PROF_FRAMES) return;
+    if (sProf.last) {
+        u32 n = sProf.frames;
+        u32 period = (u32) ((t3 - sProf.last) / 1000u / n), wait = (u32) (sProf.wait / 1000u / n);
+        u32 begin = (u32) (sProf.begin / 1000u / n), dl = (u32) (sProf.dl / 1000u / n);
+        u32 end = (u32) (sProf.end / 1000u / n);
+        printf("GFX PROF: frame=%lu us wait=%lu game=%lu dl=%lu begin=%lu end=%lu | batches=%lu+%lu verts=%lu "
+               "tris=%lu culled=%lu clipped=%lu sent=%lu max=%lu slow=%lu rects=%lu | "
+               "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu | "
+               "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
+               "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
+               "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
+               "workmax=%lu missed=%lu vramfree=%lu texdecodes=%lu texprebuilt=%lu | "
+               "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
+               "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
+               "nodepth toop=%lu afterdepth=%lu afterrecorded=%lu notopaque=%lu | "
+               "trbatches 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu "
+               "trroom 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu\n",
+               (unsigned long) period, (unsigned long) wait,
+               (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
+               (unsigned long) begin, (unsigned long) end,
+               (unsigned long) (sProf.blast / n), (unsigned long) (sProf.fallback / n),
+               (unsigned long) (sProf.verts / n), (unsigned long) (sProf.tris / n),
+               (unsigned long) (sProf.culled / n), (unsigned long) (sProf.clipped / n),
+               (unsigned long) (sProf.sent / n), (unsigned long) sProf.maxSent,
+               (unsigned long) (sProf.slowTris / n), (unsigned long) (sProf.rects / n),
+               (unsigned long) (sProf.pvrRender / 1000u / n), (unsigned long) (sProf.pvrRegister / 1000u / n),
+               (unsigned long) sProf.pvrBytes, (unsigned long) sProf.ptWords,
+               (unsigned long) sProf.trWords,
+               (unsigned long) (sProf.tBlast / 1000u / n), (unsigned long) (sProf.tFallback / 1000u / n),
+               (unsigned long) (sProf.tVtx / 1000u / n), (unsigned long) (sProf.tPoly / 1000u / n),
+               (unsigned long) (sProf.tRect / 1000u / n), (unsigned long) (sProf.tMtx / 1000u / n),
+               (unsigned long) (sProf.tState / 1000u / n), (unsigned long) (sProf.tXform / 1000u / n),
+               (unsigned long) (sProf.tEmit / 1000u / n), (unsigned long) (sProf.tPolyState / 1000u / n),
+               (unsigned long) (sProf.tPolyEmit / 1000u / n), (unsigned long) (sProf.tPolyDraw / 1000u / n),
+               (unsigned long) (sProf.slowBatches / n),
+               (unsigned long) (sProf.whyCombiner / n), (unsigned long) (sProf.whyBillboard / n),
+               (unsigned long) (sProf.whyState / n), (unsigned long) (sProf.whyFull / n),
+               (unsigned long) (sProf.whyAppend / n), (unsigned long) (sProf.whyShared / n),
+               (unsigned long) (sProf.whyLoose / n),
+               (unsigned long) sProf.workMax, (unsigned long) sProf.missed,
+               (unsigned long) pvr_mem_available(),
+               (unsigned long) sTexDecodes, (unsigned long) sTexPrebuiltHits,
+               (unsigned long) (sProf.part[PC_PROF_LOGIC] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_SCENE] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_WAVES] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_SHADOWS] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_VIEWPORT] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_HUD] / 1000u / n),
+               (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
+               (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
+               (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n),
+               (unsigned long) (sProf.noDepth[0] / n), (unsigned long) (sProf.noDepth[1] / n),
+               (unsigned long) (sProf.noDepth[2] / n), (unsigned long) (sProf.noDepth[3] / n),
+               (unsigned long) (sProf.trStats[0] / n), (unsigned long) (sProf.trStats[1] / n),
+               (unsigned long) (sProf.trStats[2] / n), (unsigned long) (sProf.trStats[3] / n),
+               (unsigned long) (sProf.trStats[4] / n), (unsigned long) (sProf.trStats[5] / n),
+               (unsigned long) (sProf.trStats[6] / n), (unsigned long) (sProf.trStats[7] / n),
+               (unsigned long) (sProf.trStats[8] / n), (unsigned long) (sProf.trStats[9] / n));
+    }
+    prof_blend_print(sProf.frames);
+    sTexDecodes = sTexPrebuiltHits = 0;
+    memset(&sProf, 0, sizeof(sProf));
+    sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
+}
+#else
+#define PROF_ADD(field, n) ((void) 0)
+#define PROF_TIME(field, call) call
+#define PROF_LAP_START() ((void) 0)
+#define PROF_LAP(field) ((void) 0)
+#endif
+
+static s32 sRetraceReset;
+
+/**
+ * Makes the next frame start the pacer's clock afresh. The scene gate calls this
+ * when a scene has loaded (dreamcast/scene_gate.c): the time a load took is not
+ * game time, and counting it would have the game pay it back by running the
+ * first frames of the new scene too fast.
+ */
+void pc_retrace_reset(void) {
+    sRetraceReset = TRUE;
+}
 
 s32 pc_retrace_wait(void) {
     static u64 sLastNs = 0;
@@ -29,7 +268,8 @@ s32 pc_retrace_wait(void) {
 
     nowNs = pc_uptime_ns();
 
-    if (sLastNs == 0) {
+    if (sLastNs == 0 || sRetraceReset) {
+        sRetraceReset = FALSE;
         sLastNs = nowNs;
         return PC_LOGIC_UPDATE_RATE;
     }
@@ -42,6 +282,13 @@ s32 pc_retrace_wait(void) {
         req.tv_sec = (targetNs - nowNs) / 1000000000ll;
         req.tv_nsec = (targetNs - nowNs) % 1000000000ll;
         nanosleep(&req, NULL);
+#if DKR_GFX_PROFILE
+        {
+            u64 slept = pc_uptime_ns() - nowNs;
+            sProf.wait += slept;
+            sProf.waitFrame += slept;
+        }
+#endif
         nowNs = targetNs;
     }
 
@@ -50,9 +297,22 @@ s32 pc_retrace_wait(void) {
         periods = PC_LOGIC_UPDATE_RATE;
     }
     if (periods > PC_MAX_UPDATE_RATE) {
-        periods = PC_MAX_UPDATE_RATE;
+        // Far more time went by than a frame can account for, outside a scene
+        // change: a disc read in a menu, or a paused debugger. That time is not
+        // the game's either. Start counting again from now; advancing by the cap
+        // alone would leave the rest owed, and every following frame would run
+        // at the cap until it was repaid.
+        sLastNs = nowNs;
+        return PC_LOGIC_UPDATE_RATE;
     }
 
+#if DKR_GFX_PROFILE
+    // Counted here because only the pacer knows: a frame's own time includes
+    // waiting for the PVR, so comparing it with 16.7 ms says nothing.
+    if (periods > PC_LOGIC_UPDATE_RATE) {
+        sProf.missed++;
+    }
+#endif
     // Advance by whole periods so rounding doesn't accumulate into drift.
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
     return periods;
@@ -64,7 +324,9 @@ s32 pc_retrace_wait(void) {
 
 #define GFX_MAX_VERTS 64    // the RSP's internal vertex array
 #define GFX_MAX_DEPTH 16    // display-list recursion guard
-#define GFX_MAX_TRI_VERTS 8192
+// One G_TRIN is at most 16 triangles, each at most two after the near clip, so
+// a batch never stages more than 96 corners; the memory matters more here.
+#define GFX_MAX_TRI_VERTS 1024
 
 // A vertex in clip space: post-matrix, pre-divide. Kept unprojected because
 // near-plane clipping interpolates here, before the divide by w (a vertex behind
@@ -194,6 +456,7 @@ typedef struct {
     u16 width, height;
     u32 handle;
     u32 lastUsed; // frame number, for eviction when the cache is full
+    u8 prebuilt;  // the handle belongs to the prebuilt table, not to this entry
 } GfxTexture;
 
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
@@ -210,9 +473,204 @@ static u16 sTexHint[GFX_TEX_HINTS];
 static u32 tex_hint_slot(u32 timg, u32 tlut) {
     return ((timg >> 5) ^ (timg >> 15) ^ (tlut >> 5)) & (GFX_TEX_HINTS - 1);
 }
+
+#define GFX_TEX_HINT_PROBES 4
+
+/** Remember cache entry `index` near `slot`: in a free or stale hint if there is one. */
+static void tex_hint_store(u32 slot, s32 index) {
+    static u32 sNext;
+    s32 probe;
+
+    for (probe = 0; probe < GFX_TEX_HINT_PROBES; probe++) {
+        u32 at = (slot + probe) & (GFX_TEX_HINTS - 1);
+        s32 hi = (s32) sTexHint[at] - 1;
+
+        if (hi < 0 || hi >= sTexCacheCount || hi == index ||
+            ((tex_hint_slot(sTexCache[hi].timg, sTexCache[hi].tlut) ^ slot) & (GFX_TEX_HINTS - 1)) != 0) {
+            sTexHint[at] = (u16) (index + 1);
+            return;
+        }
+    }
+    sTexHint[(slot + (sNext++ % GFX_TEX_HINT_PROBES)) & (GFX_TEX_HINTS - 1)] = (u16) (index + 1);
+}
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
+
+static s32 sTexStateDirty;
+
+// ---------------------------------------------------------------------------
+// Prebuilt textures
+//
+// dreamcast/build_pvr_textures.py converts every texture asset offline into
+// build/dc/textures.dtp. When the game loads a texture asset (load_texture,
+// during a scene's load), enDjinn loads its frames from that pack into video
+// memory, keyed by the address their texels have in RAM, which is the address
+// the display list will name. texture_lookup then finds them without decoding
+// anything; decoding stays only for what the pack does not cover.
+// ---------------------------------------------------------------------------
+#define PREBUILT_MAX 1024
+static struct {
+    u32 timg;   // the frame's texels in RAM: the texture header plus one
+    u32 handle;
+    u16 width, height;
+} sPrebuilt[PREBUILT_MAX];
+static s32 sPrebuiltCount;
+static file_t sPackFile = FILEHND_INVALID;
+static u32 *sPackIndex;
+static u32 sPackCount2d, sPackCount3d, sPackSize;
+static s32 sPackTried;
+
+static s32 prebuilt_open(void) {
+    u32 header[4];
+
+    if (sPackTried) {
+        return sPackIndex != NULL;
+    }
+    sPackTried = TRUE;
+    sPackFile = fs_open(DKR_TEXTURE_PACK, O_RDONLY);
+    if (sPackFile == FILEHND_INVALID) {
+        printf("gfx: no %s; textures are decoded as they are drawn\n", DKR_TEXTURE_PACK);
+        return FALSE;
+    }
+    if (fs_read(sPackFile, header, sizeof(header)) != sizeof(header) || header[0] != 0x4B505444u /* DTPK */ ||
+        header[1] != 2) {
+        printf("gfx: %s is not a version 2 texture pack\n", DKR_TEXTURE_PACK);
+        return FALSE;
+    }
+    sPackCount2d = header[2];
+    sPackCount3d = header[3];
+    sPackSize = (u32) fs_total(sPackFile);
+    sPackIndex = malloc((sPackCount2d + sPackCount3d) * sizeof(u32));
+    if (sPackIndex == NULL || fs_read(sPackFile, sPackIndex, (sPackCount2d + sPackCount3d) * sizeof(u32)) !=
+                                  (ssize_t) ((sPackCount2d + sPackCount3d) * sizeof(u32))) {
+        free(sPackIndex);
+        sPackIndex = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/** Drop prebuilt frames whose texels lay in freed memory. */
+static void prebuilt_forget(u32 lo, u32 hi) {
+    s32 i;
+
+    for (i = 0; i < sPrebuiltCount;) {
+        if (sPrebuilt[i].timg >= lo && sPrebuilt[i].timg < hi) {
+            gfx_delete_texture(sPrebuilt[i].handle);
+            sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
+        } else {
+            i++;
+        }
+    }
+}
+
+static s32 prebuilt_find(u32 timg) {
+    s32 i;
+
+    for (i = 0; i < sPrebuiltCount; i++) {
+        if (sPrebuilt[i].timg == timg) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * Called by load_texture once a texture asset is in RAM: puts its prebuilt
+ * frames in video memory. id is the asset ID (bit 15 set for the 3D table),
+ * first the first frame's header; frames follow textureSize bytes apart.
+ */
+// Time and reads spent loading prebuilt textures since the last scene report.
+static u64 sTexLoadNs;
+static u32 sTexLoadReads, sTexLoadCount;
+
+void pc_texture_loaded(void *first, s32 id, s32 frames) {
+    u16 *record;
+    u32 *table;
+    u32 offset, index, start, end, bytes;
+    u8 *chunk;
+    TextureHeader *frame = (TextureHeader *) first;
+    u64 started = timer_ns_gettime64();
+    s32 i;
+
+    if (!prebuilt_open()) {
+        return;
+    }
+    if ((id & 0x8000) ? (u32) (id & 0x7FFF) >= sPackCount3d : (u32) id >= sPackCount2d) {
+        return;
+    }
+    index = (id & 0x8000) ? sPackCount2d + (u32) (id & 0x7FFF) : (u32) id;
+    offset = sPackIndex[index];
+    if (offset == 0 || frames <= 0 || frames > 16) {
+        return;
+    }
+    // A texture's record, frame table and frames lie together in the pack, and
+    // the next texture's record starts where they end (sPackIndex[index + 1],
+    // or the end of the file). Read all of it at once: a seek on disc costs far
+    // more than the bytes.
+    end = 0;
+    for (i = (s32) index + 1; i < (s32) (sPackCount2d + sPackCount3d) && end == 0; i++) {
+        end = sPackIndex[i];
+    }
+    if (end == 0) {
+        end = sPackSize;
+    }
+    start = offset;
+    bytes = end - start;
+    chunk = memalign(32, bytes);
+    if (chunk == NULL) {
+        return;
+    }
+    sTexLoadReads++;
+    if (fs_seek(sPackFile, start, SEEK_SET) < 0 || fs_read(sPackFile, chunk, bytes) != (ssize_t) bytes) {
+        free(chunk);
+        return;
+    }
+    record = (u16 *) chunk;
+    table = (u32 *) (chunk + 8);
+    if (record[2] != (u16) frames || record[0] != frame->width || record[1] != frame->height) {
+        free(chunk);
+        return; // not the asset the pack was built from
+    }
+    for (i = 0; i < frames && sPrebuiltCount < PREBUILT_MAX; i++) {
+        u32 timg = (u32) (frame + 1);
+        u32 at = table[2 * i] - start;
+        enj_texture_info_t info;
+        u32 handle = 0;
+
+        // A whole pvrtex DcTx file, 32-byte aligned within the pack and so
+        // within this chunk; enDjinn reads its header and loads the rest.
+        if (at + table[2 * i + 1] <= bytes && enj_texture_load_blob(chunk + at, &info)) {
+            handle = gfx_adopt_texture(info.ptr, record[0], record[1], info.width, info.height,
+                                       info.pvrformat & 0x7FFFFFFFu, info.flags.mipmapped, record[3]);
+            if (handle == 0) {
+                pvr_mem_free(info.ptr);
+            }
+        }
+        if (handle == 0) {
+            break;
+        }
+        prebuilt_forget(timg, timg + 1); // memory reused for a new asset
+        sPrebuilt[sPrebuiltCount].timg = timg;
+        sPrebuilt[sPrebuiltCount].handle = handle;
+        sPrebuilt[sPrebuiltCount].width = record[0];
+        sPrebuilt[sPrebuiltCount].height = record[1];
+        sPrebuiltCount++;
+        sTexLoadCount++;
+        frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
+    }
+    free(chunk);
+    sTexLoadNs += timer_ns_gettime64() - started;
+}
+
+/** Prints and resets what loading prebuilt textures cost; the scene gate calls it. */
+void pc_texture_load_report(u32 sceneMs) {
+    printf("SCENE LOAD %lu ms: %lu prebuilt textures in %lu ms, %lu reads\n", (unsigned long) sceneMs,
+           (unsigned long) sTexLoadCount, (unsigned long) (sTexLoadNs / 1000000u), (unsigned long) sTexLoadReads);
+    sTexLoadNs = 0;
+    sTexLoadReads = sTexLoadCount = 0;
+}
 
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
     u32 lo = (u32) addr;
@@ -223,12 +681,16 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
         GfxTexture *t = &sTexCache[i];
 
         if ((t->timg >= lo && t->timg < hi) || (t->tlut >= lo && t->tlut < hi)) {
-            gfx_delete_texture(t->handle);
+            if (!t->prebuilt) {
+                gfx_delete_texture(t->handle);
+            }
             sTexCache[i] = sTexCache[--sTexCacheCount];
+            sTexStateDirty = TRUE;
         } else {
             i++;
         }
     }
+    prebuilt_forget(lo, hi);
 }
 
 /**
@@ -313,6 +775,7 @@ static void handle_vertex(u32 w0, u32 w1) {
         sVertexBase = count;
     }
 
+    PROF_ADD(verts, count);
     shz_xmtrx_load_4x4((shz_mat4x4_t*)&sMatrices[sCurMatrix]);
     for (i = 0; i < count && dstIdx + i < GFX_MAX_VERTS; i++) {
         // Billboarded vertices are sprite-space offsets from vertex 0, the
@@ -475,7 +938,7 @@ static void decode_texture(const u8 *src, u8 fmt, u8 siz, s32 width, s32 height,
  * The texture the current RDP state describes, decoded and uploaded once and
  * then kept. Returns 0 (untextured) if there is nothing sane to draw with.
  */
-static u32 texture_current(void) {
+static u32 texture_lookup(void) {
     const u8 *tlut = (const u8 *) sTlutAddr;
     s32 i;
 
@@ -497,16 +960,22 @@ static u32 texture_current(void) {
 
     {
         u32 slot = tex_hint_slot(sTexAddr, (u32) tlut);
-        s32 hi = (s32) sTexHint[slot] - 1;
+        s32 probe;
 
-        if (hi >= 0 && hi < sTexCacheCount) {
-            GfxTexture *t = &sTexCache[hi];
+        // A few neighbouring hints, so two textures that hash alike do not push
+        // each other out and send every lookup to the scan below.
+        for (probe = 0; probe < GFX_TEX_HINT_PROBES; probe++) {
+            s32 hi = (s32) sTexHint[(slot + probe) & (GFX_TEX_HINTS - 1)] - 1;
 
-            if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt &&
-                t->siz == sTileSiz && t->width == sTileWidth && t->height == sTileHeight &&
-                t->cmS == sTileCmS && t->cmT == sTileCmT && t->swapped == (u8) sTexSwapped) {
-                t->lastUsed = sGfxFrameCount;
-                return t->handle;
+            if (hi >= 0 && hi < sTexCacheCount) {
+                GfxTexture *t = &sTexCache[hi];
+
+                if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt &&
+                    t->siz == sTileSiz && t->width == sTileWidth && t->height == sTileHeight &&
+                    t->cmS == sTileCmS && t->cmT == sTileCmT && t->swapped == (u8) sTexSwapped) {
+                    t->lastUsed = sGfxFrameCount;
+                    return t->handle;
+                }
             }
         }
 
@@ -516,7 +985,7 @@ static u32 texture_current(void) {
                 t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
                 t->swapped == (u8) sTexSwapped) {
                 t->lastUsed = sGfxFrameCount;
-                sTexHint[slot] = (u16) (i + 1);
+                tex_hint_store(slot, i);
                 return t->handle;
             }
         }
@@ -534,9 +1003,38 @@ static u32 texture_current(void) {
                 oldest = i;
             }
         }
-        gfx_delete_texture(sTexCache[oldest].handle);
+        if (!sTexCache[oldest].prebuilt) {
+            gfx_delete_texture(sTexCache[oldest].handle);
+        }
         sTexCache[oldest] = sTexCache[--sTexCacheCount];
     }
+
+    {
+        // Converted offline and already in video memory: no decoding.
+        s32 p = (sTileFmt != G_IM_FMT_CI) ? prebuilt_find(sTexAddr) : -1;
+
+        if (p >= 0 && sPrebuilt[p].width == sTileWidth && sPrebuilt[p].height == sTileHeight) {
+            GfxTexture *t = &sTexCache[sTexCacheCount++];
+
+            gfx_texture_set_wrap(sPrebuilt[p].handle, sTileCmS, sTileCmT);
+            t->timg = sTexAddr;
+            t->tlut = (u32) tlut;
+            t->fmt = sTileFmt;
+            t->siz = sTileSiz;
+            t->swapped = (u8) sTexSwapped;
+            t->width = sTileWidth;
+            t->height = sTileHeight;
+            t->cmS = sTileCmS;
+            t->cmT = sTileCmT;
+            t->lastUsed = sGfxFrameCount;
+            t->handle = sPrebuilt[p].handle;
+            t->prebuilt = 1;
+            tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
+            sTexPrebuiltHits++;
+            return t->handle;
+        }
+    }
+    sTexDecodes++;
 
     {
         const u8 *texels = (const u8 *) sTexAddr;
@@ -565,9 +1063,25 @@ static u32 texture_current(void) {
         t->cmT = sTileCmT;
         t->lastUsed = sGfxFrameCount;
         t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileCmS, sTileCmT);
-        sTexHint[tex_hint_slot(t->timg, t->tlut)] = (u16) sTexCacheCount; // index of t, +1
+        t->prebuilt = 0;
+        tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
         return t->handle;
     }
+}
+
+// What texture_lookup() last returned, valid until the display list touches the
+// tile or loads an image. Consecutive batches mostly share a texture, and the
+// lookup is not free. A new frame starts dirty so that each texture's first use
+// in a frame goes through the lookup, which is what stamps it as recently used.
+static s32 sTexStateDirty = TRUE;
+static u32 sTexCurrent;
+
+static u32 texture_current(void) {
+    if (sTexStateDirty) {
+        sTexCurrent = texture_lookup();
+        sTexStateDirty = FALSE;
+    }
+    return sTexCurrent;
 }
 
 /**
@@ -809,6 +1323,18 @@ static void apply_render_mode(void) {
     gfx_set_depth_test(zEnabled && (sOtherModeL & Z_CMP) != 0);
     gfx_set_depth_write(zEnabled && (sOtherModeL & Z_UPD) != 0);
     gfx_set_depth_offset(zEnabled && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC);
+    {
+        // FORCE_BL only says the blender runs. It blends with what is already
+        // drawn only if its equation reads the framebuffer; G_RM_OPA_SURF, the
+        // sky's mode, forces the blender and still outputs the pixel unchanged.
+        // The equation is P*A + M*B, two bits each, with one set per cycle; the
+        // last cycle's set decides.
+        s32 twoCycle = (sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
+        u32 p = (sOtherModeL >> (twoCycle ? 28 : 30)) & 3;
+        u32 m = (sOtherModeL >> (twoCycle ? 20 : 22)) & 3;
+
+        gfx_set_blend((sOtherModeL & FORCE_BL) != 0 && (p == G_BL_CLR_MEM || m == G_BL_CLR_MEM));
+    }
 
     // CVG_X_ALPHA is how the cutout materials (G_RM_*_TEX_EDGE) get their hard
     // edge: the RDP multiplies coverage by alpha, which on a non-antialiased
@@ -828,6 +1354,8 @@ static void apply_render_mode(void) {
  * G_TRIN — DKR's polygon command. w1 points at an array of Triangles (vertex
  * indices plus UVs); shade each one from its vertex colours.
  */
+static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled);
+
 static void handle_polygon(u32 w0, u32 w1) {
     const Triangle *tris = (const Triangle *) w1;
     u32 params = (w0 >> 16) & 0xFF;
@@ -840,7 +1368,11 @@ static void handle_polygon(u32 w0, u32 w1) {
     if (tris == NULL) {
         return;
     }
+    if (polygon_blast(tris, count, texEnabled)) {
+        return;
+    }
 
+    PROF_LAP_START();
     if (texEnabled) {
         texture = texture_current();
     }
@@ -858,6 +1390,7 @@ static void handle_polygon(u32 w0, u32 w1) {
     // Settle how this batch's combiner collapses before touching any vertex. The
     // mux, prim and env cannot change inside a batch, so once is enough.
     combiner_classify();
+    PROF_LAP(tPolyState);
 
     for (i = 0; i < count; i++) {
         // The UVs are the only per-triangle part of a vertex, so write them into
@@ -881,12 +1414,17 @@ static void handle_polygon(u32 w0, u32 w1) {
         emit_triangle(a, b, c, !(tris[i].flags & BACKFACE_DRAW));
     }
 
+    PROF_LAP(tPolyEmit);
     apply_render_mode();
     gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
     gfx_bind_texture(texture);
     apply_texture_filter();
     gfx_set_texenv_modulate(); // the 2D path leaves the env in blend mode
+    PROF_ADD(slowTris, sTriVertCount / 3);
+    PROF_ADD(sentFrame, sTriVertCount / 3);
+    PROF_ADD(slowBatches, 1);
     gfx_draw_tris(sTriVerts, sTriVertCount);
+    PROF_LAP(tPolyDraw);
 }
 
 // ---------------------------------------------------------------------------
@@ -914,30 +1452,54 @@ static void handle_polygon(u32 w0, u32 w1) {
 
 
 /** Render a blast batch through the emulated path, as the DL would have. */
-static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                           s32 texEnabled) {
-    handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts);
-    handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
-                   (u32) tris);
+static void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+                           const Triangle *tris, s32 numTris, s32 texEnabled) {
+    PROF_ADD(fallback, 1);
+#if DKR_GFX_PROFILE_SKIP == 3
+    PROF_ADD(slowTris, numTris);
+    return;
+#endif
+    PROF_TIME(tFallback, handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts));
+    if (numVerts2 > 0) {
+        // The second run was loaded under another matrix and appended.
+        s32 matrix = sCurMatrix;
+
+        sCurMatrix = matrix2;
+        PROF_TIME(tFallback, handle_vertex(((u32) G_VTX << 24) |
+                                               ((u32) (((numVerts2 - 1) << 3) | G_VTX_APPEND) << 16),
+                                           (u32) verts2));
+        sCurMatrix = matrix;
+    }
+    PROF_TIME(tFallback, handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
+                                        (u32) tris));
 }
 
 // N64-pixels -> framebuffer scale, from gfx_blast_begin. File-scope so the
 // cold clip path shares the hot loop's emit.
 static f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
-/** One PVR vertex straight to the store queue — inline, no cross-file call. */
+// Where a blended batch's vertices are recorded; NULL streams to the open list.
+static pvr_vertex_t *sBlastRecord;
+// Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
+static f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
+
+/** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
-    pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
+    pvr_vertex_t *vt = sBlastRecord ? sBlastRecord : (pvr_vertex_t *) pvr_dr_target();
 
     vt->flags = flags;
     vt->x = x * sBlastSX;
     vt->y = y * sBlastSY;
-    vt->z = invw;
+    vt->z = (invw * sBlastZMul) + sBlastZAdd;
     vt->u = u;
     vt->v = v;
     vt->argb = color;
     vt->oargb = 0;
-    pvr_dr_commit(vt);
+    if (sBlastRecord) {
+        sBlastRecord++;
+    } else {
+        pvr_dr_commit(vt);
+    }
 }
 
 // A corner in clip space on its way through the blast near-clipper: position,
@@ -1020,8 +1582,8 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
-static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                         s32 texEnabled) {
+static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+                         const Triangle *tris, s32 numTris, s32 texEnabled) {
     f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
     u32 argb[GFX_BLAST_MAX_VERTS];
     shz_vec4_t cp[GFX_BLAST_MAX_VERTS];
@@ -1030,20 +1592,23 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     f32 uMul = 0.0f, vMul = 0.0f;
     f32 uS, vS;
     s32 i;
+    s32 total = numVerts + numVerts2;
 
     if (verts == NULL || tris == NULL || numTris <= 0 || numVerts <= 0) {
         return;
     }
-    if (numVerts > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
+    if (total > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
         // Can't occur in a valid asset (the DL macros can't encode it).
         printf("blast: oversized batch %dv/%dt\n", (int) numVerts, (int) numTris);
         return;
     }
 
+    PROF_LAP_START();
     // The color must be per-batch trivial: shade byte or constant per channel.
     combiner_classify();
-    if (!sCcFast || sBillboard) {
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+    if (sBillboard) {
+        PROF_ADD(whyBillboard, numTris);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
 
@@ -1063,36 +1628,100 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // fallback's handle_polygon redoes this state, so these state calls are safe
     // to have run.
     if (!gfx_blast_viable()) {
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        PROF_ADD(whyState, numTris);
+#if DKR_GFX_PROFILE
+        {
+            extern int gfx_blast_why(void);
+            sProf.whyStateKind[gfx_blast_why()] += numTris;
+        }
+#endif
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
 
+    PROF_ADD(blast, 1);
+    PROF_ADD(verts, total);
+    PROF_ADD(tris, numTris);
+    PROF_LAP(tState);
+#if DKR_GFX_PROFILE_SKIP == 2
+    return;
+#endif
+
     // Transform + project every vertex. A vertex behind the near plane just marks
     // its bit; the triangles touching it go through the in-path clipper below.
-    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
-    for (i = 0; i < numVerts; i++) {
-        const Vertex *v = &verts[i];
-        shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
-        f32 invW;
+    {
+        // Each channel is the vertex's own or a per-batch constant; settle which
+        // once, so a vertex costs a mask and an or.
+        u32 keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) |
+                   (sCcPass[1] ? 0x0000FF00u : 0) | (sCcPass[2] ? 0x000000FFu : 0);
+        u32 konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) |
+                     (u32) sCcConst[2]) & ~keep;
+        f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
+        s32 ccFast = sCcFast;
+        s32 run;
 
-        cp[i] = c;
-        argb[i] = ((u32) (sCcPass[3] ? v->a : sCcConst[3]) << 24) |
-                  ((u32) (sCcPass[0] ? v->r : sCcConst[0]) << 16) |
-                  ((u32) (sCcPass[1] ? v->g : sCcConst[1]) << 8) |
-                  (u32) (sCcPass[2] ? v->b : sCcConst[2]);
-        if (c.w < GFX_NEAR_W) {
-            behind |= 1u << i;
-            continue;
+        i = 0;
+        for (run = 0; run < 2; run++) {
+            const Vertex *v = run ? verts2 : verts;
+            const Vertex *end = v + (run ? numVerts2 : numVerts);
+
+            if (v == end) {
+                continue;
+            }
+            shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[run ? matrix2 : sCurMatrix]);
+            for (; v < end; v++, i++) {
+                shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+                f32 invW;
+
+                cp[i] = c;
+                if (ccFast) {
+                    argb[i] = ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) |
+                              konst;
+                } else {
+                    // The combiner mixes shade with something else: run the real
+                    // mux, once per vertex rather than once per corner.
+                    f32 shade[4];
+                    u8 lit[4];
+
+                    shade[0] = v->r * (1.0f / 255.0f);
+                    shade[1] = v->g * (1.0f / 255.0f);
+                    shade[2] = v->b * (1.0f / 255.0f);
+                    shade[3] = v->a * (1.0f / 255.0f);
+                    combiner_eval_lit(shade, lit);
+                    argb[i] = ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
+                }
+                if (c.w < GFX_NEAR_W) {
+                    behind |= 1u << i;
+                    continue;
+                }
+                invW = shz_invf_fsrra(c.w);
+                sx[i] = (c.x * invW * vpSX) + vpTX;
+                sy[i] = vpTY - (c.y * invW * vpSY);
+                iw[i] = invW;
+            }
         }
-        invW = shz_invf_fsrra(c.w);
-        sx[i] = (c.x * invW * sVpScaleX) + sVpTransX;
-        sy[i] = sVpTransY - (c.y * invW * sVpScaleY);
-        iw[i] = invW;
     }
 
-    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY)) {
+    PROF_LAP(tXform);
+#if DKR_GFX_PROFILE
+    if (sOtherModeL & FORCE_BL) {
+        extern int gfx_texture_kind(void);
+        u32 vtxAnd = 0xFF, outAnd = 0xFF000000u;
+
+        for (i = 0; i < numVerts; i++) {
+            vtxAnd &= verts[i].a;
+            outAnd &= argb[i];
+        }
+        prof_blend(sOtherModeL, sCombineW0, sCombineW1, gfx_texture_kind(), vtxAnd == 0xFF, outAnd == 0xFF000000u,
+                   (sGeometryMode & G_FOG) != 0, sPrimColor[3], sEnvColor[3], numTris);
+    }
+#endif
+    // A triangle crossing the near plane can come back as two.
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord,
+                         (int) (argb[0] >> 24), &sBlastZMul, &sBlastZAdd)) {
         // handle_polygon redoes this state, so falling back here is safe.
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        PROF_ADD(whyFull, numTris);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
     if (texture != 0) {
@@ -1104,7 +1733,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         const Triangle *t = &tris[i];
         s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
 
-        if (i0 >= numVerts || i1 >= numVerts || i2 >= numVerts) {
+        if (i0 >= total || i1 >= total || i2 >= total) {
             continue;
         }
         if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
@@ -1122,16 +1751,25 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
             cv[2].u = t->uv2.u * uMul;
             cv[2].v = t->uv2.v * vMul;
             cv[2].argb = argb[i2];
+            PROF_ADD(clipped, 1);
+#if DKR_GFX_PROFILE_SKIP != 1
             blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
+#endif
             continue;
         }
         if (!(t->flags & BACKFACE_DRAW)) {
             f32 area = ((sx[i1] - sx[i0]) * (sy[i2] - sy[i0])) -
                        ((sx[i2] - sx[i0]) * (sy[i1] - sy[i0]));
             if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                PROF_ADD(culled, 1);
                 continue;
             }
         }
+        PROF_ADD(sent, 1);
+        PROF_ADD(sentFrame, 1);
+#if DKR_GFX_PROFILE_SKIP == 1
+        continue;
+#endif
         blast_emit(sx[i0], sy[i0], iw[i0], t->uv0.u * uMul, t->uv0.v * vMul, argb[i0],
                    PVR_CMD_VERTEX);
         blast_emit(sx[i1], sy[i1], iw[i1], t->uv1.u * uMul, t->uv1.v * vMul, argb[i1],
@@ -1139,6 +1777,91 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         blast_emit(sx[i2], sy[i2], iw[i2], t->uv2.u * uMul, t->uv2.v * vMul, argb[i2],
                    PVR_CMD_VERTEX_EOL);
     }
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
+    PROF_LAP(tEmit);
+}
+
+/**
+ * A G_TRIN over vertices that G_VTX already loaded and projected: sprites, whose
+ * quads share one appended load across several textures, and any batch the
+ * peephole could not fuse. Writes them straight out like the blast path when
+ * the state allows and no corner is behind the near plane; returns FALSE to
+ * leave the batch to the emulated path otherwise.
+ */
+static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
+    u32 texture = 0;
+    f32 uMul = 0.0f, vMul = 0.0f;
+    f32 uS, vS;
+    u32 keep, konst;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        if (!VERTEX_PROJECTED(&sVerts[tris[i].vi0 % GFX_MAX_VERTS]) ||
+            !VERTEX_PROJECTED(&sVerts[tris[i].vi1 % GFX_MAX_VERTS]) ||
+            !VERTEX_PROJECTED(&sVerts[tris[i].vi2 % GFX_MAX_VERTS])) {
+            return FALSE;
+        }
+    }
+    combiner_classify();
+    if (!sCcFast) {
+        return FALSE;
+    }
+    if (texEnabled) {
+        texture = texture_current();
+    }
+    apply_render_mode();
+    gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
+    gfx_bind_texture(texture);
+    apply_texture_filter();
+    gfx_set_texenv_modulate();
+    keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
+           (sCcPass[2] ? 0x000000FFu : 0);
+    konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) | (u32) sCcConst[2]) &
+            ~keep;
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, count * 3, (void **) &sBlastRecord,
+                         (int) (((((u32) sVerts[tris[0].vi0 % GFX_MAX_VERTS].a << 24) & keep) | konst) >> 24),
+                         &sBlastZMul, &sBlastZAdd)) {
+        return FALSE;
+    }
+    if (texture != 0) {
+        uMul = shz_invf_fsrra(32.0f * (f32) sTileWidth) * uS;
+        vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
+    }
+    PROF_ADD(tris, count);
+    for (i = 0; i < count; i++) {
+        const Triangle *t = &tris[i];
+        const GfxVertex *a = &sVerts[t->vi0 % GFX_MAX_VERTS];
+        const GfxVertex *b = &sVerts[t->vi1 % GFX_MAX_VERTS];
+        const GfxVertex *c = &sVerts[t->vi2 % GFX_MAX_VERTS];
+
+        if (!(t->flags & BACKFACE_DRAW)) {
+            f32 area = ((b->sx - a->sx) * (c->sy - a->sy)) - ((c->sx - a->sx) * (b->sy - a->sy));
+
+            if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                PROF_ADD(culled, 1);
+                continue;
+            }
+        }
+        PROF_ADD(sent, 1);
+        PROF_ADD(sentFrame, 1);
+        blast_emit(a->sx, a->sy, shz_invf_fsrra(a->sw), t->uv0.u * uMul, t->uv0.v * vMul,
+                   ((((u32) a->a << 24) | ((u32) a->r << 16) | ((u32) a->g << 8) | (u32) a->b) & keep) | konst,
+                   PVR_CMD_VERTEX);
+        blast_emit(b->sx, b->sy, shz_invf_fsrra(b->sw), t->uv1.u * uMul, t->uv1.v * vMul,
+                   ((((u32) b->a << 24) | ((u32) b->r << 16) | ((u32) b->g << 8) | (u32) b->b) & keep) | konst,
+                   PVR_CMD_VERTEX);
+        blast_emit(c->sx, c->sy, shz_invf_fsrra(c->sw), t->uv2.u * uMul, t->uv2.v * vMul,
+                   ((((u32) c->a << 24) | ((u32) c->r << 16) | ((u32) c->g << 8) | (u32) c->b) & keep) | konst,
+                   PVR_CMD_VERTEX_EOL);
+    }
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
+    return TRUE;
 }
 
 // ---------------------------------------------------------------------------
@@ -1401,6 +2124,14 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
 // The state the classification is valid for. Any change and it is recomputed.
 static u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
 static s32 sCcSigValid = FALSE;
+static u32 sCcCacheAt;
+
+// Materials alternate within a frame, so remember more than the last result.
+#define GFX_CC_CACHE 128
+static struct {
+    u32 w0, w1, cyc, prim, env;
+    u8 valid, fast, pass[4], konst[4];
+} sCcCache[GFX_CC_CACHE];
 
 static void combiner_classify(void) {
     // Three probes, not two: two mid-range ones would call a combiner that
@@ -1427,6 +2158,22 @@ static void combiner_classify(void) {
     sCcSigPrim = prim;
     sCcSigEnv = env;
     sCcSigValid = TRUE;
+
+    {
+        u32 hash = sCombineW0 ^ (sCombineW1 * 0x9E3779B1u) ^ (prim * 0x85EBCA6Bu) ^ (env * 0xC2B2AE35u) ^ cyc;
+        u32 at = (hash ^ (hash >> 15)) & (GFX_CC_CACHE - 1);
+
+        if (sCcCache[at].valid && sCcCache[at].w0 == sCombineW0 && sCcCache[at].w1 == sCombineW1 &&
+            sCcCache[at].cyc == cyc && sCcCache[at].prim == prim && sCcCache[at].env == env) {
+            sCcFast = sCcCache[at].fast;
+            for (i = 0; i < 4; i++) {
+                sCcPass[i] = sCcCache[at].pass[i];
+                sCcConst[i] = sCcCache[at].konst[i];
+            }
+            return;
+        }
+        sCcCacheAt = at;
+    }
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
@@ -1458,6 +2205,18 @@ static void combiner_classify(void) {
             break;
         }
     }
+
+    sCcCache[sCcCacheAt].w0 = sCombineW0;
+    sCcCache[sCcCacheAt].w1 = sCombineW1;
+    sCcCache[sCcCacheAt].cyc = cyc;
+    sCcCache[sCcCacheAt].prim = prim;
+    sCcCache[sCcCacheAt].env = env;
+    sCcCache[sCcCacheAt].fast = (u8) sCcFast;
+    for (i = 0; i < 4; i++) {
+        sCcCache[sCcCacheAt].pass[i] = (u8) sCcPass[i];
+        sCcCache[sCcCacheAt].konst[i] = sCcConst[i];
+    }
+    sCcCache[sCcCacheAt].valid = TRUE;
 }
 
 /**
@@ -1528,6 +2287,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
  * carry the texture coordinates.
  */
 static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
+    PROF_ADD(rects, 1);
     // Screen coordinates are 10.2 fixed point, texture coordinates S10.5, and
     // the per-pixel texture steps S5.10.
     f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
@@ -1625,7 +2385,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             case G_MTX: {
                 s32 slot = (((w0 >> 16) & 0xFF) >> 6) & 3;
                 if (w1 != 0 && slot < 3) {
-                    mtx_to_float((const Mtx *) w1, sMatrices[slot]);
+                    PROF_TIME(tMtx, mtx_to_float((const Mtx *) w1, sMatrices[slot]));
                     sCurMatrix = slot;
                 }
                 break;
@@ -1679,30 +2439,86 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // pair can be fused into the native blast path — skipping the
                 // sVerts staging and the whole per-corner emit machinery.
                 //
-                // Guards: no append (the anchor scheme needs sVerts), no
-                // billboard, and — because the fast path leaves sVerts stale —
-                // the command after the pair must not be another G_TRIN reusing
-                // these vertices. When blast_render itself falls back it does so
-                // by running the real handlers, which repopulates sVerts, so
-                // every fallback is exactly the unfused behaviour.
+                // Object models whose batch hangs off a second matrix arrive in
+                // two more shapes (see the batch loop in src/objects.c), both
+                // with matrix selects around the load:
+                //   G_VTX, select, G_TRIN                      one matrix
+                //   G_VTX, select, G_VTX append, select, G_TRIN  two matrices
+                // A select only changes which matrix later loads use, so the
+                // vertices transform with the matrix current at their own G_VTX
+                // and the last select is applied afterwards.
+                //
+                // Guards: no append on the first load (the anchor scheme needs
+                // sVerts), no billboard, and — because the fast path leaves
+                // sVerts stale — the command after the batch must not be another
+                // G_TRIN reusing these vertices. When blast_render itself falls
+                // back it does so by running the real handlers, which
+                // repopulates sVerts, so every fallback is exactly the unfused
+                // behaviour.
                 u32 params = (w0 >> 16) & 0xFF;
 
-                if (!(params & G_VTX_APPEND) && !sBillboard && (count == 0 || i + 1 < count) &&
-                    ((dl[i + 1].words.w0 >> 24) & 0xFF) == G_TRIN &&
-                    ((dl[i + 2].words.w0 >> 24) & 0xFF) != G_TRIN) {
-                    u32 tw0 = dl[i + 1].words.w0;
+                if (!(params & G_VTX_APPEND) && !sBillboard) {
+#define DL_HAS(k) (count == 0 || i + (k) < count)
+#define DL_OP(k) ((dl[i + (k)].words.w0 >> 24) & 0xFF)
+#define DL_SELECT(k) (DL_OP(k) == (u8) G_MOVEWORD && (dl[i + (k)].words.w0 & 0xFF) == G_MW_MVPMATRIX)
+#define DL_LAST_TRIN(k) (DL_OP(k) == G_TRIN && !(DL_HAS((k) + 1) && DL_OP((k) + 1) == G_TRIN))
+                    s32 numVerts = (s32) ((params >> 3) & 0x1F) + 1;
+                    const Vertex *verts2 = NULL;
+                    s32 numVerts2 = 0, matrix2 = 0, trin = 0, select = 0;
 
-                    blast_render((const Vertex *) w1, (s32) ((params >> 3) & 0x1F) + 1,
-                                 (const Triangle *) dl[i + 1].words.w1,
-                                 (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1, (s32) ((tw0 >> 16) & 1));
-                    i++;
-                    break;
+                    if (DL_HAS(1) && DL_LAST_TRIN(1)) {
+                        trin = 1;
+                    } else if (DL_HAS(2) && DL_SELECT(1) && DL_LAST_TRIN(2)) {
+                        trin = 2;
+                        select = 1;
+                    } else if (DL_HAS(4) && DL_SELECT(1) && DL_OP(2) == G_VTX &&
+                               ((dl[i + 2].words.w0 >> 16) & G_VTX_APPEND) && DL_SELECT(3) && DL_LAST_TRIN(4)) {
+                        u32 params2 = (dl[i + 2].words.w0 >> 16) & 0xFF;
+
+                        numVerts2 = (s32) ((params2 >> 3) & 0x1F) + 1;
+                        if (numVerts + numVerts2 <= GFX_BLAST_MAX_VERTS && dl[i + 2].words.w1 != 0) {
+                            verts2 = (const Vertex *) dl[i + 2].words.w1;
+                            matrix2 = (dl[i + 1].words.w1 >> 6) & 3;
+                            trin = 4;
+                            select = 3;
+                        }
+                    }
+#undef DL_HAS
+#undef DL_OP
+#undef DL_SELECT
+#undef DL_LAST_TRIN
+                    if (trin) {
+                        u32 tw0 = dl[i + trin].words.w0;
+
+                        PROF_TIME(tBlast, blast_render((const Vertex *) w1, numVerts, verts2, numVerts2, matrix2,
+                                                       (const Triangle *) dl[i + trin].words.w1,
+                                                       (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1,
+                                                       (s32) ((tw0 >> 16) & 1)));
+                        if (select) {
+                            sCurMatrix = (dl[i + select].words.w1 >> 6) & 3;
+                        }
+                        i += trin;
+                        break;
+                    }
                 }
-                handle_vertex(w0, w1);
+#if DKR_GFX_PROFILE
+                sProfVtxWhy = (params & G_VTX_APPEND) ? 1 : sBillboard ? 2 :
+                              (((dl[i + 1].words.w0 >> 24) & 0xFF) == G_TRIN) ? 3 : 4;
+#endif
+                PROF_TIME(tVtx, handle_vertex(w0, w1));
                 break;
             }
             case G_TRIN:
-                handle_polygon(w0, w1);
+#if DKR_GFX_PROFILE
+                {
+                    u32 n = (((w0 >> 16) & 0xFF) >> 4) + 1;
+                    if (sProfVtxWhy == 1) sProf.whyAppend += n;
+                    else if (sProfVtxWhy == 2) sProf.whyBillboard += n;
+                    else if (sProfVtxWhy == 3) sProf.whyShared += n;
+                    else sProf.whyLoose += n;
+                }
+#endif
+                PROF_TIME(tPoly, handle_polygon(w0, w1));
                 break;
             case G_DL:
                 run_dl((const Gfx *) w1, 0, depth + 1);
@@ -1728,6 +2544,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     // dropped clamp entirely, so every clamped texture wrapped.
                     sTileCmT = (w1 >> 18) & 0x3;
                     sTileCmS = (w1 >> 8) & 0x3;
+                    sTexStateDirty = TRUE;
                 }
                 break;
             }
@@ -1741,6 +2558,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     u32 lrt = w1 & 0xFFF;
                     sTileWidth = ((lrs - uls) >> 2) + 1;
                     sTileHeight = ((lrt - ult) >> 2) + 1;
+                    sTexStateDirty = TRUE;
                     sTileUls = uls;
                     sTileUlt = ult;
                 }
@@ -1754,14 +2572,17 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // dxt is the low 12 bits. Zero means the RDP applied no odd-row
                 // swizzle on the way in, i.e. the asset is already swizzled.
                 sTexSwapped = ((w1 & 0xFFF) == 0);
+                sTexStateDirty = TRUE;
                 break;
             case (u8) G_LOADTILE:
                 sTexAddr = sTimgAddr;
                 sTexSwapped = FALSE; // a tile load is row-by-row, never swizzled
+                sTexStateDirty = TRUE;
                 break;
             case (u8) G_LOADTLUT:
                 // The palette is whatever G_SETTIMG last pointed at.
                 sTlutAddr = sTimgAddr;
+                sTexStateDirty = TRUE;
                 break;
             case (u8) G_TEXRECT:
             case (u8) G_TEXRECTFLIP: {
@@ -1771,12 +2592,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 if (count != 0 && i + 2 >= count) {
                     return; // truncated — the halves are not there to read
                 }
-                handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1, cmd == (u8) G_TEXRECTFLIP);
+                PROF_TIME(tRect, handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1,
+                                                cmd == (u8) G_TEXRECTFLIP));
                 i += 2;
                 break;
             }
             case (u8) G_FILLRECT:
-                handle_fillrect(w0, w1);
+                PROF_TIME(tRect, handle_fillrect(w0, w1));
                 break;
             case (u8) G_SETSCISSOR: {
                 // 10.2 fixed point, lower-right inclusive — a full-screen scissor
@@ -1872,10 +2694,147 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
 extern void dc_audio_init(void);
 extern void dc_audio_start_thread(void);
 
+// Sampling profile (GFX_PROFILE=3): a timer interrupt notes where the program
+// is, a few thousand times a second, while a race level is loaded. Unlike the
+// timers above it costs next to nothing, so it shows where time really goes.
+// The counts land in build/dc/prof_samples.bin when the run exits by itself;
+// one count per 32 bytes of code from the load address.
+#if DKR_GFX_PROFILE >= 3
+#define PROF_SAMPLE_BASE 0x8c010000u
+#define PROF_SAMPLE_BUCKETS (1536u * 1024u / 32u) // the program's code is about 1.1 MB
+extern s32 gMapId;
+static u16 sProfSamples[PROF_SAMPLE_BUCKETS];
+static u32 sProfSampleInfo[4]; // samples taken, samples outside the range, bucket bytes, base
+
+static void prof_sample_irq(irq_t code, irq_context_t *context, void *data) {
+    u32 bucket = (context->pc - PROF_SAMPLE_BASE) / 32u;
+
+    (void) code;
+    (void) data;
+    timer_clear(TMU1);
+    if (gMapId != 18 && gMapId != 28) {
+        return;
+    }
+    sProfSampleInfo[0]++;
+    if (bucket >= PROF_SAMPLE_BUCKETS) {
+        sProfSampleInfo[1]++;
+    } else if (sProfSamples[bucket] != 0xFFFF) {
+        sProfSamples[bucket]++;
+    }
+}
+
+static void prof_sample_start(void) {
+    sProfSampleInfo[2] = 32;
+    sProfSampleInfo[3] = PROF_SAMPLE_BASE;
+    irq_set_handler(EXC_TMU1_TUNI1, prof_sample_irq, NULL);
+    timer_prime(TMU1, 3989, 1); // not a multiple of the frame rate
+    timer_start(TMU1);
+}
+
+static void prof_sample_write(void) {
+    file_t file;
+
+    timer_stop(TMU1);
+    file = fs_open("/pc/build/dc/prof_samples.bin", O_WRONLY | O_CREAT | O_TRUNC);
+    if (file != FILEHND_INVALID) {
+        fs_write(file, sProfSampleInfo, sizeof(sProfSampleInfo));
+        fs_write(file, sProfSamples, sizeof(sProfSamples));
+        fs_close(file);
+    }
+}
+#else
+#define prof_sample_start() ((void) 0)
+#define prof_sample_write() ((void) 0)
+#endif
+
+// Debug view (DEBUG_VIEW=1): hold a frame and switch how cutout textures are
+// stored and drawn, to compare the modes on a still picture.
+//
+//   both triggers + X   hold or release the current frame
+//   both triggers + Y   next mode; the squares at the top left show which
+//
+//   1  as before: 4-4-4-4
+//   2  5-5-5-1
+//   3  5-5-5-1, invisible texels coloured from their neighbours (the default)
+#ifndef DKR_DEBUG_VIEW
+#define DKR_DEBUG_VIEW 0
+#endif
+#if DKR_DEBUG_VIEW
+extern void gfx_set_cutout_mode(int use1555, int bleed);
+static s32 sDebugHold;
+static s32 sDebugMode = 3;
+
+static void debug_view_apply(void) {
+    static const u8 modes[3][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 } };
+    s32 i;
+
+    gfx_set_cutout_mode(modes[sDebugMode - 1][0], modes[sDebugMode - 1][1]);
+    // The format is chosen when a texture is created, so make them all anew.
+    for (i = 0; i < sTexCacheCount; i++) {
+        if (!sTexCache[i].prebuilt) {
+            gfx_delete_texture(sTexCache[i].handle);
+        }
+    }
+    sTexCacheCount = 0;
+    memset(sTexHint, 0, sizeof(sTexHint));
+    sTexStateDirty = TRUE;
+    printf("DEBUG VIEW: mode %d\n", (int) sDebugMode);
+}
+
+static void debug_view_poll(void) {
+    static u32 sLast;
+    maple_device_t *pad = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    cont_state_t *state = pad ? (cont_state_t *) maple_dev_status(pad) : NULL;
+    u32 buttons = (state && state->ltrig > 128 && state->rtrig > 128) ? state->buttons : 0;
+    u32 pressed = buttons & ~sLast;
+
+    sLast = buttons;
+    if (pressed & CONT_X) {
+        sDebugHold = !sDebugHold;
+        printf("DEBUG VIEW: frame %s\n", sDebugHold ? "held" : "released");
+    }
+    if (pressed & CONT_Y) {
+        sDebugMode = (sDebugMode % 3) + 1;
+        debug_view_apply();
+    }
+}
+
+static void debug_view_draw(void) {
+    static const u8 white[4] = { 255, 255, 255, 255 }, black[3] = { 0, 0, 0 };
+    s32 i;
+
+    for (i = 0; i < sDebugMode; i++) {
+        draw_2d_quad(8.0f + (i * 8.0f), 8.0f, 14.0f + (i * 8.0f), 14.0f, 0.0f, 0.0f, 0.0f, 0.0f, white, black, 0);
+    }
+}
+#endif
+
+static void gfx_task_draw(void *dlBegin, void *dlEnd);
+
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
+    gfx_task_draw(dlBegin, dlEnd);
+    pc_scene_frame_shown();
+#if DKR_DEBUG_VIEW
+    // The game does not run while a frame is held: its last display list is
+    // drawn again each field, so a mode change shows on the same picture.
+    debug_view_poll();
+    while (sDebugHold) {
+        gfx_task_draw(dlBegin, dlEnd);
+        debug_view_poll();
+    }
+#endif
+}
+
+static void gfx_task_draw(void *dlBegin, void *dlEnd) {
+#if DKR_GFX_PROFILE
+    u64 profT0 = pc_uptime_ns(), profT1, profT2;
+#endif
     sGfxFrameCount++;
 
     gfx_frame_begin();
+#if DKR_GFX_PROFILE
+    profT1 = pc_uptime_ns();
+#endif
 
     sCurMatrix = 0;
     sBillboard = FALSE;
@@ -1887,6 +2846,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTlutAddr = 0;
     sTileWidth = 0;
     sTileHeight = 0;
+    sTexStateDirty = TRUE;
     sTileUls = 0;
     sTileUlt = 0;
     sOtherModeL = 0;
@@ -1901,8 +2861,49 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     gfx_disable_scissor();
 
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
+#if DKR_DEBUG_VIEW
+    debug_view_draw();
+#endif
+#if DKR_GFX_PROFILE
+    profT2 = pc_uptime_ns();
+    {
+        int pt, tr;
+        gfx_recorded_words(&pt, &tr);
+        {
+            extern void gfx_tr_stats(unsigned int out[10]);
+            unsigned int tr8[10];
+            s32 j;
+
+            gfx_tr_stats(tr8);
+            {
+                extern void gfx_nodepth_stats(unsigned int out[4]);
+                unsigned int nd[4];
+
+                gfx_nodepth_stats(nd);
+                for (j = 0; j < 4; j++) {
+                    sProf.noDepth[j] += nd[j];
+                }
+            }
+            for (j = 0; j < 10; j++) {
+                sProf.trStats[j] += tr8[j];
+            }
+        }
+        if ((u32) pt > sProf.ptWords) sProf.ptWords = (u32) pt;
+        if ((u32) tr > sProf.trWords) sProf.trWords = (u32) tr;
+    }
+#endif
 
     gfx_frame_end();
+#if DKR_GFX_PROFILE
+    prof_frame(profT0, profT1, profT2, pc_uptime_ns());
+#endif
+#if DKR_AUTO_EXIT_SECONDS
+    // Unattended measurement runs: return to the loader by ourselves.
+    if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
+        prof_sample_write();
+        arch_exit();
+    }
+#endif
 }
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
@@ -1913,6 +2914,7 @@ static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
 
 int main(int argc, char **argv) {
     cont_btn_callback(0, CONT_RESET_BUTTONS, cont_reset_btn_callback_);
+    prof_sample_start();
 
     printf("=== DKR PC ===\n");
     sHostThread.id = 3;

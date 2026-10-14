@@ -26,6 +26,7 @@
 #include "waves.h"
 #include "weather.h"
 #include "pc_swap.h"
+#include "../dreamcast/prof.h"
 
 // Maximum size for a level model is 522.5 KiB
 #define LEVEL_MODEL_MAX_SIZE 0x82A00
@@ -318,9 +319,9 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         tempUpdateRate = updateRate;
     }
     if (gWaveBlockCount) {
-        waves_update(tempUpdateRate);
+        PC_PROF(PC_PROF_WAVES, waves_update(tempUpdateRate));
     }
-    shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, updateRate);
+    PC_PROF(PC_PROF_SHADOWS, shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, updateRate));
     for (i = 0; i < 7; i++) {
         if ((s32) gCurrentLevelHeader2->unk74[i] != -1) {
             update_colour_cycle(gCurrentLevelHeader2->unk74[i], tempUpdateRate);
@@ -398,7 +399,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
         }
         gDPPipeSync(gTrackDL++);
-        initialise_player_viewport_vars(updateRate);
+        PC_PROF(PC_PROF_VIEWPORT, initialise_player_viewport_vars(updateRate));
         weather_clip_planes(-1, -512);
         // Show weather effects in single player.
         if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2) {
@@ -406,8 +407,8 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         }
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
-        hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, get_racer_object_by_port(gSceneCurrentPlayerID),
-                          updateRate);
+        PC_PROF(PC_PROF_HUD, hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr,
+                                               get_racer_object_by_port(gSceneCurrentPlayerID), updateRate));
     }
     // Show TT Cam toggle for the fourth viewport when playing 3 player.
     if (numViewports == 3 && level_type() != RACETYPE_CHALLENGE_EGGS && level_type() != RACETYPE_CHALLENGE_BATTLE &&
