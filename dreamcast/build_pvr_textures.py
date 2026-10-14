@@ -13,15 +13,16 @@ have produced from the cartridge data (5-bit channels widened the same way,
 gfx_create_texture applies: the format follows the alpha (RGB565 when opaque,
 ARGB1555 for a cutout, ARGB4444 otherwise), invisible texels take the average
 colour of their visible neighbours, and the image is padded to a power of two
-by repeating its edge. pvrtex then quantises and twiddles it.
+by repeating its edge. pvrtex then quantises and twiddles it, and can also compress it or add
+mipmaps (--pvrtex-flags). Each frame is kept as the complete DcTx file pvrtex
+writes, which enDjinn's enj_texture_load_blob loads as it is.
 
 Pack layout, little endian:
   header   "DTPK", u32 version, u32 count2d, u32 count3d
   index    u32 offset per texture, 2D table then 3D table; 0 means absent
-  record   u16 width, u16 height, u16 padded_w, u16 padded_h,
-           u16 frames, u16 kind (0 opaque, 1 cutout, 2 translucent),
-           u32 pvr format bits (PVR_TXRFMT_*), u32 bytes per frame,
-           then each frame's texel data, 32-byte aligned
+  record   u16 width, u16 height, u16 frames, u16 kind (0 opaque, 1 cutout,
+           2 translucent), then per frame u32 offset, u32 bytes of its DcTx
+           file; each file starts 32-byte aligned
 """
 import argparse
 import json
@@ -32,10 +33,8 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-VERSION = 1
+VERSION = 2
 KIND_OPAQUE, KIND_CUTOUT, KIND_TRANSLUCENT = 0, 1, 2
-# PVR_TXRFMT_* texture control word bits for each kind; twiddled.
-PVR_FORMAT = {KIND_OPAQUE: 1 << 27, KIND_CUTOUT: 0 << 27, KIND_TRANSLUCENT: 2 << 27}
 PVRTEX_FORMAT = {KIND_OPAQUE: "RGB565", KIND_CUTOUT: "ARGB1555", KIND_TRANSLUCENT: "ARGB4444"}
 
 
@@ -184,24 +183,20 @@ def convert_frame(job):
     return w, h, kind, pixels
 
 
-def encode(workdir, tag, w, h, pixels, kind, pvrtex):
+def encode(workdir, tag, w, h, pixels, kind, pvrtex, flags):
     pw, ph, padded = prepare(w, h, pixels, kind)
     src = workdir / f"{tag}.png"
     dst = workdir / f"{tag}.dt"
     write_png(src, pw, ph, padded)
-    subprocess.run((str(pvrtex), "-i", str(src), "-o", str(dst), "-f", PVRTEX_FORMAT[kind]),
+    subprocess.run((str(pvrtex), "-i", str(src), "-o", str(dst), "-f", PVRTEX_FORMAT[kind], *flags),
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     data = dst.read_bytes()
-    if data[:4] != b"DcTx":
-        raise ValueError(f"{tag}: pvrtex wrote no DT file")
-    header = 32 * (data[9] + 1)
-    texels = data[header:header + pw * ph * 2]
-    if len(texels) != pw * ph * 2:
-        raise ValueError(f"{tag}: unexpected DT size")
-    return pw, ph, texels
+    if data[:4] != b"DcTx" or struct.unpack_from("<I", data, 4)[0] != len(data):
+        raise ValueError(f"{tag}: pvrtex wrote no usable DT file")
+    return data
 
 
-def build(root, pvrtex, out):
+def build(root, pvrtex, out, flags):
     assets = root / "assets/.vanilla/us.v77"
     tables = []
     for table in ("2d", "3d"):
@@ -231,9 +226,8 @@ def build(root, pvrtex, out):
                 return None  # frames of different sizes: leave it to the runtime decoder
             # One format for all frames, the most capable any frame needs.
             kind = max(d[2] for d in decoded)
-            encoded = [encode(workdir, f"{tag}_{i}", w, h, d[3], kind, pvrtex) for i, d in enumerate(decoded)]
-            pw, ph = encoded[0][0], encoded[0][1]
-            return w, h, pw, ph, kind, [e[2] for e in encoded]
+            encoded = [encode(workdir, f"{tag}_{i}", w, h, d[3], kind, pvrtex, flags) for i, d in enumerate(decoded)]
+            return w, h, kind, encoded
 
         with ThreadPoolExecutor() as pool:
             results = [list(pool.map(one, table)) for table in tables]
@@ -247,20 +241,22 @@ def build(root, pvrtex, out):
             if result is None:
                 index.append(0)
                 continue
-            w, h, pw, ph, kind, frames = result
+            w, h, kind, frames = result
             while (data_start + len(blob)) % 32:
                 blob.append(0)
-            index.append(data_start + len(blob))
-            frame_bytes = pw * ph * 2
-            blob += struct.pack("<6H2I", w, h, pw, ph, len(frames), kind, PVR_FORMAT[kind], frame_bytes)
-            for texels in frames:
+            record = data_start + len(blob)
+            index.append(record)
+            table_at = len(blob) + 8
+            blob += struct.pack("<4H", w, h, len(frames), kind) + bytes(8 * len(frames))
+            for i, dt in enumerate(frames):
                 while (data_start + len(blob)) % 32:
                     blob.append(0)
-                blob += texels
+                struct.pack_into("<2I", blob, table_at + 8 * i, data_start + len(blob), len(dt))
+                blob += dt
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(b"DTPK" + struct.pack("<3I", VERSION, count2d, count3d) +
                     struct.pack(f"<{len(index)}I", *index) + bytes(blob))
-    kinds = [r[4] for t in results for r in t if r]
+    kinds = [r[2] for t in results for r in t if r]
     print(f"DKR PVR textures: {len(kinds)} textures, {kinds.count(KIND_OPAQUE)} RGB565, "
           f"{kinds.count(KIND_CUTOUT)} ARGB1555, {kinds.count(KIND_TRANSLUCENT)} ARGB4444, "
           f"{out.stat().st_size} bytes")
@@ -271,8 +267,9 @@ def main():
     parser.add_argument("root", type=Path)
     parser.add_argument("pvrtex", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument("--pvrtex-flags", default="", help="extra pvrtex options, e.g. '-c' or '-m'")
     args = parser.parse_args()
-    build(args.root.resolve(), args.pvrtex, args.output.resolve())
+    build(args.root.resolve(), args.pvrtex, args.output.resolve(), args.pvrtex_flags.split())
 
 
 if __name__ == "__main__":

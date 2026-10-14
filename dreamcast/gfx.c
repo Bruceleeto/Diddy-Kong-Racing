@@ -54,7 +54,8 @@ typedef struct {
     // a cutout, which the punch-through list can draw without blending.
     int cutout;
     int format; // PVR_TXRFMT_RGB565, _ARGB1555 or _ARGB4444, chosen from the above
-    int linear; // stored in rows rather than twiddled
+    int linear;    // stored in rows rather than twiddled; -1: format holds all layout bits
+    int mipmapped; // has mipmaps (adopted textures only)
 } DcTexture;
 
 static DcTexture sTextures[MAX_TEXTURES];
@@ -420,20 +421,21 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     sTextures[slot].cutout = cutout;
     sTextures[slot].format = format;
     sTextures[slot].linear = !DKR_TWIDDLE;
+    sTextures[slot].mipmapped = 0;
     return (unsigned int) (slot + 1);
 }
 
 /**
- * A texture converted offline (dreamcast/build_pvr_textures.py): its texels are
- * already in their final, twiddled form and only need copying to video memory.
- * kind is 0 opaque, 1 cutout, 2 translucent; format is its PVR_TXRFMT_* bits.
+ * Takes over a texture already in video memory, loaded from a pvrtex DcTx file
+ * by enDjinn (enj_texture_load_blob). format is that file's texture control
+ * bits: pixel format, twiddled or not, VQ; mipmapped says whether it has
+ * mipmaps. kind is 0 opaque, 1 cutout, 2 translucent.
  */
-unsigned int gfx_create_texture_prebuilt(const void *texels, int width, int height, int pw, int ph,
-                                         unsigned int format, int kind) {
-    pvr_ptr_t vram;
+unsigned int gfx_adopt_texture(pvr_ptr_t data, int width, int height, int pw, int ph, unsigned int format,
+                               int mipmapped, int kind) {
     int slot;
 
-    if (!sPvrReady || texels == NULL) {
+    if (!sPvrReady || data == NULL) {
         return 0;
     }
     for (slot = 0; slot < MAX_TEXTURES; slot++) {
@@ -445,14 +447,8 @@ unsigned int gfx_create_texture_prebuilt(const void *texels, int width, int heig
         printf("gfx: TEXTURE SLOTS FULL (%d)\n", MAX_TEXTURES);
         return 0;
     }
-    vram = pvr_mem_malloc((size_t) pw * ph * 2);
-    if (vram == NULL) {
-        printf("gfx: VRAM ALLOC FAILED for a prebuilt %dx%d texture, %d free\n", pw, ph, (int) pvr_mem_available());
-        return 0;
-    }
     header_cache_clear();
-    pvr_txr_load(texels, vram, (uint32_t) (pw * ph * 2));
-    sTextures[slot].data = vram;
+    sTextures[slot].data = data;
     sTextures[slot].w = width;
     sTextures[slot].h = height;
     sTextures[slot].padded_w = pw;
@@ -464,7 +460,8 @@ unsigned int gfx_create_texture_prebuilt(const void *texels, int width, int heig
     sTextures[slot].opaque = kind == 0;
     sTextures[slot].cutout = kind == 1;
     sTextures[slot].format = (int) format;
-    sTextures[slot].linear = 0;
+    sTextures[slot].linear = -1; // the format bits carry the layout
+    sTextures[slot].mipmapped = mipmapped;
     return (unsigned int) (slot + 1);
 }
 
@@ -850,11 +847,14 @@ static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
     if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
         DcTexture *t = &sTextures[sBoundTex - 1];
         // Padded (power-of-two) dims, stored as gfx_create_texture loaded them.
-        pvr_poly_cxt_txr(&cxt, list, t->format | (t->linear ? PVR_TXRFMT_NONTWIDDLED : PVR_TXRFMT_TWIDDLED),
+        pvr_poly_cxt_txr(&cxt, list,
+                         t->linear < 0 ? t->format
+                                       : (t->format | (t->linear ? PVR_TXRFMT_NONTWIDDLED : PVR_TXRFMT_TWIDDLED)),
                          t->padded_w, t->padded_h, t->data,
                          sFilterPoint ? PVR_FILTER_NEAREST : PVR_FILTER_BILINEAR);
         cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
         cxt.txr.uv_clamp = uv_clamp_from(t->cmS, t->cmT);
+        cxt.txr.mipmap = t->mipmapped ? PVR_MIPMAP_ENABLE : PVR_MIPMAP_DISABLE;
         cxt.txr.uv_flip = uv_flip_from(t->cmS, t->cmT);
         cxt.txr.alpha = PVR_TXRALPHA_ENABLE;
     } else {

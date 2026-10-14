@@ -38,8 +38,8 @@ void gfx_frame_begin(void);
 // `cmS`/`cmT` are the RDP's raw 2-bit clamp/mirror fields for each axis
 // (G_TX_WRAP / G_TX_MIRROR / G_TX_CLAMP).
 unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS, int cmT);
-unsigned int gfx_create_texture_prebuilt(const void *texels, int width, int height, int pw, int ph,
-                                         unsigned int format, int kind);
+unsigned int gfx_adopt_texture(void *data, int width, int height, int pw, int ph, unsigned int format,
+                               int mipmapped, int kind);
 void gfx_texture_set_wrap(unsigned int handle, int cmS, int cmT);
 
 // Binds a texture for subsequent draws. Handle 0 means untextured (the

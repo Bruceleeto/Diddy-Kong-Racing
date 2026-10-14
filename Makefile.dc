@@ -90,6 +90,10 @@ INCLUDES_REIMPL := \
 	-I libultra/src/os
 
 INCLUDES_REIMPL += -I$(AICAFLOW_ROOT)/driver/include -I$(AICAFLOW_ROOT)/driver/format/include -I$(AICAFLOW_ROOT)/driver/sh4/include -I$(BUILD)/aicaflow
+# enDjinn (third_party/enDjinn): so far only its texture loader.
+ENJDIR := third_party/enDjinn
+INCLUDES_REIMPL += -I$(ENJDIR)/include -I$(KOS_BASE)/utils
+DEFINES += -DENJ_CBASEPATH='"$(DKR_ASSET_MOUNT)/"'
 INCLUDES := $(INCLUDES_REIMPL)
 
 OPT      ?= -O3
@@ -120,6 +124,7 @@ CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
 # Every game-code source file, individually.
 SRC_FILES := \
 	dreamcast/main.c \
+	$(ENJDIR)/code/enj_texture.c \
 	dreamcast/frame_interp.c \
 	dreamcast/audio.c \
 	dreamcast/audio_aicaflow.c \
@@ -365,9 +370,11 @@ $(BUILD)/dreamcast/main.o: $(BUILD)/dkr_asset_mount.h
 # Every texture asset converted offline for the PVR; see dreamcast/build_pvr_textures.py.
 PVRTEX ?= $(KOS_BASE)/utils/pvrtex/pvrtex
 TEXTURE_PACK := $(BUILD)/textures.dtp
+# Extra pvrtex options for every texture, e.g. TEXTURE_PVRTEX_FLAGS="-c" for VQ or "-m" for mipmaps.
+TEXTURE_PVRTEX_FLAGS ?=
 $(TEXTURE_PACK): dreamcast/build_pvr_textures.py assets/.vanilla/us.v77/asset_textures_2d.meta.json \
 	assets/.vanilla/us.v77/asset_textures_3d.meta.json
-	$(PYTHON) dreamcast/build_pvr_textures.py . $(PVRTEX) $@
+	$(PYTHON) dreamcast/build_pvr_textures.py . $(PVRTEX) $@ $(if $(strip $(TEXTURE_PVRTEX_FLAGS)),--pvrtex-flags="$(TEXTURE_PVRTEX_FLAGS)")
 $(TARGET): $(TEXTURE_PACK)
 
 all: $(MUSIC_AFX) $(MUSIC_BANK)

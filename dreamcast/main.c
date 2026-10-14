@@ -7,6 +7,7 @@
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
+#include <enDjinn/enj_texture.h>
 
 
 extern u64 pc_uptime_ns(void);
@@ -501,7 +502,7 @@ static s32 sTexStateDirty;
 //
 // dreamcast/build_pvr_textures.py converts every texture asset offline into
 // build/dc/textures.dtp. When the game loads a texture asset (load_texture,
-// during a scene's load), its frames go straight from that pack into video
+// during a scene's load), enDjinn loads its frames from that pack into video
 // memory, keyed by the address their texels have in RAM, which is the address
 // the display list will name. texture_lookup then finds them without decoding
 // anything; decoding stays only for what the pack does not cover.
@@ -531,8 +532,8 @@ static s32 prebuilt_open(void) {
         return FALSE;
     }
     if (fs_read(sPackFile, header, sizeof(header)) != sizeof(header) || header[0] != 0x4B505444u /* DTPK */ ||
-        header[1] != 1) {
-        printf("gfx: %s is not a version 1 texture pack\n", DKR_TEXTURE_PACK);
+        header[1] != 2) {
+        printf("gfx: %s is not a version 2 texture pack\n", DKR_TEXTURE_PACK);
         return FALSE;
     }
     sPackCount2d = header[2];
@@ -578,48 +579,52 @@ static s32 prebuilt_find(u32 timg) {
  * first the first frame's header; frames follow textureSize bytes apart.
  */
 void pc_texture_loaded(void *first, s32 id, s32 frames) {
-    u16 record[6];
-    u32 words[2];
-    u32 offset, index, frameOffset;
-    u8 *buffer;
+    u16 record[4];
+    u32 table[2 * 16];
+    u32 offset, index;
     TextureHeader *frame = (TextureHeader *) first;
     s32 i;
 
     if (!prebuilt_open()) {
         return;
     }
+    if ((id & 0x8000) ? (u32) (id & 0x7FFF) >= sPackCount3d : (u32) id >= sPackCount2d) {
+        return;
+    }
     index = (id & 0x8000) ? sPackCount2d + (u32) (id & 0x7FFF) : (u32) id;
-    if (((id & 0x8000) ? (u32) (id & 0x7FFF) >= sPackCount3d : (u32) id >= sPackCount2d) || !sPackIndex[index]) {
-        return;
-    }
     offset = sPackIndex[index];
-    if (fs_seek(sPackFile, offset, SEEK_SET) < 0 || fs_read(sPackFile, record, sizeof(record)) != sizeof(record) ||
-        fs_read(sPackFile, words, sizeof(words)) != sizeof(words)) {
+    if (offset == 0 || frames <= 0 || frames > 16 || fs_seek(sPackFile, offset, SEEK_SET) < 0 ||
+        fs_read(sPackFile, record, sizeof(record)) != sizeof(record) ||
+        fs_read(sPackFile, table, 8u * (u32) frames) != (ssize_t) (8u * (u32) frames)) {
         return;
     }
-    if (record[4] != (u16) frames || record[0] != frame->width || record[1] != frame->height) {
+    if (record[2] != (u16) frames || record[0] != frame->width || record[1] != frame->height) {
         return; // not the asset the pack was built from
     }
-    buffer = memalign(32, words[1]);
-    if (buffer == NULL) {
-        return;
-    }
-    frameOffset = offset + sizeof(record) + sizeof(words);
     for (i = 0; i < frames && sPrebuiltCount < PREBUILT_MAX; i++) {
         u32 timg = (u32) (frame + 1);
-        u32 handle;
+        u32 bytes = table[2 * i + 1];
+        u8 *blob = memalign(32, bytes);
+        enj_texture_info_t info;
+        u32 handle = 0;
 
-        frameOffset = (frameOffset + 31) & ~31u;
-        if (fs_seek(sPackFile, frameOffset, SEEK_SET) < 0 ||
-            fs_read(sPackFile, buffer, words[1]) != (ssize_t) words[1]) {
+        if (blob == NULL) {
             break;
         }
-        frameOffset += words[1];
-        prebuilt_forget(timg, timg + 1); // memory reused for a new asset
-        handle = gfx_create_texture_prebuilt(buffer, record[0], record[1], record[2], record[3], words[0], record[5]);
+        // A whole pvrtex DcTx file; enDjinn reads its header and loads the rest.
+        if (fs_seek(sPackFile, table[2 * i], SEEK_SET) >= 0 && fs_read(sPackFile, blob, bytes) == (ssize_t) bytes &&
+            enj_texture_load_blob(blob, &info)) {
+            handle = gfx_adopt_texture(info.ptr, record[0], record[1], info.width, info.height,
+                                       info.pvrformat & 0x7FFFFFFFu, info.flags.mipmapped, record[3]);
+            if (handle == 0) {
+                pvr_mem_free(info.ptr);
+            }
+        }
+        free(blob);
         if (handle == 0) {
             break;
         }
+        prebuilt_forget(timg, timg + 1); // memory reused for a new asset
         sPrebuilt[sPrebuiltCount].timg = timg;
         sPrebuilt[sPrebuiltCount].handle = handle;
         sPrebuilt[sPrebuiltCount].width = record[0];
@@ -627,7 +632,6 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         sPrebuiltCount++;
         frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
     }
-    free(buffer);
 }
 
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
