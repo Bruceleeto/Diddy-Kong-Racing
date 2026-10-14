@@ -108,8 +108,9 @@ Planned loads run on the game thread with the audio mutex held, after waiting
 for the fallback worker to go idle. A music change outside a level load stops
 the old song, releases it and loads the new one before returning.
 
-Race voices are one pack per racer character (`voice` lines in `dkr.afsfx`).
-They are not charged to a scene. Once the racers exist, `dkr_afx_voices_prepare`
+Race voices are one pack per racer character (`voice` lines in `dkr.afsfx`),
+stored as ADPCM (`afx_n64 --sfx-adpcm`) at half PCM8's size. They are not
+charged to a scene. Once the racers exist, `dkr_afx_voices_prepare`
 loads the packs of the characters in the race, players first, while each fits
 in what the level and its song left and 64 KB stays free. A pack that does not
 fit is skipped and its clips fall back to loading on demand. A later song or

@@ -83,13 +83,13 @@ def aica_bytes(image, controls):
     return result
 
 
-def write_pack(path, ids, control, samples, author, merger):
+def write_pack(path, ids, control, samples, author, merger, mode="--sfx"):
     raw = path.parent / f".{path.stem}.raw"
     raw.mkdir(parents=True, exist_ok=True)
     flows = []
     for sound_id in ids:
         flow = raw / f"{sound_id}.afx"
-        subprocess.run((str(author), "--sfx", str(control), str(samples), str(sound_id), str(flow)),
+        subprocess.run((str(author), mode, str(control), str(samples), str(sound_id), str(flow)),
                        check=True, stdout=subprocess.DEVNULL)
         flows.append(flow)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,8 +197,10 @@ def main():
     for level in range(count):
         ids = scene_ids.get(level, [])
         sizes.append(write_pack(output / "scenes" / f"{level}.afb", ids, control, samples, args.author, args.merger) if ids else 0)
+    # Voice clips as ADPCM: half the size of PCM8, and on the console they sounded
+    # as good, so far more racers' voices fit beside a level.
     voice_sizes = [write_pack(output / "voices" / f"{character}.afb", voices[character], control, samples,
-                              args.author, args.merger) if character in voices else 0
+                              args.author, args.merger, "--sfx-adpcm") if character in voices else 0
                    for character in range(VOICE_CHARACTERS)]
     present = [int(level in scene_ids) for level in range(count)]
     write_header(output / "sfx_manifest.h", present, masks, sizes, banks["core"], banks["vehicle"], scene_ids,
