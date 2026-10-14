@@ -1,5 +1,6 @@
 #include "dkr_asset_mount.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <ultra64.h>
 #include <structs.h>
 #include <f3ddkr.h>
@@ -20,6 +21,7 @@ extern u64 pc_uptime_ns(void);
 #endif
 static u32 sTexDecodes, sTexPrebuiltHits; // what texture lookups did, for the profile
 static u32 sTexLoadsInFrame;  // prebuilt textures read since the last frame
+static u32 sModelLoadsInFrame; // object models read from disc since the last frame
 static u64 sTexLoadNsInFrame;
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
@@ -175,12 +177,15 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         extern volatile u64 dkr_afx_load_ns;
         extern s32 sTransitionStatus;
         u64 afxLoad = dkr_afx_load_ns;
+        // The frame that opened the scene gate carries the scene's first logic
+        // step, which is part of the load (see scene_gate.c).
+        int opening = pc_scene_take_opening_frame();
 
-        if (work > 20000 && pc_scene_is_ready()) {
-            printf("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us | logic %lu scene %lu us, "
-                   "%lu tris, transition %ld, audio loads %lu us\n",
+        if (work > 20000 && pc_scene_is_ready() && !opening) {
+            printf("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us, %lu model loads | logic %lu "
+                   "scene %lu us, %lu tris, transition %ld, audio loads %lu us\n",
                    (unsigned long) work, (unsigned long) ((t2 - t1) / 1000u), (unsigned long) sTexLoadsInFrame,
-                   (unsigned long) (sTexLoadNsInFrame / 1000u),
+                   (unsigned long) (sTexLoadNsInFrame / 1000u), (unsigned long) sModelLoadsInFrame,
                    // The profile restarts its sums every PROF_FRAMES frames.
                    (unsigned long) (PROF_SINCE(sProf.part[PC_PROF_LOGIC], sLastPart[PC_PROF_LOGIC]) / 1000u),
                    (unsigned long) (PROF_SINCE(sProf.part[PC_PROF_SCENE], sLastPart[PC_PROF_SCENE]) / 1000u),
@@ -192,6 +197,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         sLastAfxLoad = afxLoad;
         sTexLoadsInFrame = 0;
         sTexLoadNsInFrame = 0;
+        sModelLoadsInFrame = 0;
         sFrameStart = t3;
         sProf.waitFrame = 0;
     }
@@ -563,6 +569,7 @@ static struct {
 static s32 sBundleCount;
 static s32 sSceneLevel = -1;
 static u32 sBundleClaims; // textures taken from the bundle since the last report
+static u32 sModelHeld, sModelHeldMs; // scene models the gate loaded, see pc_model_scene_load
 static s32 sPrebuiltCount;
 static file_t sPackFile = FILEHND_INVALID;
 static u32 *sPackIndex;
@@ -887,10 +894,112 @@ void pc_texture_load_report(u32 sceneMs) {
         unclaimed += !sBundle[i].claimed;
     }
     printf("SCENE LOAD %lu ms: %lu textures from the scene bundle (%ld frames left unclaimed), "
-           "%lu frames read singly in %lu ms\n", (unsigned long) sceneMs, (unsigned long) sBundleClaims,
-           (long) unclaimed, (unsigned long) sTexLoadCount, (unsigned long) (sTexLoadNs / 1000000u));
+           "%lu frames read singly in %lu ms, %lu models held in %lu ms\n", (unsigned long) sceneMs,
+           (unsigned long) sBundleClaims, (long) unclaimed, (unsigned long) sTexLoadCount,
+           (unsigned long) (sTexLoadNs / 1000000u), (unsigned long) sModelHeld, (unsigned long) sModelHeldMs);
     sTexLoadNs = 0;
     sTexLoadReads = sTexLoadCount = sBundleClaims = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Scene models. dreamcast/models.scenes lists, per scene, the object models
+// its objects load after the scene has started (the character demo swaps
+// racers). The scene gate loads them and holds a reference until the next
+// scene loads, so those objects find them in the game's model cache.
+// ---------------------------------------------------------------------------
+#define DKR_MODEL_SCENES DKR_ASSET_MOUNT "/build/dc/models.scenes"
+extern s32 pc_model_hold(s32 modelID);
+extern void pc_model_release_held(void);
+
+void pc_model_loaded(s32 modelID) {
+#if DKR_TEX_TRACE
+    printf("MODELUSE level=%ld id=%04lx\n", (long) sSceneLevel, (unsigned long) modelID);
+#endif
+    if (pc_scene_is_ready()) {
+        sModelLoadsInFrame++; // a disc read in the middle of play
+    }
+}
+
+void pc_model_scene_release(void) {
+    pc_model_release_held();
+}
+
+/** Reads a scene map (build/dc/NAME.scenes) once; NULL if it is missing. */
+static const char *scene_map(const char *path, char **cache, s32 *tried) {
+    if (!*tried) {
+        file_t file = fs_open(path, O_RDONLY);
+        *tried = TRUE;
+        if (file != FILEHND_INVALID) {
+            size_t size = fs_total(file);
+            *cache = malloc(size + 1);
+            if (*cache != NULL && fs_read(file, *cache, size) == (ssize_t) size) {
+                (*cache)[size] = '\0';
+            } else {
+                free(*cache);
+                *cache = NULL;
+            }
+            fs_close(file);
+        }
+    }
+    return *cache;
+}
+
+/** The IDs a scene map lists for a level, after "scene LEVEL "; NULL if none. */
+static const char *scene_map_ids(const char *map, int level) {
+    char key[24];
+    const char *line;
+    s32 keyLength;
+
+    if (map == NULL || level < 0) {
+        return NULL;
+    }
+    keyLength = snprintf(key, sizeof(key), "scene %ld ", (long) level);
+    for (line = map; line != NULL && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
+        if (strncmp(line, key, keyLength) == 0) {
+            return line + keyLength;
+        }
+    }
+    return NULL;
+}
+
+void pc_model_scene_load(int level) {
+    static char *sMap;
+    static s32 sMapTried;
+    u64 started = timer_ns_gettime64();
+    const char *p = scene_map_ids(scene_map(DKR_MODEL_SCENES, &sMap, &sMapTried), level);
+
+    sModelHeld = 0;
+    while (p != NULL && *p && *p != '\n') {
+        char *end;
+        long id = strtol(p, &end, 16);
+        if (end == p || !pc_model_hold((s32) id)) {
+            break; // the end of the line, or the model table or memory has no more room
+        }
+        sModelHeld++;
+        p = end;
+    }
+    sModelHeldMs = (u32) ((timer_ns_gettime64() - started) / 1000000u);
+}
+
+// dreamcast/songs.scenes: the song a scene starts after it has begun (a
+// cutscene's animation object), which the gate makes resident beforehand.
+#define DKR_SONG_SCENES DKR_ASSET_MOUNT "/build/dc/songs.scenes"
+extern void music_prepare(u8 seqID);
+
+void pc_song_scene_load(int level) {
+    static char *sMap;
+    static s32 sMapTried;
+    const char *p = scene_map_ids(scene_map(DKR_SONG_SCENES, &sMap, &sMapTried), level);
+    char *end;
+    long sequence;
+
+    if (p == NULL) {
+        return;
+    }
+    sequence = strtol(p, &end, 16);
+    if (end != p && sequence > 0) {
+        music_prepare((u8) sequence); // one song fits; the first the scene starts
+    }
 }
 
 void pc_gfx_invalidate_range(const void *addr, s32 size) {

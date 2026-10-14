@@ -1095,6 +1095,9 @@ static int song_load(uint8_t sequence) {
     uint64_t started = timer_us_gettime64();
     int result;
     snprintf(path, sizeof(path), DKR_SONG_DIR "/sequence_%u.afb", sequence);
+#if defined(DKR_TEX_TRACE) && DKR_TEX_TRACE
+    printf("SONGUSE level=%d id=%04x\n", sSceneLevel == UINT16_MAX ? -1 : (int)sSceneLevel, sequence);
+#endif
     result = DKR_AFX_RETRY(afx_bank_load_file(&sSong.bank, path));
     dkr_afx_load_ns += (timer_us_gettime64() - started) * 1000u;
     benchmark_bank_load(started, result ? 0 : sSong.bank.bytes);

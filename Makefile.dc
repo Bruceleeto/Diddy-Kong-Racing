@@ -358,6 +358,7 @@ cdi:
 	mkdir -p cdrom/build/dc/aicaflow/music_raw cdrom/build/dc/aicaflow/jingle_controls
 	cp $(BUILD)/aicaflow/core.afb $(BUILD)/aicaflow/vehicle.afb $(JINGLE_BANK) cdrom/build/dc/aicaflow/
 	cp $(TEXTURE_PACK) cdrom/build/dc/
+	cp $(MODEL_SCENES) $(SONG_SCENES) cdrom/build/dc/
 	rm -rf cdrom/build/dc/texscenes
 	cp -R $(BUILD)/texscenes cdrom/build/dc/
 	cp $(JINGLE_CONTROLS)/*.afx cdrom/build/dc/aicaflow/jingle_controls/
@@ -388,6 +389,18 @@ $(TEXTURE_PACK): dreamcast/build_pvr_textures.py dreamcast/textures.scenes asset
 	$(PYTHON) dreamcast/build_pvr_textures.py . $(PVRTEX) $@ --scenes $(BUILD)/texscenes \
 		--recorded dreamcast/textures.scenes $(if $(strip $(TEXTURE_PVRTEX_FLAGS)),--pvrtex-flags="$(TEXTURE_PVRTEX_FLAGS)")
 $(TARGET): $(TEXTURE_PACK)
+# The object models each scene's gate loads and holds (dreamcast/models.scenes).
+MODEL_SCENES := $(BUILD)/models.scenes
+$(MODEL_SCENES): dreamcast/models.scenes
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(TARGET): $(MODEL_SCENES)
+# The song each scene's cutscene starts after it has begun (dreamcast/songs.scenes).
+SONG_SCENES := $(BUILD)/songs.scenes
+$(SONG_SCENES): dreamcast/songs.scenes
+	@mkdir -p $(dir $@)
+	cp $< $@
+$(TARGET): $(SONG_SCENES)
 
 all: $(MUSIC_AFX) $(MUSIC_BANK)
 $(TARGET): | $(SFX_FALLBACK)

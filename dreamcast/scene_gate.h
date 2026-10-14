@@ -12,11 +12,19 @@
 void pc_scene_loading(int level);
 void pc_scene_ready(void);
 
+// The game calls this after each logic step. The first one after a load is
+// still part of it: it spawns the scene's objects, which load what they use and
+// may start the song.
+void pc_scene_step_done(void);
+
 // The frame backend calls this after it has drawn a frame. The first frame
 // drawn after a load opens the gate: the scene is on screen, so its sound starts.
 void pc_scene_frame_shown(void);
 
 // Whether the current scene has finished loading.
 int pc_scene_is_ready(void);
+
+// Whether the frame just drawn opened the gate, once: its time is the load's.
+int pc_scene_take_opening_frame(void);
 
 #endif

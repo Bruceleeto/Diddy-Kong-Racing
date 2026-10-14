@@ -1,0 +1,14 @@
+# Object models each scene loads, recorded on the console. The scene gate
+# loads a scene's models before the scene starts and holds a reference to each
+# until the next scene loads, so objects that spawn later (the character demo
+# swaps racers) find them in the game's model cache instead of reading the
+# disc. A model missing here still works: it is read when an object needs it.
+#
+# Regenerate from a TEX_TRACE=1 log with dreamcast/record_scenes.py.
+# Format: scene LEVEL ID ...   (model IDs in hex)
+scene 5 017c
+scene 18 017c
+scene 19 017c
+scene 23 0025 0026 0027 0028 0029 002a 0031 0037 007f 0091 009e 00b6 00bc 00ca 00d3 00ef 011a 0130 0132
+scene 28 017c
+scene 29 017c

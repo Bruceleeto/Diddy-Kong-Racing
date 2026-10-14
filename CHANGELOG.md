@@ -125,8 +125,17 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   character demo swaps in and out load without reading the disc. In the attract
   demos no texture is read while a scene runs; before, the character demo read
   up to 125 in one frame (up to 0.5 s).
-  `dreamcast/record_texture_scenes.py` merges the `TEXUSE` lines of a
+  `dreamcast/record_scenes.py` merges the `TEXUSE` lines of a
   `TEX_TRACE=1` run into `textures.scenes`.
+- **The gate also holds a scene's models and its cutscene song.** Object
+  models a scene loaded while it ran (`dreamcast/models.scenes`, recorded like
+  the textures) are loaded by the gate and kept until the next scene, so the
+  character demo's racer swaps no longer read and unpack models from disc
+  (50–330 ms each before). The song a cutscene starts a few frames in
+  (`dreamcast/songs.scenes`) is made resident before the scene starts, and the
+  scene's first logic step, which spawns its objects, counts as part of the
+  load. In the attract demos no texture, model or sound is now read while a
+  scene runs.
 
 ## Build
 

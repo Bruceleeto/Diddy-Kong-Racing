@@ -473,6 +473,7 @@ static void game_logic_step(s32 updateRate) {
     frame_interp_before_step();
     PC_PROF(PC_PROF_LOGIC, obj_update(step));
     frame_interp_after_step();
+    pc_scene_step_done();
 }
 
 static void game_scene_draw(s32 updateRate) {

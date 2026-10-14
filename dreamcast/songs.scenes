@@ -1,0 +1,9 @@
+# The song each scene starts after it has begun, recorded on the console: a
+# cutscene's animation object starts it a few frames in (the character demo's
+# title theme). The scene gate makes the first one listed resident before the
+# scene starts. Songs a level starts itself are loaded with the level and are
+# not listed. A song missing here still plays: it loads when it starts.
+#
+# Regenerate from a TEX_TRACE=1 log with dreamcast/record_scenes.py.
+# Format: scene LEVEL SEQUENCE ...   (sequence IDs in hex, in the order started)
+scene 23 0007
