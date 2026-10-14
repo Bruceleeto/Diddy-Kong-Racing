@@ -9,7 +9,7 @@
 // on screen.
 
 // load_level_game() and load_level_menu() call these around the whole load.
-void pc_scene_loading(void);
+void pc_scene_loading(int level);
 void pc_scene_ready(void);
 
 // The frame backend calls this after it has drawn a frame. The first frame

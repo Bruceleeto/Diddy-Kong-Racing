@@ -526,7 +526,26 @@ static struct {
     u32 timg;   // the frame's texels in RAM: the texture header plus one
     u32 handle;
     u16 width, height;
+    s16 bundle; // the sBundle entry that owns the handle, or -1 if this entry owns it
 } sPrebuilt[PREBUILT_MAX];
+
+// The current scene's bundle (build/dc/texscenes/LEVEL.dtb): every texture the
+// scene is known to use, loaded into video memory in one sequential read when
+// the scene starts loading. load_texture then claims its frames from here
+// instead of reading the pack. The bundle keeps its textures for the whole
+// scene: one the game frees goes back to the bundle, so loading it again (the
+// character demo swaps models) does not read the pack. The next scene's load
+// frees what is unclaimed and hands what is still in use to sPrebuilt.
+#define BUNDLE_MAX 2048
+static struct {
+    u16 id, frame;
+    u16 width, height;
+    u32 handle;
+    s16 claimed; // in use by an sPrebuilt entry
+} sBundle[BUNDLE_MAX];
+static s32 sBundleCount;
+static s32 sSceneLevel = -1;
+static u32 sBundleClaims; // textures taken from the bundle since the last report
 static s32 sPrebuiltCount;
 static file_t sPackFile = FILEHND_INVALID;
 static u32 *sPackIndex;
@@ -569,7 +588,11 @@ static void prebuilt_forget(u32 lo, u32 hi) {
 
     for (i = 0; i < sPrebuiltCount;) {
         if (sPrebuilt[i].timg >= lo && sPrebuilt[i].timg < hi) {
-            gfx_delete_texture(sPrebuilt[i].handle);
+            if (sPrebuilt[i].bundle >= 0) {
+                sBundle[sPrebuilt[i].bundle].claimed = FALSE;
+            } else {
+                gfx_delete_texture(sPrebuilt[i].handle);
+            }
             sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
         } else {
             i++;
@@ -593,6 +616,148 @@ static s32 prebuilt_find(u32 timg) {
  * frames in video memory. id is the asset ID (bit 15 set for the 3D table),
  * first the first frame's header; frames follow textureSize bytes apart.
  */
+/** Registers frame `i` of a texture whose header is at `frame`; returns FALSE if the table is full. */
+static s32 prebuilt_register(TextureHeader *frame, u32 handle, u16 width, u16 height, s16 bundle) {
+    u32 timg = (u32) (frame + 1);
+
+    if (sPrebuiltCount >= PREBUILT_MAX) {
+        return FALSE;
+    }
+    prebuilt_forget(timg, timg + 1); // memory reused for a new asset
+    sPrebuilt[sPrebuiltCount].timg = timg;
+    sPrebuilt[sPrebuiltCount].handle = handle;
+    sPrebuilt[sPrebuiltCount].width = width;
+    sPrebuilt[sPrebuiltCount].height = height;
+    sPrebuilt[sPrebuiltCount].bundle = bundle;
+    sPrebuiltCount++;
+    return TRUE;
+}
+
+/** Takes a texture's frames from the scene bundle if they are all there. */
+static s32 bundle_claim(void *first, s32 id, s32 frames) {
+    TextureHeader *frame = (TextureHeader *) first;
+    s32 found = 0, i, f;
+
+    for (i = 0; i < sBundleCount; i++) {
+        if (!sBundle[i].claimed && sBundle[i].id == (u16) id) {
+            found++;
+        }
+    }
+    if (found != frames) {
+        return FALSE;
+    }
+    for (f = 0; f < frames; f++) {
+        for (i = 0; i < sBundleCount; i++) {
+            if (!sBundle[i].claimed && sBundle[i].id == (u16) id && sBundle[i].frame == f) {
+                if (sBundle[i].width != frame->width || sBundle[i].height != frame->height ||
+                    !prebuilt_register(frame, sBundle[i].handle, sBundle[i].width, sBundle[i].height, (s16) i)) {
+                    return f > 0; // a partial claim keeps what it took
+                }
+                sBundle[i].claimed = TRUE;
+                break;
+            }
+        }
+        frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
+    }
+    sBundleClaims++;
+    return TRUE;
+}
+
+/**
+ * The scene gate calls this as a scene starts loading: frees what the previous
+ * scene's bundle has unclaimed, hands what is claimed to sPrebuilt, then reads
+ * this scene's bundle straight through and puts every texture in it into video
+ * memory.
+ */
+void pc_texture_scene_load(int level) {
+    char path[96];
+    u32 header[4];
+    u32 pos;
+    file_t file;
+    s32 i, n;
+
+    for (i = 0; i < sBundleCount; i++) {
+        if (!sBundle[i].claimed) {
+            gfx_delete_texture(sBundle[i].handle);
+        }
+    }
+    for (i = 0; i < sPrebuiltCount; i++) {
+        sPrebuilt[i].bundle = -1;
+    }
+    sBundleCount = 0;
+    sSceneLevel = level;
+    snprintf(path, sizeof(path), DKR_ASSET_MOUNT "/build/dc/texscenes/%ld.dtb", (long) level);
+    file = fs_open(path, O_RDONLY);
+    if (file == FILEHND_INVALID) {
+        return;
+    }
+    if (fs_read(file, header, sizeof(header)) != sizeof(header) || header[0] != 0x42535444u /* DTSB */ ||
+        header[1] != 1) {
+        fs_close(file);
+        return;
+    }
+    pos = sizeof(header);
+    for (n = 0; n < (s32) header[2] && sBundleCount < BUNDLE_MAX; n++) {
+        u32 entry[2];
+        u16 *record;
+        u32 *table;
+        u8 *block;
+
+        // Each entry header sits 8 bytes before a 32-byte boundary, so its
+        // record starts aligned for enDjinn's loader.
+        while ((pos + 8) % 32) {
+            u8 pad[32];
+            u32 skip = (32 - ((pos + 8) % 32)) % 32;
+            if (fs_read(file, pad, skip) != (ssize_t) skip) {
+                goto done;
+            }
+            pos += skip;
+        }
+        if (fs_read(file, entry, sizeof(entry)) != sizeof(entry)) {
+            break;
+        }
+        pos += sizeof(entry);
+        block = memalign(32, entry[1]);
+        if (block == NULL) {
+            break;
+        }
+        if (fs_read(file, block, entry[1]) != (ssize_t) entry[1]) {
+            free(block);
+            break;
+        }
+        pos += entry[1];
+        record = (u16 *) block;
+        table = (u32 *) (block + 8);
+        for (i = 0; i < record[2] && sBundleCount < BUNDLE_MAX; i++) {
+            enj_texture_info_t info;
+            u32 handle = 0;
+
+            if (table[2 * i] + table[2 * i + 1] <= entry[1] && enj_texture_load_blob(block + table[2 * i], &info)) {
+                handle = gfx_adopt_texture(info.ptr, record[0], record[1], info.width, info.height,
+                                           info.pvrformat & 0x7FFFFFFFu, info.flags.mipmapped, record[3]);
+                if (handle == 0) {
+                    pvr_mem_free(info.ptr);
+                }
+            }
+            if (handle == 0) {
+                printf("gfx: scene %ld bundle stopped at texture %04lx frame %ld, %lu bytes of video memory free\n",
+                       (long) level, (unsigned long) entry[0], (long) i, (unsigned long) pvr_mem_available());
+                break;
+            }
+            sBundle[sBundleCount].id = (u16) entry[0];
+            sBundle[sBundleCount].frame = (u16) i;
+            sBundle[sBundleCount].width = record[0];
+            sBundle[sBundleCount].height = record[1];
+            sBundle[sBundleCount].handle = handle;
+            sBundle[sBundleCount].claimed = FALSE;
+            sBundleCount++;
+        }
+        free(block);
+    }
+done:
+    fs_close(file);
+}
+
 // Time and reads spent loading prebuilt textures since the last scene report.
 static u64 sTexLoadNs;
 static u32 sTexLoadReads, sTexLoadCount;
@@ -606,6 +771,12 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
     u64 started = timer_ns_gettime64();
     s32 i;
 
+#if DKR_TEX_TRACE
+    printf("TEXUSE level=%ld id=%04lx\n", (long) sSceneLevel, (unsigned long) (id & 0xFFFF));
+#endif
+    if (bundle_claim(first, id, frames)) {
+        return;
+    }
     if (!prebuilt_open()) {
         return;
     }
@@ -677,6 +848,7 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         sPrebuilt[sPrebuiltCount].handle = handle;
         sPrebuilt[sPrebuiltCount].width = record[0];
         sPrebuilt[sPrebuiltCount].height = record[1];
+        sPrebuilt[sPrebuiltCount].bundle = -1;
         sPrebuiltCount++;
         sTexLoadCount++;
         frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
@@ -692,10 +864,16 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
 
 /** Prints and resets what loading prebuilt textures cost; the scene gate calls it. */
 void pc_texture_load_report(u32 sceneMs) {
-    printf("SCENE LOAD %lu ms: %lu prebuilt textures in %lu ms, %lu reads\n", (unsigned long) sceneMs,
-           (unsigned long) sTexLoadCount, (unsigned long) (sTexLoadNs / 1000000u), (unsigned long) sTexLoadReads);
+    s32 i, unclaimed = 0;
+
+    for (i = 0; i < sBundleCount; i++) {
+        unclaimed += !sBundle[i].claimed;
+    }
+    printf("SCENE LOAD %lu ms: %lu textures from the scene bundle (%ld frames left unclaimed), "
+           "%lu frames read singly in %lu ms\n", (unsigned long) sceneMs, (unsigned long) sBundleClaims,
+           (long) unclaimed, (unsigned long) sTexLoadCount, (unsigned long) (sTexLoadNs / 1000000u));
     sTexLoadNs = 0;
-    sTexLoadReads = sTexLoadCount = 0;
+    sTexLoadReads = sTexLoadCount = sBundleClaims = 0;
 }
 
 void pc_gfx_invalidate_range(const void *addr, s32 size) {

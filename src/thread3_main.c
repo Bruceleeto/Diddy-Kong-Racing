@@ -398,7 +398,7 @@ void load_next_ingame_level(s32 numPlayers, s32 trackID, Vehicle vehicle) {
  */
 void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId) {
 #ifdef TARGET_PC
-    pc_scene_loading();
+    pc_scene_loading(levelId);
 #endif
     alloc_displaylist_heap(numberOfPlayers);
     mempool_free_timer(0);
@@ -935,7 +935,7 @@ Vehicle get_level_default_vehicle(void) {
  */
 void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId, s32 cutsceneId) {
 #ifdef TARGET_PC
-    pc_scene_loading();
+    pc_scene_loading(levelId);
 #endif
     mempool_free_timer(0);
     cam_init();

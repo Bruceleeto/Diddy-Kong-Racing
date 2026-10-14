@@ -17,6 +17,16 @@ by repeating its edge. pvrtex then quantises and twiddles it, and can also compr
 mipmaps (--pvrtex-flags). Each frame is kept as the complete DcTx file pvrtex
 writes, which enDjinn's enj_texture_load_blob loads as it is.
 
+It also writes one bundle per scene (--scenes): every texture the scene is
+known to use, laid out to be read in one sequential pass while the scene loads,
+so nothing is read from disc while it runs. A scene's set is the textures of
+its level model, read from the model itself, plus those listed for it in
+dreamcast/textures.scenes, which records what the game loaded at run time.
+
+Bundle layout, little endian: "DTSB", u32 version, u32 count, then per texture
+u32 id (bit 15 set for the 3D table), u32 bytes, and that many bytes laid out as
+a pack record whose frame offsets count from the record's start.
+
 Pack layout, little endian:
   header   "DTPK", u32 version, u32 count2d, u32 count3d
   index    u32 offset per texture, 2D table then 3D table; 0 means absent
@@ -198,7 +208,66 @@ def encode(workdir, tag, w, h, pixels, kind, pvrtex, flags):
     return data
 
 
-def build(root, pvrtex, out, flags):
+def level_model_textures(assets):
+    """For each level ID, the 3D texture IDs its level model lists."""
+    headers = json.loads((assets / "asset_level_headers.meta.json").read_text())["files"]
+    models = json.loads((assets / "asset_level_models.meta.json").read_text())["files"]
+    result = []
+    for name in headers["order"]:
+        section = headers["sections"].get(name)
+        ids = []
+        if section:
+            header = json.loads((assets / "levels/headers" / section["filename"]).read_text())
+            model = models["sections"].get(header.get("model", ""))
+            if model:
+                desc = assets / "levels/models" / model["filename"]
+                raw = (desc.parent / json.loads(desc.read_text())["raw"]).read_bytes()
+                data = zlib.decompress(raw[5:], -15)  # DKR's gzip: five header bytes, then deflate
+                table, count = struct.unpack_from(">I", data, 0)[0], struct.unpack_from(">h", data, 0x18)[0]
+                ids = sorted({struct.unpack_from(">I", data, table + 8 * i)[0] | 0x8000 for i in range(count)})
+        result.append(ids)
+    return result
+
+
+def recorded_textures(path):
+    """dreamcast/textures.scenes: lines 'scene LEVEL ID ...', IDs in hex."""
+    scenes = {}
+    if path and path.exists():
+        for raw in path.read_text().splitlines():
+            fields = raw.split("#", 1)[0].split()
+            if not fields:
+                continue
+            if fields[0] != "scene" or len(fields) < 2:
+                raise ValueError(f"{path}: invalid line: {raw}")
+            scenes.setdefault(int(fields[1]), set()).update(int(v, 16) for v in fields[2:])
+    return scenes
+
+
+def write_bundle(path, ids, blocks):
+    """blocks: id -> (w, h, kind, [DcTx bytes, ...])"""
+    body = bytearray()
+    count = 0
+    for tex_id in ids:
+        block = blocks.get(tex_id)
+        if block is None:
+            continue
+        w, h, kind, frames = block
+        record = bytearray(struct.pack("<4H", w, h, len(frames), kind) + bytes(8 * len(frames)))
+        for i, dt in enumerate(frames):
+            while len(record) % 32:
+                record.append(0)
+            struct.pack_into("<2I", record, 8 + 8 * i, len(record), len(dt))
+            record += dt
+        # Keep each record 32-byte aligned within the file: 16-byte header, 8 bytes per entry.
+        while (16 + len(body) + 8) % 32:
+            body.append(0)
+        body += struct.pack("<2I", tex_id, len(record)) + record
+        count += 1
+    path.write_bytes(b"DTSB" + struct.pack("<2I", 1, count) + bytes(4) + bytes(body))
+    return count, path.stat().st_size
+
+
+def build(root, pvrtex, out, flags, scenes_dir=None, recorded=None):
     assets = root / "assets/.vanilla/us.v77"
     tables = []
     for table in ("2d", "3d"):
@@ -258,6 +327,22 @@ def build(root, pvrtex, out, flags):
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(b"DTPK" + struct.pack("<3I", VERSION, count2d, count3d) +
                     struct.pack(f"<{len(index)}I", *index) + bytes(blob))
+    if scenes_dir:
+        blocks = {}
+        for table_index, table in enumerate(results):
+            for index, result in enumerate(table):
+                if result:
+                    blocks[(0x8000 if table_index else 0) | index] = result
+        models = level_model_textures(root / "assets/.vanilla/us.v77")
+        recorded_ids = recorded_textures(recorded)
+        scenes_dir.mkdir(parents=True, exist_ok=True)
+        total = 0
+        for level, model_ids in enumerate(models):
+            ids = sorted(set(model_ids) | recorded_ids.get(level, set()))
+            if ids:
+                count, size = write_bundle(scenes_dir / f"{level}.dtb", ids, blocks)
+                total += size
+        print(f"DKR PVR textures: {len(models)} scene bundles, {total} bytes")
     kinds = [r[2] for t in results for r in t if r]
     print(f"DKR PVR textures: {len(kinds)} textures, {kinds.count(KIND_OPAQUE)} RGB565, "
           f"{kinds.count(KIND_CUTOUT)} ARGB1555, {kinds.count(KIND_TRANSLUCENT)} ARGB4444, "
@@ -270,8 +355,11 @@ def main():
     parser.add_argument("pvrtex", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--pvrtex-flags", default="", help="extra pvrtex options, e.g. '-c' or '-m'")
+    parser.add_argument("--scenes", type=Path, help="directory for the per-scene bundles")
+    parser.add_argument("--recorded", type=Path, help="dreamcast/textures.scenes")
     args = parser.parse_args()
-    build(args.root.resolve(), args.pvrtex, args.output.resolve(), args.pvrtex_flags.split())
+    build(args.root.resolve(), args.pvrtex, args.output.resolve(), args.pvrtex_flags.split(),
+          args.scenes.resolve() if args.scenes else None, args.recorded.resolve() if args.recorded else None)
 
 
 if __name__ == "__main__":

@@ -42,7 +42,7 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   leaves about 0.55 MB of video memory free; without FSAA it is 1.5 MB.
 - Measurement tools: a frame profile (`GFX_PROFILE=1`), per-handler timers
   (`=2`) and a sampling profiler (`=3`, writes `build/dc/prof_samples.bin`);
-  `AUTO_EXIT_SECONDS`, `DEMO_LEVEL`, `SKIP_WATER`, `TEX_TRACE`; and a debug view
+  `AUTO_EXIT_SECONDS`, `DEMO_LEVEL`, `SKIP_WATER`, `SKIP_PARTICLES`, `TEX_TRACE`; and a debug view
   (`DEBUG_VIEW=1`) that holds a frame and switches cutout modes from the
   controller.
 
@@ -109,6 +109,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   everything the scene needs is resident and its first frame is on screen.
   Until then no sound or song starts, and the load's time is not counted as
   game time.
+- **Scene texture bundles** (`build/dc/texscenes/LEVEL.dtb`). Each holds the
+  textures a scene uses, from its level model's texture tables and from
+  `dreamcast/textures.scenes`, and loads in one sequential read when the scene
+  starts. The bundle keeps its textures for the whole scene, so models the
+  character demo swaps in and out load without reading the disc. In the attract
+  demos no texture is read while a scene runs; before, the character demo read
+  up to 125 in one frame (up to 0.5 s).
+  `dreamcast/record_texture_scenes.py` merges the `TEXUSE` lines of a
+  `TEX_TRACE=1` run into `textures.scenes`.
 
 ## Build
 

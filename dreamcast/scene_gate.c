@@ -10,14 +10,17 @@ extern void dkr_afx_scene_hold(int held);
 #endif
 
 extern void pc_texture_load_report(unsigned int sceneMs);
+extern void pc_texture_scene_load(int level);
 
 static volatile int sSceneReady = 1;
 static volatile int sAwaitingFrame; // loaded, but its first frame is not on screen yet
 static unsigned long long sLoadStarted;
 
-void pc_scene_loading(void) {
+void pc_scene_loading(int level) {
     sSceneReady = 0;
     sLoadStarted = timer_ms_gettime64();
+    // The scene's textures first, in one pass, before the game asks for any.
+    pc_texture_scene_load(level);
 #ifdef DKR_AICAFLOW
     dkr_afx_scene_hold(1);
 #endif
