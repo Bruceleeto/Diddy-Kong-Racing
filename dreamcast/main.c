@@ -267,6 +267,13 @@ s32 pc_retrace_wait(void) {
     nowNs = pc_uptime_ns();
 
     if (sLastNs == 0 || sRetraceReset) {
+#ifdef DKR_AICAFLOW
+        // The new scene has drawn its first frame: its sounds and music may start.
+        extern void dkr_afx_scene_hold(int held);
+        if (sRetraceReset) {
+            dkr_afx_scene_hold(0);
+        }
+#endif
         sRetraceReset = FALSE;
         sLastNs = nowNs;
         return PC_LOGIC_UPDATE_RATE;

@@ -271,6 +271,10 @@ static uint16_t sSceneLevel = UINT16_MAX;
 static uint8_t sVehicleMask;
 static int sReady;
 static volatile uint8_t sWantedSequence;
+// While a scene loads, nothing new starts: sounds wait as if no voice were free
+// and the song waits to be activated, so all of it begins with the scene's
+// first frame instead of over the loading screen.
+static volatile uint8_t sSceneHeld;
 static semaphore_t sSfxLoadWake = SEM_INITIALIZER(0);
 static volatile uint8_t sCurrentSequence;
 static volatile uint8_t sFailedSequence;
@@ -814,11 +818,16 @@ int dkr_afx_sfx_play(uint16_t id, void *owner, uint8_t priority) {
     return result;
 }
 
+void dkr_afx_scene_hold(int held) {
+    __atomic_store_n(&sSceneHeld, held ? 1 : 0, __ATOMIC_RELEASE);
+}
+
 static int sfx_play(uint16_t id, void *owner, uint8_t priority) {
     const dkr_sfx_bank_t *bank;
     uint32_t sound_index;
     uint32_t i;
     if (!sReady || !owner) return -AFX_BAD_COMMAND;
+    if (__atomic_load_n(&sSceneHeld, __ATOMIC_ACQUIRE)) return -AFX_BUSY; /* retried once the scene starts */
     bank = sfx_bank_for(id, &sound_index);
     if (!bank) return fallback_request(id);
     if (!sndp_aicaflow_voice_available(owner)) {
@@ -1261,7 +1270,7 @@ void dkr_afx_update(void) {
         goto done;
     }
 
-    if (wanted != DKR_SEQUENCE_NONE &&
+    if (wanted != DKR_SEQUENCE_NONE && !__atomic_load_n(&sSceneHeld, __ATOMIC_ACQUIRE) &&
         wanted != __atomic_load_n(&sFailedSequence, __ATOMIC_ACQUIRE)) {
         afx_asset_t flow = music_flow_for(wanted);
         int result = flow ? AFX_OK : -AFX_BAD_FORMAT;

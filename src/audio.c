@@ -457,6 +457,7 @@ void sound_scene_prepare(u16 level) {
     int result;
 
     pc_audio_lock();
+    dkr_afx_scene_hold(TRUE); // released with the scene's first frame, see pc_retrace_wait
     result = dkr_afx_sfx_scene_prepare(level);
     pc_audio_unlock();
     if (result) stubbed_printf("AICAFLOW: scene SFX for level %d was not prepared (%d)\n", level, result);
