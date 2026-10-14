@@ -37,7 +37,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   `TEXTURE_PVRTEX_FLAGS` passes options such as VQ (`-c`) or mipmaps (`-m`).
 - **enDjinn** as a submodule (`third_party/enDjinn`), used for its texture
   loader.
-- **Optional FSAA** (`FSAA=1`): renders twice as wide and filters down.
+- **Optional FSAA** (`FSAA=1`): renders twice as wide and filters down. With
+  60 fps it holds 58.9–59.5 fps in races and 56.8 in the character demo, and
+  leaves about 0.55 MB of video memory free; without FSAA it is 1.5 MB.
 - Measurement tools: a frame profile (`GFX_PROFILE=1`), per-handler timers
   (`=2`) and a sampling profiler (`=3`, writes `build/dc/prof_samples.bin`);
   `AUTO_EXIT_SECONDS`, `DEMO_LEVEL`, `SKIP_WATER`, `TEX_TRACE`; and a debug view
