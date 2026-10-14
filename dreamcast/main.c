@@ -12,6 +12,7 @@
 
 extern u64 pc_uptime_ns(void);
 #include "prof.h"
+#include "scene_gate.h"
 
 #define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
 static u32 sTexDecodes, sTexPrebuiltHits; // what texture lookups did, for the profile
@@ -2812,6 +2813,7 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd);
 
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     gfx_task_draw(dlBegin, dlEnd);
+    pc_scene_frame_shown();
 #if DKR_DEBUG_VIEW
     // The game does not run while a frame is held: its last display list is
     // drawn again each field, so a mode change shows on the same picture.

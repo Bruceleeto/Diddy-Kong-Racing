@@ -12,6 +12,7 @@ extern void dkr_afx_scene_hold(int held);
 extern void pc_texture_load_report(unsigned int sceneMs);
 
 static volatile int sSceneReady = 1;
+static volatile int sAwaitingFrame; // loaded, but its first frame is not on screen yet
 static unsigned long long sLoadStarted;
 
 void pc_scene_loading(void) {
@@ -28,6 +29,16 @@ void pc_scene_ready(void) {
     // the load's time is not played back as game time.
     pc_retrace_reset();
     frame_interp_reset();
+    // Sound waits until the scene can be seen: the game may still skip drawing
+    // its first frames, and a sound should not start over the old picture.
+    sAwaitingFrame = 1;
+}
+
+void pc_scene_frame_shown(void) {
+    if (!sAwaitingFrame) {
+        return;
+    }
+    sAwaitingFrame = 0;
 #ifdef DKR_AICAFLOW
     dkr_afx_scene_hold(0);
 #endif
