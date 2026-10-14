@@ -47,6 +47,7 @@
 #include <PR/os_cont.h>
 #include <PR/os_time.h>
 #include "../dreamcast/prof.h"
+#include "../dreamcast/scene_gate.h"
 
 /************ .rodata ************/
 
@@ -396,6 +397,9 @@ void load_next_ingame_level(s32 numPlayers, s32 trackID, Vehicle vehicle) {
  * Used when ingame.
  */
 void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId) {
+#ifdef TARGET_PC
+    pc_scene_loading();
+#endif
     alloc_displaylist_heap(numberOfPlayers);
     mempool_free_timer(0);
     cam_init();
@@ -407,6 +411,9 @@ void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle v
     osSetTime(0);
     mempool_free_timer(2);
     rumble_init(TRUE);
+#ifdef TARGET_PC
+    pc_scene_ready();
+#endif
 }
 
 /**
@@ -927,6 +934,9 @@ Vehicle get_level_default_vehicle(void) {
  * Used for menus.
  */
 void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId, s32 cutsceneId) {
+#ifdef TARGET_PC
+    pc_scene_loading();
+#endif
     mempool_free_timer(0);
     cam_init();
     load_game_text_table();
@@ -938,6 +948,9 @@ void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle v
     ainode_update();
     osSetTime(0);
     mempool_free_timer(2);
+#ifdef TARGET_PC
+    pc_scene_ready();
+#endif
 }
 
 /**

@@ -271,9 +271,9 @@ static uint16_t sSceneLevel = UINT16_MAX;
 static uint8_t sVehicleMask;
 static int sReady;
 static volatile uint8_t sWantedSequence;
-// While a scene loads, nothing new starts: sounds wait as if no voice were free
-// and the song waits to be activated, so all of it begins with the scene's
-// first frame instead of over the loading screen.
+// Closed by the scene gate (dreamcast/scene_gate.c) while a scene loads.
+// Nothing new starts then: sounds wait as if no voice were free and the song
+// waits to be activated, and both start when the gate opens.
 static volatile uint8_t sSceneHeld;
 static semaphore_t sSfxLoadWake = SEM_INITIALIZER(0);
 static volatile uint8_t sCurrentSequence;

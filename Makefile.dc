@@ -126,6 +126,7 @@ SRC_FILES := \
 	dreamcast/main.c \
 	$(ENJDIR)/code/enj_texture.c \
 	dreamcast/frame_interp.c \
+	dreamcast/scene_gate.c \
 	dreamcast/audio.c \
 	dreamcast/audio_aicaflow.c \
 	dreamcast/dkr_dsp_room.c \

@@ -250,9 +250,10 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
 static s32 sRetraceReset;
 
 /**
- * Makes the next frame start the pacer's clock afresh. Every scene change calls
- * this: the time a load took is not game time, and counting it would have the
- * game pay it back by running the first frames of the new scene too fast.
+ * Makes the next frame start the pacer's clock afresh. The scene gate calls this
+ * when a scene has loaded (dreamcast/scene_gate.c): the time a load took is not
+ * game time, and counting it would have the game pay it back by running the
+ * first frames of the new scene too fast.
  */
 void pc_retrace_reset(void) {
     sRetraceReset = TRUE;
@@ -267,13 +268,6 @@ s32 pc_retrace_wait(void) {
     nowNs = pc_uptime_ns();
 
     if (sLastNs == 0 || sRetraceReset) {
-#ifdef DKR_AICAFLOW
-        // The new scene has drawn its first frame: its sounds and music may start.
-        extern void dkr_afx_scene_hold(int held);
-        if (sRetraceReset) {
-            dkr_afx_scene_hold(0);
-        }
-#endif
         sRetraceReset = FALSE;
         sLastNs = nowNs;
         return PC_LOGIC_UPDATE_RATE;
