@@ -3,18 +3,31 @@
 # The source sound IDs are 1-based ALInstrument sound-list entries in
 # asset_audio_2.bin.  `bank` entries stay resident by class; `scene` entries
 # are loaded only for their level.  `vehicle-masks` has one bit mask per DKR
-# scene (car=1, hovercraft=2, plane=4).  This is source policy, not a runtime
-# format: afx_n64 lowers the IDs and afx_bank merges each listed pack.
+# scene (car=1, hovercraft=2, plane=4).  `voice` entries are one pack per
+# racer character (the game's character ID) with that character's race voice
+# clips; a pack is loaded for the characters in a race while space remains.
+# This is source policy, not a runtime format: afx_n64 lowers the IDs and
+# afx_bank merges each listed pack.
 scene-count 65
 vehicle-masks 7 2 1 7 2 7 3 6 2 3 3 4 1 7 2 7 1 7 3 2 7 0 0 0 1 1 2 1 7 7 7 3 3 7 4 1 1 1 1 0 2 4 1 1 1 1 1 1 1 1 1 1 2 2 4 4 1 1 4 2 1 2 1 1 1
 
-bank core 1 4 5 7 10 17 19 21 22 24 25 35 41 47 55 74 76 77 83 114 122 128 139 155 180 189 200 218 224 225 226 227 228 231 232 233 234 235 236 237 243 257 261 262 266 269 286 289 304 505 563 565 567 677
-bank vehicle 42 43 44 45 80 81 84 86 87 97 98 113 115 116 117 118 119 120 121 381 382 383 384 385
+bank core 1 4 5 7 10 17 19 21 22 24 25 35 41 47 55 74 76 77 83 114 122 128 139 155 180 189 200 218 224 225 226 227 228 231 232 233 234 235 236 237 243 257 261 262 266 269 282 286 289 295 304 505 563 565 567 677
+bank vehicle 3 13 42 43 44 45 80 81 84 86 87 97 98 113 115 116 117 118 119 120 121 381 382 383 384 385
 
+# Krunch (character 0) has no pack: his clips are in the core bank.
+voice 1 210 211 212 213 214 215 216 217 219 220 221 222 223
+voice 2 251 252 253 254 255 256 258 259 260 263
+voice 3 239 240 241 242 244 245 246 248 250
+voice 4 129 130 131 132 133 134 135 136 137 138 140 141
+voice 5 179 181 182 183 184 185 186 187
+voice 6 164 165 166 167 168 169 170 171 172 173 174 175 177
+voice 7 194 195 196 197 198 199 201 202 203 204 205 206
+voice 8 478 479 480 481 482 483 484 485 486 487 488
+voice 9 499 500 501 502 503 504 506 507 508 509 529 530 531 532 533
 scene 0 92
 scene 3 434 435 436 441 447
 scene 4 68 434 435 436 441 447
-scene 5 434 435 436 441 447
+scene 5 68 434 435 436 441 447 461
 scene 6 434 435 436 441 447
 scene 7 434 435 436 439 441 447
 scene 8 56 434 435 436 439 441 447
@@ -28,7 +41,7 @@ scene 18 434 435 436 441 447
 scene 19 434 435 436 439 441 447
 scene 20 434 435 436 441 447
 scene 21 89 91 502
-scene 23 89 502
+scene 23 89 502 561
 scene 25 435 439 442 447
 scene 26 435 439 442 447
 scene 27 435 439 442 447

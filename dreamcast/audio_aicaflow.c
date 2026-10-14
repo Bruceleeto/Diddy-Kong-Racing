@@ -127,7 +127,30 @@ static void benchmark_update(uint64_t started) {
     }
     benchmark_reset();
 }
+
+/* The driver starts an instance one tick after the AICA clock it reads. If
+ * the command then reaches the queue later than that, the instance starts
+ * late by the difference, which the firmware reports as lateness. */
+static int benchmark_activate(afx_asset_t flow, afx_instance_t *instance, const char *what, unsigned id) {
+    uint32_t before = afx_status_timer_ticks();
+    uint64_t started = timer_us_gettime64();
+    int result = afx_instance_activate(flow, instance);
+    uint32_t us = (uint32_t)(timer_us_gettime64() - started);
+    uint32_t ticks = afx_status_timer_ticks() - before;
+    if (ticks > 1 || us > 1000)
+        printf("DKR AICAFLOW BENCH: activating %s %u took %lu us, %lu ticks (%d)\n", what, id,
+               (unsigned long)us, (unsigned long)ticks, result);
+    return result;
+}
+
+/* A finished instance reports the worst lateness of its own events. */
+static void benchmark_late(const char *what, unsigned id, const afx_instance_status_t *status) {
+    if (status->state == AFX_DONE && !status->result && status->detail >= 4)
+        printf("DKR AICAFLOW BENCH: %s %u ran up to %lu ticks late\n", what, id, (unsigned long)status->detail);
+}
 #else
+#define benchmark_activate(flow, instance, what, id) afx_instance_activate(flow, instance)
+#define benchmark_late(what, id, status) ((void)0)
 #define benchmark_reset() ((void)0)
 #define benchmark_flow_upload(started, bytes) ((void)0)
 #define benchmark_bank_load(started, bytes) ((void)0)
@@ -145,6 +168,9 @@ alignas(32) static const unsigned char firmware[] = {
 #define DKR_RESIDENT_SFX_PATH DKR_ASSET_MOUNT "/build/dc/aicaflow/core.afb"
 #define DKR_SCENE_SFX_DIR DKR_ASSET_MOUNT "/build/dc/aicaflow/scenes"
 #define DKR_VEHICLE_SFX_PATH DKR_ASSET_MOUNT "/build/dc/aicaflow/vehicle.afb"
+#define DKR_VOICE_SFX_DIR DKR_ASSET_MOUNT "/build/dc/aicaflow/voices"
+/* Kept free beside the voice packs for sounds that no plan lists. */
+#define DKR_VOICE_RESERVE_BYTES 0x10000u
 #define DKR_JINGLE_BANK_PATH DKR_ASSET_MOUNT "/build/dc/aicaflow/jingles.afb"
 #define DKR_JINGLE_CONTROL_DIR DKR_ASSET_MOUNT "/build/dc/aicaflow/jingle_controls"
 #define DKR_SONG_DIR DKR_ASSET_MOUNT "/build/dc/aicaflow/music_raw"
@@ -215,6 +241,7 @@ static void fallback_load(void);
 static int fallback_clear(void);
 static void fallback_quiesce(void);
 static void fallback_release_idle(unsigned keep);
+static int fallback_bank_active(const dkr_sfx_bank_t *bank);
 static int sfx_bank_release(dkr_sfx_bank_t *bank);
 extern void pc_audio_lock(void);
 extern void pc_audio_unlock(void);
@@ -227,6 +254,11 @@ static dkr_sfx_slot_t sSfxSlots[DKR_SFX_SLOTS];
 static dkr_sfx_bank_t sResidentSfx;
 static dkr_sfx_bank_t sSceneSfx;
 static dkr_sfx_bank_t sVehicleSfx;
+/* One pack per racer character. The level's packs and its song come first;
+ * these take what is left and give it back when a song or a sound needs it. */
+static dkr_sfx_bank_t sVoiceSfx[DKR_AFX_VOICE_PACK_COUNT];
+static uint8_t sVoiceWanted[DKR_AFX_VOICE_PACK_COUNT]; /* Most important first. */
+static uint8_t sVoiceWantedCount;
 #define DKR_FALLBACK_SLOTS DKR_SFX_SLOTS
 static struct {
     dkr_sfx_bank_t bank;
@@ -425,6 +457,69 @@ static const char *sfx_vehicle_path(uint16_t level) {
 }
 
 
+/* Gives back the space of the least important voice pack that is not playing.
+ * Returns 0 when there was none. The caller holds the game audio mutex. */
+static int voices_release_one(void) {
+    for (unsigned i = sVoiceWantedCount; i-- > 0;) {
+        dkr_sfx_bank_t *bank = &sVoiceSfx[sVoiceWanted[i]];
+        if (!bank->bank.asset || fallback_bank_active(bank)) continue;
+        if (!sfx_bank_release(bank)) return 1;
+    }
+    return 0;
+}
+
+static int voices_release_all(void) {
+    for (unsigned i = 0; i < DKR_AFX_VOICE_PACK_COUNT; ++i) {
+        int result = sfx_bank_release(&sVoiceSfx[i]);
+        if (result) return result;
+    }
+    return AFX_OK;
+}
+
+/* Loads the wanted packs in order of importance while each fits and still
+ * leaves the reserve. A pack that does not fit is skipped, not an error: its
+ * sounds then load one by one when they are first played. */
+static void voices_load(void) {
+    unsigned loaded = 0;
+    for (unsigned i = 0; i < sVoiceWantedCount; ++i) {
+        unsigned character = sVoiceWanted[i];
+        afx_mem_stats_t memory;
+        char afb[80], controls[80];
+        int result;
+        if (sVoiceSfx[character].bank.asset) { ++loaded; continue; }
+        if (afx_mem_stats(&memory) ||
+            memory.largest_free_block < dkr_afx_voice_bytes[character] + DKR_VOICE_RESERVE_BYTES) continue;
+        snprintf(afb, sizeof(afb), DKR_VOICE_SFX_DIR "/%u.afb", character);
+        snprintf(controls, sizeof(controls), DKR_VOICE_SFX_DIR "/%u", character);
+        result = sfx_bank_load(&sVoiceSfx[character], afb, controls,
+                               dkr_afx_voice_sound_ids + dkr_afx_voice_sound_first[character],
+                               dkr_afx_voice_sound_count[character]);
+        if (result) printf("DKR AICAFLOW: voice pack %u did not load (%d)\n", character, result);
+        else ++loaded;
+    }
+    benchmark_memory("voice packs", loaded);
+}
+
+/* Makes the race voices of these racer characters resident, the first ones
+ * first, as far as the level's own audio leaves room. Call after the level's
+ * song is prepared, with the game audio mutex held. */
+void dkr_afx_voices_prepare(const uint8_t *characters, unsigned count) {
+    uint32_t wanted = 0;
+    if (!sReady) return;
+    sVoiceWantedCount = 0;
+    for (unsigned i = 0; i < count; ++i) {
+        unsigned character = characters[i];
+        if (character >= DKR_AFX_VOICE_PACK_COUNT || !dkr_afx_voice_sound_count[character] ||
+            (wanted >> character & 1)) continue;
+        wanted |= 1u << character;
+        sVoiceWanted[sVoiceWantedCount++] = (uint8_t)character;
+    }
+    fallback_quiesce();
+    for (unsigned i = 0; i < DKR_AFX_VOICE_PACK_COUNT; ++i)
+        if (!(wanted >> i & 1) && !fallback_bank_active(&sVoiceSfx[i])) (void)sfx_bank_release(&sVoiceSfx[i]);
+    voices_load();
+}
+
 static int scene_packs_load(uint16_t level, const char *vehicle_path, const char *scene_path) {
     int result = AFX_OK;
     if (vehicle_path && !sVehicleSfx.bank.asset)
@@ -479,6 +574,10 @@ int dkr_afx_sfx_scene_prepare(uint16_t level) {
     fallback_quiesce();
     result = fallback_clear();
     if (result) return result;
+    /* Voice packs sit behind the old song; the new level's racers reload theirs. */
+    result = voices_release_all();
+    if (result) return result;
+    sVoiceWantedCount = 0;
     if (sSceneSfx.bank.asset) {
         result = sfx_bank_release(&sSceneSfx);
         if (result) return result;
@@ -548,9 +647,10 @@ int dkr_afx_init(void) {
 }
 
 static const dkr_sfx_bank_t *sfx_bank_for(uint16_t id, uint32_t *index) {
-    const dkr_sfx_bank_t *banks[] = { &sSceneSfx, &sVehicleSfx, &sResidentSfx };
+    const dkr_sfx_bank_t *banks[3 + DKR_AFX_VOICE_PACK_COUNT] = { &sSceneSfx, &sVehicleSfx, &sResidentSfx };
     uint32_t i;
     uint32_t bank;
+    for (i = 0; i < DKR_AFX_VOICE_PACK_COUNT; ++i) banks[3 + i] = &sVoiceSfx[i];
     for (bank = 0; bank < sizeof(banks) / sizeof(banks[0]); ++bank) {
         for (i = 0; banks[bank]->bank.asset && i < banks[bank]->sound_count; ++i) {
             if (banks[bank]->sounds[i].id == id) {
@@ -667,15 +767,16 @@ static void fallback_load(void) {
     }
     pc_audio_lock();
     if (result == -AFX_NO_AICA_RAM && generation == sFallbackGeneration) {
-        /* Make room without touching planned assets or playing sounds. */
+        /* Make room without touching the level's assets or playing sounds:
+         * first the idle unplanned sounds, then the least important voices. */
         fallback_release_idle(i);
-        pc_audio_unlock();
-        {
+        do {
             char controls[80];
+            pc_audio_unlock();
             snprintf(controls, sizeof(controls), DKR_ASSET_MOUNT "/build/dc/aicaflow/fallback/controls");
             result = sfx_bank_load(&sFallback[i].bank, path, controls, &id, 1);
-        }
-        pc_audio_lock();
+            pc_audio_lock();
+        } while (result == -AFX_NO_AICA_RAM && generation == sFallbackGeneration && voices_release_one());
     }
     if (generation != sFallbackGeneration) {
         int released = sfx_bank_release(&sFallback[i].bank);
@@ -727,7 +828,7 @@ static int sfx_play(uint16_t id, void *owner, uint8_t priority) {
         dkr_sfx_slot_t *slot = &sSfxSlots[i];
         int result;
         if (slot->instance) continue;
-        result = afx_instance_activate(bank->sounds[sound_index].flow, &slot->instance);
+        result = benchmark_activate(bank->sounds[sound_index].flow, &slot->instance, "sound", id);
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             return sfx_preempt(priority);
         }
@@ -1026,9 +1127,12 @@ int dkr_afx_music_prepare(uint8_t sequence) {
     if (!result) result = song_release();
     if (!result) result = song_load(sequence);
     if (result == -AFX_NO_AICA_RAM) {
-        /* Unplanned fallback sounds may sit in the song's space. */
+        /* Unplanned fallback sounds and voice packs may sit in the song's
+         * space. The song comes first; the voices then take what is left. */
         fallback_release_idle(DKR_FALLBACK_SLOTS);
-        result = song_load(sequence);
+        do result = song_load(sequence);
+        while (result == -AFX_NO_AICA_RAM && voices_release_one());
+        if (sVoiceWantedCount) voices_load();
     }
     if (result) printf("DKR AICAFLOW: sequence %u did not load (%d)\n", sequence, result);
     return result;
@@ -1117,6 +1221,7 @@ static void update_sfx(void) {
         if (status.state != AFX_DONE && status.state != AFX_ERROR) continue;
         if (afx_instance_recycle(slot->instance)) continue;
         benchmark_sound(slot->sound->id, "ended state/result/preempted", status.state, status.result, !slot->owner);
+        benchmark_late("sound", slot->sound->id, &status);
         owner = slot->owner;
         *slot = (dkr_sfx_slot_t){0};
         sndp_aicaflow_complete(owner);
@@ -1150,6 +1255,7 @@ void dkr_afx_update(void) {
         }
         if (status.state != AFX_DONE && status.state != AFX_ERROR) goto done;
         if (afx_instance_recycle(sMusic)) goto done;
+        benchmark_late("sequence", sCurrentSequence, &status);
         sMusic = 0;
         __atomic_store_n(&sCurrentSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
         goto done;
@@ -1162,7 +1268,7 @@ void dkr_afx_update(void) {
         if (!result) {
             sAuthoredTempo = __atomic_load_n(&sTempo, __ATOMIC_ACQUIRE);
             if (!sAuthoredTempo) sAuthoredTempo = 120;
-            result = afx_instance_activate(flow, &sMusic);
+            result = benchmark_activate(flow, &sMusic, "sequence", wanted);
         }
         if (result == -AFX_BUSY) goto done;
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {

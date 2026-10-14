@@ -46,7 +46,13 @@ def plan(output, firmware, sequences, jingles):
         "core": core, "jingles": jingle, "dsp_ring": DSP_RING_BYTES, "vehicle": vehicle,
         "song_max": song, "song_max_sequence": max(songs, key=songs.get),
         "levels": levels,
+        # Not charged to a level: voice packs take what a level leaves.
+        "voices": manifest["voice_bytes"],
     }
+
+
+def manifest_masks(output):
+    return json.loads((output / "manifest.json").read_text())["vehicle_masks"]
 
 
 def write_header(path, budget, jingles):
@@ -85,6 +91,12 @@ def main():
     print(f"DKR AICAFLOW budget: tightest scene {tight} needs {budget['levels'][tight]} "
           f"with sequence {budget['song_max_sequence']} ({budget['song_max']}), "
           f"{free - budget['levels'][tight]} to spare")
+    voices = sorted(size for size in budget["voices"] if size)
+    if voices:
+        racing = [free - need for need, mask in zip(budget["levels"], manifest_masks(output)) if mask]
+        print(f"DKR AICAFLOW budget: {len(voices)} voice packs of {voices[0]}..{voices[-1]} bytes "
+              f"({sum(voices)} together) share what a level leaves: "
+              f"{min(racing)}..{max(racing)} with the largest song")
     if over:
         raise SystemExit("DKR AICAFLOW budget: scenes over budget: " +
                          ", ".join(f"{level} by {need - free}" for level, need in over))

@@ -50,14 +50,25 @@ void pc_audio_lock(void) {}
 void pc_audio_unlock(void) {}
 #define benchmark_bank_load(started, bytes) ((void)(started))
 #define benchmark_memory(what, id) ((void)0)
+#define benchmark_late(what, id, status) ((void)0)
+#define benchmark_activate(flow, instance, what, id) afx_instance_activate(flow, instance)
 #define benchmark_unplanned(id, level) ((void)0)
 #define benchmark_sound(id, what, a, b, c) ((void)0)
 #define DKR_AFX_RETRY(call) (call)
 #define DKR_AFX_JINGLE_COUNT 2u
 static const unsigned char dkr_afx_jingle_sequences[DKR_AFX_JINGLE_COUNT] = { 2, 3 };
 #define DKR_SONG_DIR "songs"
+#define DKR_VOICE_SFX_DIR "voices"
+#define DKR_VOICE_RESERVE_BYTES 100u
+#define DKR_AFX_VOICE_PACK_COUNT 4u
+static const unsigned short dkr_afx_voice_sound_ids[] = { 10, 20, 30 };
+static const unsigned short dkr_afx_voice_sound_first[DKR_AFX_VOICE_PACK_COUNT] = { 0, 0, 1, 2 };
+static const unsigned short dkr_afx_voice_sound_count[DKR_AFX_VOICE_PACK_COUNT] = { 0, 1, 1, 1 };
+static const unsigned int dkr_afx_voice_bytes[DKR_AFX_VOICE_PACK_COUNT] = { 0, 1000, 2000, 3000 };
+static unsigned voiceLoads, freeBlock;
+int afx_mem_stats(afx_mem_stats_t *memory) { memory->largest_free_block = freeBlock; return 0; }
 static unsigned gains, patches, loads, fallbackLoads, bankLoads, bankReleases, frees, stops, recycles;
-static int busy, bankResult, instanceState = AFX_RUNNING;
+static int busy, bankResult, noRoom, instanceState = AFX_RUNNING;
 static afx_asset_t nextAsset = 1000;
 static uint8_t lastGain, loaded[16];
 static uint16_t lastValues[AFX_FIELD_COUNT];
@@ -71,6 +82,7 @@ int afx_instance_patch(afx_instance_t instance, uint8_t channel, uint32_t mask, 
 int afx_asset_free(afx_asset_t flow) { (void)flow; ++frees; return 0; }
 int afx_bank_load_file(afx_bank_t *bank, const char *path) {
     (void)path; if (bankResult) return bankResult;
+    if (noRoom) { --noRoom; return -AFX_NO_AICA_RAM; }
     ++bankLoads; bank->asset = ++nextAsset; bank->bytes = 32; return 0;
 }
 int afx_bank_release(afx_bank_t *bank) { ++bankReleases; *bank = (afx_bank_t){0}; return 0; }
@@ -98,6 +110,11 @@ static int music_flow_load(const afx_bank_t *bank, const char *directory, uint8_
     loaded[loads++] = sequence; *flow = ++nextAsset; return 0;
 }
 static int sfx_bank_release(dkr_sfx_bank_t *bank) { memset(bank, 0, sizeof(*bank)); return 0; }
+static int sfx_bank_load(dkr_sfx_bank_t *bank, const char *afb, const char *controls,
+                         const uint16_t *ids, uint16_t count) {
+    (void)afb; (void)controls; assert(count == 1 && !bank->bank.asset);
+    bank->bank.asset = ++nextAsset; freeBlock -= ids[0] * 100u; ++voiceLoads; return 0;
+}
 static void fallback_load(void) {
     for (unsigned i = 0; i < DKR_FALLBACK_SLOTS; ++i) {
         if (sFallback[i].requested) {
@@ -114,6 +131,7 @@ names = [
     "dkr_afx_scene_reverb", "jingle_flow", "music_flow_for", "fallback_bank_active",
     "fallback_quiesce", "fallback_release_idle", "fallback_request", "sfx_loader",
     "song_in_use", "song_release", "song_load", "music_retire",
+    "voices_release_one", "voices_load", "dkr_afx_voices_prepare",
     "dkr_afx_music_prepare", "dkr_afx_music_prefetch", "dkr_afx_music_play", "dkr_afx_update",
 ]
 checks = r'''
@@ -191,6 +209,25 @@ int main(void) {
     bankResult = -AFX_NO_AICA_RAM;
     assert(dkr_afx_music_prepare(25) == -AFX_NO_AICA_RAM);
     assert(!sSong.flow && !sSong.bank.asset && !sSong.sequence);
+    /* Voice packs load in the order given while each one leaves the reserve.
+     * Character 0 has no pack, 9 does not exist and 2 is listed twice. */
+    freeBlock = 3200;
+    dkr_afx_voices_prepare((const uint8_t[]){ 2, 0, 9, 2, 1, 3 }, 6);
+    assert(voiceLoads == 2 && sVoiceSfx[2].bank.asset && sVoiceSfx[1].bank.asset && !sVoiceSfx[3].bank.asset);
+    /* Space is taken back from the least important pack, never a playing one. */
+    assert(voices_release_one() && !sVoiceSfx[1].bank.asset && sVoiceSfx[2].bank.asset);
+    sSfxSlots[0] = (dkr_sfx_slot_t){ .instance = 1, .bank = &sVoiceSfx[2] };
+    assert(!voices_release_one() && sVoiceSfx[2].bank.asset);
+    sSfxSlots[0].instance = 0;
+    /* A song that needs a voice pack's space gets it. */
+    bankResult = 0; noRoom = 2;
+    assert(!dkr_afx_music_prepare(26) && sSong.sequence == 26 && !sVoiceSfx[2].bank.asset);
+    /* The next race drops the packs it has no racer for. */
+    freeBlock = 5000; voiceLoads = 0;
+    dkr_afx_voices_prepare((const uint8_t[]){ 2 }, 1);
+    freeBlock = 5000; /* The fake allocator does not refund a release. */
+    dkr_afx_voices_prepare((const uint8_t[]){ 3 }, 1);
+    assert(voiceLoads == 2 && !sVoiceSfx[2].bank.asset && sVoiceSfx[3].bank.asset);
     return 0;
 }
 '''
