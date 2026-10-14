@@ -3417,6 +3417,20 @@ void menu_title_screen_init(void) {
     set_time_trial_enabled(FALSE);
     gTitleDemoIndex = 0;
     sTitleScreenDemoIds = (s8 *) get_misc_asset(ASSET_MISC_TITLE_SCREEN_DEMO_IDS);
+#if defined(DKR_DEMO_LEVEL) && DKR_DEMO_LEVEL >= 0
+    // Measurement builds (DEMO_LEVEL=n): start the attract loop at that level's
+    // demo instead of waiting minutes for it to come round.
+    {
+        s32 i;
+
+        for (i = 0; sTitleScreenDemoIds[i] != -1; i += DEMO_INDEX_SIZE) {
+            if (sTitleScreenDemoIds[i + DEMO_LEVEL_ID] == DKR_DEMO_LEVEL) {
+                gTitleDemoIndex = i;
+                break;
+            }
+        }
+    }
+#endif
     numberOfPlayers = sTitleScreenDemoIds[gTitleDemoIndex + DEMO_PLAYER_COUNT];
     gTitleDemoTimer = 0;
     if (numberOfPlayers == -2) {
