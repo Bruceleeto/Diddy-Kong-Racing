@@ -176,8 +176,8 @@ alignas(32) static const unsigned char firmware[] = {
 #define DKR_SONG_DIR DKR_ASSET_MOUNT "/build/dc/aicaflow/music_raw"
 #define DKR_SEQUENCE_COUNT 66
 
-/* Planned loads run with the game audio mutex held and the fallback worker
- * idle, so a busy driver lock is only a momentary preemption. The driver drops
+/* Planned loads run with the game audio mutex held and no fallback load in
+ * progress, so a busy driver lock is only a momentary preemption. The driver drops
  * a recycled instance's reference to its flow on a later afx_update(), so a
  * release that follows a recycle waits for that too. */
 #define DKR_AFX_RETRY(call) ({ \
@@ -229,7 +229,6 @@ extern int sndp_aicaflow_bank_pending(uint16_t id);
 extern int sndp_aicaflow_voice_available(void *owner);
 static void apply_sfx_controls(dkr_sfx_slot_t *slot);
 static void update_sfx(void);
-static void *sfx_loader(void *unused);
 static int music_flow_load(const afx_bank_t *bank, const char *directory, uint8_t sequence,
                            afx_asset_t *out_flow);
 static int song_load(uint8_t sequence);
@@ -267,6 +266,8 @@ static struct {
     int result;
 } sFallback[DKR_FALLBACK_SLOTS];
 static uint32_t sFallbackGeneration;
+/* Time spent loading audio from disc, for the frame profile's long frames. */
+volatile uint64_t dkr_afx_load_ns;
 static uint16_t sSceneLevel = UINT16_MAX;
 static uint8_t sVehicleMask;
 static int sReady;
@@ -275,7 +276,6 @@ static volatile uint8_t sWantedSequence;
 // Nothing new starts then: sounds wait as if no voice were free and the song
 // waits to be activated, and both start when the gate opens.
 static volatile uint8_t sSceneHeld;
-static semaphore_t sSfxLoadWake = SEM_INITIALIZER(0);
 static volatile uint8_t sCurrentSequence;
 static volatile uint8_t sFailedSequence;
 static volatile uint8_t sGain = 255;
@@ -636,14 +636,6 @@ int dkr_afx_init(void) {
                    (unsigned long)memory.largest_free_block, (unsigned long)DKR_AFX_LEVEL_MAX_BYTES);
     }
     if (!result && !music_flow_for(DKR_STARTUP_MUSIC)) result = song_load(DKR_STARTUP_MUSIC);
-    if (!result) {
-        kthread_attr_t attr = {
-            /* File I/O and flow validation need the normal KOS thread stack. */
-            .create_detached = 1, .stack_size = 0, .stack_ptr = NULL,
-            .prio = 12, .label = "sfx-loader", .disable_tls = 1
-        };
-        if (!thd_create_ex(&attr, sfx_loader, NULL)) result = -AFX_NO_HOST_RAM;
-    }
     sReady = result == 0;
     if (!result) benchmark_reset();
     if (result) printf("DKR AICAFLOW: init failed (%d)\n", result);
@@ -693,14 +685,20 @@ static int fallback_clear(void) {
     return AFX_OK;
 }
 
-/* Waits until the fallback worker holds no load, so a planned load is the only
- * AICA allocation in progress. The caller holds the game audio mutex, which
- * also keeps the worker from starting another one. */
+/* Drops requested unplanned sounds and waits until no fallback load is in
+ * progress, so a planned load is the only AICA allocation in progress. The
+ * caller holds the game audio mutex. Only dkr_afx_frame() loads, on the game
+ * thread, so a caller there never waits. */
 static void fallback_quiesce(void) {
+    for (unsigned i = 0; i < DKR_FALLBACK_SLOTS; ++i)
+        if (sFallback[i].requested) {
+            sFallback[i].requested = 0;
+            sFallback[i].id = 0;
+        }
     for (;;) {
         unsigned busy = 0;
         for (unsigned i = 0; i < DKR_FALLBACK_SLOTS; ++i)
-            busy |= sFallback[i].loading | sFallback[i].requested;
+            busy |= sFallback[i].loading;
         if (!busy) return;
         pc_audio_unlock();
         thd_sleep(1);
@@ -740,15 +738,17 @@ static int fallback_request(uint16_t id) {
             sFallback[i].result = 0;
             sFallback[i].requested = 1;
             benchmark_unplanned(id, sSceneLevel);
-            sem_signal(&sSfxLoadWake);
-            return -AFX_BUSY;
+            return -AFX_BUSY; /* dkr_afx_frame() loads it; the sound player retries */
         }
     }
     return -AFX_BUSY; /* Bank I/O pressure must not consume voice retries. */
 }
 
-/* Never hold the game mutex across /pc or DMA. */
+/* Loads one requested unplanned sound. Never hold the game mutex across /pc
+ * or DMA: this takes it only to pick and to finish the slot. */
+
 static void fallback_load(void) {
+    uint64_t loadStarted = timer_ns_gettime64();
     unsigned i;
     uint32_t generation;
     uint16_t id;
@@ -790,6 +790,23 @@ static void fallback_load(void) {
     sFallback[i].result = result;
     sFallback[i].loading = 0;
     pc_audio_unlock();
+    dkr_afx_load_ns += timer_ns_gettime64() - loadStarted;
+}
+
+/* The game thread calls this once a frame, holding no lock: it loads the
+ * unplanned sounds requested since, which the sound player then retries. A
+ * sound no pack lists costs a disc read in the middle of a scene; the
+ * benchmark build names each one so it can go into its scene's pack. */
+void dkr_afx_frame(void) {
+    for (;;) {
+        unsigned i, pending = 0;
+        if (!sReady) return;
+        pc_audio_lock();
+        for (i = 0; i < DKR_FALLBACK_SLOTS; ++i) pending |= sFallback[i].requested;
+        pc_audio_unlock();
+        if (!pending) return;
+        fallback_load();
+    }
 }
 
 static int sfx_preempt(uint8_t priority) {
@@ -1079,6 +1096,7 @@ static int song_load(uint8_t sequence) {
     int result;
     snprintf(path, sizeof(path), DKR_SONG_DIR "/sequence_%u.afb", sequence);
     result = DKR_AFX_RETRY(afx_bank_load_file(&sSong.bank, path));
+    dkr_afx_load_ns += (timer_us_gettime64() - started) * 1000u;
     benchmark_bank_load(started, result ? 0 : sSong.bank.bytes);
     if (!result) result = music_flow_load(&sSong.bank, DKR_SONG_DIR, sequence, &sSong.flow);
     if (result) {
@@ -1112,15 +1130,6 @@ static int music_retire(void) {
 }
 
 /* Only sounds missing from the level's plan load here, off the game thread. */
-static void *sfx_loader(void *unused) {
-    (void)unused;
-    for (;;) {
-        sem_wait(&sSfxLoadWake);
-        fallback_load();
-    }
-    __builtin_unreachable();
-}
-
 /* Makes the song resident before returning. The caller holds DKR's audio
  * mutex. Replacing the song stops it first; jingles are always resident. */
 int dkr_afx_music_prepare(uint8_t sequence) {

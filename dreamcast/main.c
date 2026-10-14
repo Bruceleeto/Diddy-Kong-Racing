@@ -159,6 +159,7 @@ static void prof_blend_print(u32 frames) {
     memset(sProfBlend, 0, sizeof(sProfBlend));
 }
 
+#define PROF_SINCE(now, last) ((now) >= (last) ? (now) - (last) : (now))
 static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
     sProf.begin += t1 - t0;
     sProf.dl += t2 - t1;
@@ -168,11 +169,27 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         u32 work = sFrameStart ? (u32) ((t3 - sFrameStart - sProf.waitFrame) / 1000u) : 0;
 
         if (work > sProf.workMax) sProf.workMax = work;
+        // What each frame was made of, so a long one can say why.
+        static u64 sLastPart[PC_PROF_COUNT], sLastAfxLoad;
+        static u32 sLastTris;
+        extern volatile u64 dkr_afx_load_ns;
+        extern s32 sTransitionStatus;
+        u64 afxLoad = dkr_afx_load_ns;
+
         if (work > 20000 && pc_scene_is_ready()) {
-            printf("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us\n", (unsigned long) work,
-                   (unsigned long) ((t2 - t1) / 1000u), (unsigned long) sTexLoadsInFrame,
-                   (unsigned long) (sTexLoadNsInFrame / 1000u));
+            printf("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us | logic %lu scene %lu us, "
+                   "%lu tris, transition %ld, audio loads %lu us\n",
+                   (unsigned long) work, (unsigned long) ((t2 - t1) / 1000u), (unsigned long) sTexLoadsInFrame,
+                   (unsigned long) (sTexLoadNsInFrame / 1000u),
+                   // The profile restarts its sums every PROF_FRAMES frames.
+                   (unsigned long) (PROF_SINCE(sProf.part[PC_PROF_LOGIC], sLastPart[PC_PROF_LOGIC]) / 1000u),
+                   (unsigned long) (PROF_SINCE(sProf.part[PC_PROF_SCENE], sLastPart[PC_PROF_SCENE]) / 1000u),
+                   (unsigned long) PROF_SINCE(sProf.tris, sLastTris), (long) sTransitionStatus,
+                   (unsigned long) ((afxLoad - sLastAfxLoad) / 1000u));
         }
+        memcpy(sLastPart, sProf.part, sizeof(sLastPart));
+        sLastTris = sProf.tris;
+        sLastAfxLoad = afxLoad;
         sTexLoadsInFrame = 0;
         sTexLoadNsInFrame = 0;
         sFrameStart = t3;

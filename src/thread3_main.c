@@ -48,6 +48,9 @@
 #include <PR/os_time.h>
 #include "../dreamcast/prof.h"
 #include "../dreamcast/scene_gate.h"
+#ifdef DKR_AICAFLOW
+#include "../dreamcast/audio_aicaflow.h"
+#endif
 
 /************ .rodata ************/
 
@@ -171,6 +174,9 @@ void thread3_main(UNUSED void *unused) {
                 ; // Infinite loop
             }
         }
+#ifdef DKR_AICAFLOW
+        dkr_afx_frame(); // unplanned sounds, on this thread and outside any lock
+#endif
         main_game_loop();
         thread3_verify_stack();
     }

@@ -104,8 +104,8 @@ are released first, so the level region is one free block. Music that keeps
 playing across a scene change (menus) stays loaded; if it splits the free
 space, the level region is emptied and the song reloaded and restarted.
 
-Planned loads run on the game thread with the audio mutex held, after waiting
-for the fallback worker to go idle. A music change outside a level load stops
+Planned loads run on the game thread with the audio mutex held, after
+dropping requested unplanned sounds and waiting for any fallback load to end. A music change outside a level load stops
 the old song, releases it and loads the new one before returning.
 
 Race voices are one pack per racer character (`voice` lines in `dkr.afsfx`),
@@ -118,8 +118,11 @@ unplanned sound that needs the space takes it from the least important pack
 that is not playing; a scene change releases them all.
 
 Sounds missing from every pack still load on demand through sixteen fallback
-slots on the `sfx-loader` thread. Active instances and pending requests prevent
-eviction; scene generations discard loads completed for ended scenes. Build
+slots. There is no loader thread: the game thread calls `dkr_afx_frame()` once
+a frame, holding no lock, and it loads the sounds requested since; the sound
+player starts them on its next retry. Each costs a disc read in the middle of
+a scene. Active instances and pending requests prevent eviction; scene
+generations discard loads completed for ended scenes. Build
 with `AICAFLOW_BENCHMARK=1` to log each such sound as `unplanned sound <id> in
 level <n>`, then add it to a pack so it is resident when needed.
 

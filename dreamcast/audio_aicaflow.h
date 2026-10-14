@@ -5,6 +5,8 @@
 
 int dkr_afx_init(void);
 void dkr_afx_update(void);
+/* The game thread, once a frame, holding no lock: loads requested unplanned sounds. */
+void dkr_afx_frame(void);
 /* Call while the DKR audio mutex is held, before a level fills the heap. */
 int dkr_afx_music_prepare(uint8_t sequence);
 void dkr_afx_music_prefetch(uint8_t sequence);

@@ -101,6 +101,10 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - AICAflow and AICAforge are pinned to their current mains, with the review
   and firmware fixes.
 
+- No audio loader thread: a sound that no pack lists is loaded by the game
+  thread between frames, outside any lock, instead of on a `sfx-loader`
+  thread.
+
 ### Fixed
 
 - Sound effects were silently dropped while music and engine loops played,
