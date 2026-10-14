@@ -517,7 +517,7 @@ static struct {
 static s32 sPrebuiltCount;
 static file_t sPackFile = FILEHND_INVALID;
 static u32 *sPackIndex;
-static u32 sPackCount2d, sPackCount3d;
+static u32 sPackCount2d, sPackCount3d, sPackSize;
 static s32 sPackTried;
 
 static s32 prebuilt_open(void) {
@@ -539,6 +539,7 @@ static s32 prebuilt_open(void) {
     }
     sPackCount2d = header[2];
     sPackCount3d = header[3];
+    sPackSize = (u32) fs_total(sPackFile);
     sPackIndex = malloc((sPackCount2d + sPackCount3d) * sizeof(u32));
     if (sPackIndex == NULL || fs_read(sPackFile, sPackIndex, (sPackCount2d + sPackCount3d) * sizeof(u32)) !=
                                   (ssize_t) ((sPackCount2d + sPackCount3d) * sizeof(u32))) {
@@ -579,11 +580,17 @@ static s32 prebuilt_find(u32 timg) {
  * frames in video memory. id is the asset ID (bit 15 set for the 3D table),
  * first the first frame's header; frames follow textureSize bytes apart.
  */
+// Time and reads spent loading prebuilt textures since the last scene report.
+static u64 sTexLoadNs;
+static u32 sTexLoadReads, sTexLoadCount;
+
 void pc_texture_loaded(void *first, s32 id, s32 frames) {
-    u16 record[4];
-    u32 table[2 * 16];
-    u32 offset, index;
+    u16 *record;
+    u32 *table;
+    u32 offset, index, start, end, bytes;
+    u8 *chunk;
     TextureHeader *frame = (TextureHeader *) first;
+    u64 started = timer_ns_gettime64();
     s32 i;
 
     if (!prebuilt_open()) {
@@ -594,34 +601,52 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
     }
     index = (id & 0x8000) ? sPackCount2d + (u32) (id & 0x7FFF) : (u32) id;
     offset = sPackIndex[index];
-    if (offset == 0 || frames <= 0 || frames > 16 || fs_seek(sPackFile, offset, SEEK_SET) < 0 ||
-        fs_read(sPackFile, record, sizeof(record)) != sizeof(record) ||
-        fs_read(sPackFile, table, 8u * (u32) frames) != (ssize_t) (8u * (u32) frames)) {
+    if (offset == 0 || frames <= 0 || frames > 16) {
         return;
     }
+    // A texture's record, frame table and frames lie together in the pack, and
+    // the next texture's record starts where they end (sPackIndex[index + 1],
+    // or the end of the file). Read all of it at once: a seek on disc costs far
+    // more than the bytes.
+    end = 0;
+    for (i = (s32) index + 1; i < (s32) (sPackCount2d + sPackCount3d) && end == 0; i++) {
+        end = sPackIndex[i];
+    }
+    if (end == 0) {
+        end = sPackSize;
+    }
+    start = offset;
+    bytes = end - start;
+    chunk = memalign(32, bytes);
+    if (chunk == NULL) {
+        return;
+    }
+    sTexLoadReads++;
+    if (fs_seek(sPackFile, start, SEEK_SET) < 0 || fs_read(sPackFile, chunk, bytes) != (ssize_t) bytes) {
+        free(chunk);
+        return;
+    }
+    record = (u16 *) chunk;
+    table = (u32 *) (chunk + 8);
     if (record[2] != (u16) frames || record[0] != frame->width || record[1] != frame->height) {
+        free(chunk);
         return; // not the asset the pack was built from
     }
     for (i = 0; i < frames && sPrebuiltCount < PREBUILT_MAX; i++) {
         u32 timg = (u32) (frame + 1);
-        u32 bytes = table[2 * i + 1];
-        u8 *blob = memalign(32, bytes);
+        u32 at = table[2 * i] - start;
         enj_texture_info_t info;
         u32 handle = 0;
 
-        if (blob == NULL) {
-            break;
-        }
-        // A whole pvrtex DcTx file; enDjinn reads its header and loads the rest.
-        if (fs_seek(sPackFile, table[2 * i], SEEK_SET) >= 0 && fs_read(sPackFile, blob, bytes) == (ssize_t) bytes &&
-            enj_texture_load_blob(blob, &info)) {
+        // A whole pvrtex DcTx file, 32-byte aligned within the pack and so
+        // within this chunk; enDjinn reads its header and loads the rest.
+        if (at + table[2 * i + 1] <= bytes && enj_texture_load_blob(chunk + at, &info)) {
             handle = gfx_adopt_texture(info.ptr, record[0], record[1], info.width, info.height,
                                        info.pvrformat & 0x7FFFFFFFu, info.flags.mipmapped, record[3]);
             if (handle == 0) {
                 pvr_mem_free(info.ptr);
             }
         }
-        free(blob);
         if (handle == 0) {
             break;
         }
@@ -631,8 +656,19 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         sPrebuilt[sPrebuiltCount].width = record[0];
         sPrebuilt[sPrebuiltCount].height = record[1];
         sPrebuiltCount++;
+        sTexLoadCount++;
         frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
     }
+    free(chunk);
+    sTexLoadNs += timer_ns_gettime64() - started;
+}
+
+/** Prints and resets what loading prebuilt textures cost; the scene gate calls it. */
+void pc_texture_load_report(u32 sceneMs) {
+    printf("SCENE LOAD %lu ms: %lu prebuilt textures in %lu ms, %lu reads\n", (unsigned long) sceneMs,
+           (unsigned long) sTexLoadCount, (unsigned long) (sTexLoadNs / 1000000u), (unsigned long) sTexLoadReads);
+    sTexLoadNs = 0;
+    sTexLoadReads = sTexLoadCount = 0;
 }
 
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
