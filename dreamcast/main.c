@@ -1,3 +1,4 @@
+#include "dkr_asset_mount.h"
 #include <stdio.h>
 #include <ultra64.h>
 #include <structs.h>
@@ -10,6 +11,9 @@
 
 extern u64 pc_uptime_ns(void);
 #include "prof.h"
+
+#define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
+static u32 sTexDecodes, sTexPrebuiltHits; // what texture lookups did, for the profile
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
 // main_game_loop() forever-loop. Called directly on the host thread.
@@ -182,7 +186,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
                "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
                "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
-               "workmax=%lu missed=%lu vramfree=%lu | "
+               "workmax=%lu missed=%lu vramfree=%lu texdecodes=%lu texprebuilt=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
                "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
                "nodepth toop=%lu afterdepth=%lu afterrecorded=%lu notopaque=%lu | "
@@ -212,6 +216,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.whyLoose / n),
                (unsigned long) sProf.workMax, (unsigned long) sProf.missed,
                (unsigned long) pvr_mem_available(),
+               (unsigned long) sTexDecodes, (unsigned long) sTexPrebuiltHits,
                (unsigned long) (sProf.part[PC_PROF_LOGIC] / 1000u / n),
                (unsigned long) (sProf.part[PC_PROF_SCENE] / 1000u / n),
                (unsigned long) (sProf.part[PC_PROF_WAVES] / 1000u / n),
@@ -230,6 +235,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.trStats[8] / n), (unsigned long) (sProf.trStats[9] / n));
     }
     prof_blend_print(sProf.frames);
+    sTexDecodes = sTexPrebuiltHits = 0;
     memset(&sProf, 0, sizeof(sProf));
     sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
 }
@@ -447,6 +453,7 @@ typedef struct {
     u16 width, height;
     u32 handle;
     u32 lastUsed; // frame number, for eviction when the cache is full
+    u8 prebuilt;  // the handle belongs to the prebuilt table, not to this entry
 } GfxTexture;
 
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
@@ -489,6 +496,140 @@ static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
 static s32 sTexStateDirty;
 
+// ---------------------------------------------------------------------------
+// Prebuilt textures
+//
+// dreamcast/build_pvr_textures.py converts every texture asset offline into
+// build/dc/textures.dtp. When the game loads a texture asset (load_texture,
+// during a scene's load), its frames go straight from that pack into video
+// memory, keyed by the address their texels have in RAM, which is the address
+// the display list will name. texture_lookup then finds them without decoding
+// anything; decoding stays only for what the pack does not cover.
+// ---------------------------------------------------------------------------
+#define PREBUILT_MAX 1024
+static struct {
+    u32 timg;   // the frame's texels in RAM: the texture header plus one
+    u32 handle;
+    u16 width, height;
+} sPrebuilt[PREBUILT_MAX];
+static s32 sPrebuiltCount;
+static file_t sPackFile = FILEHND_INVALID;
+static u32 *sPackIndex;
+static u32 sPackCount2d, sPackCount3d;
+static s32 sPackTried;
+
+static s32 prebuilt_open(void) {
+    u32 header[4];
+
+    if (sPackTried) {
+        return sPackIndex != NULL;
+    }
+    sPackTried = TRUE;
+    sPackFile = fs_open(DKR_TEXTURE_PACK, O_RDONLY);
+    if (sPackFile == FILEHND_INVALID) {
+        printf("gfx: no %s; textures are decoded as they are drawn\n", DKR_TEXTURE_PACK);
+        return FALSE;
+    }
+    if (fs_read(sPackFile, header, sizeof(header)) != sizeof(header) || header[0] != 0x4B505444u /* DTPK */ ||
+        header[1] != 1) {
+        printf("gfx: %s is not a version 1 texture pack\n", DKR_TEXTURE_PACK);
+        return FALSE;
+    }
+    sPackCount2d = header[2];
+    sPackCount3d = header[3];
+    sPackIndex = malloc((sPackCount2d + sPackCount3d) * sizeof(u32));
+    if (sPackIndex == NULL || fs_read(sPackFile, sPackIndex, (sPackCount2d + sPackCount3d) * sizeof(u32)) !=
+                                  (ssize_t) ((sPackCount2d + sPackCount3d) * sizeof(u32))) {
+        free(sPackIndex);
+        sPackIndex = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/** Drop prebuilt frames whose texels lay in freed memory. */
+static void prebuilt_forget(u32 lo, u32 hi) {
+    s32 i;
+
+    for (i = 0; i < sPrebuiltCount;) {
+        if (sPrebuilt[i].timg >= lo && sPrebuilt[i].timg < hi) {
+            gfx_delete_texture(sPrebuilt[i].handle);
+            sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
+        } else {
+            i++;
+        }
+    }
+}
+
+static s32 prebuilt_find(u32 timg) {
+    s32 i;
+
+    for (i = 0; i < sPrebuiltCount; i++) {
+        if (sPrebuilt[i].timg == timg) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * Called by load_texture once a texture asset is in RAM: puts its prebuilt
+ * frames in video memory. id is the asset ID (bit 15 set for the 3D table),
+ * first the first frame's header; frames follow textureSize bytes apart.
+ */
+void pc_texture_loaded(void *first, s32 id, s32 frames) {
+    u16 record[6];
+    u32 words[2];
+    u32 offset, index, frameOffset;
+    u8 *buffer;
+    TextureHeader *frame = (TextureHeader *) first;
+    s32 i;
+
+    if (!prebuilt_open()) {
+        return;
+    }
+    index = (id & 0x8000) ? sPackCount2d + (u32) (id & 0x7FFF) : (u32) id;
+    if (((id & 0x8000) ? (u32) (id & 0x7FFF) >= sPackCount3d : (u32) id >= sPackCount2d) || !sPackIndex[index]) {
+        return;
+    }
+    offset = sPackIndex[index];
+    if (fs_seek(sPackFile, offset, SEEK_SET) < 0 || fs_read(sPackFile, record, sizeof(record)) != sizeof(record) ||
+        fs_read(sPackFile, words, sizeof(words)) != sizeof(words)) {
+        return;
+    }
+    if (record[4] != (u16) frames || record[0] != frame->width || record[1] != frame->height) {
+        return; // not the asset the pack was built from
+    }
+    buffer = memalign(32, words[1]);
+    if (buffer == NULL) {
+        return;
+    }
+    frameOffset = offset + sizeof(record) + sizeof(words);
+    for (i = 0; i < frames && sPrebuiltCount < PREBUILT_MAX; i++) {
+        u32 timg = (u32) (frame + 1);
+        u32 handle;
+
+        frameOffset = (frameOffset + 31) & ~31u;
+        if (fs_seek(sPackFile, frameOffset, SEEK_SET) < 0 ||
+            fs_read(sPackFile, buffer, words[1]) != (ssize_t) words[1]) {
+            break;
+        }
+        frameOffset += words[1];
+        prebuilt_forget(timg, timg + 1); // memory reused for a new asset
+        handle = gfx_create_texture_prebuilt(buffer, record[0], record[1], record[2], record[3], words[0], record[5]);
+        if (handle == 0) {
+            break;
+        }
+        sPrebuilt[sPrebuiltCount].timg = timg;
+        sPrebuilt[sPrebuiltCount].handle = handle;
+        sPrebuilt[sPrebuiltCount].width = record[0];
+        sPrebuilt[sPrebuiltCount].height = record[1];
+        sPrebuiltCount++;
+        frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
+    }
+    free(buffer);
+}
+
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
     u32 lo = (u32) addr;
     u32 hi = lo + (u32) size;
@@ -498,13 +639,16 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
         GfxTexture *t = &sTexCache[i];
 
         if ((t->timg >= lo && t->timg < hi) || (t->tlut >= lo && t->tlut < hi)) {
-            gfx_delete_texture(t->handle);
+            if (!t->prebuilt) {
+                gfx_delete_texture(t->handle);
+            }
             sTexCache[i] = sTexCache[--sTexCacheCount];
             sTexStateDirty = TRUE;
         } else {
             i++;
         }
     }
+    prebuilt_forget(lo, hi);
 }
 
 /**
@@ -817,9 +961,38 @@ static u32 texture_lookup(void) {
                 oldest = i;
             }
         }
-        gfx_delete_texture(sTexCache[oldest].handle);
+        if (!sTexCache[oldest].prebuilt) {
+            gfx_delete_texture(sTexCache[oldest].handle);
+        }
         sTexCache[oldest] = sTexCache[--sTexCacheCount];
     }
+
+    {
+        // Converted offline and already in video memory: no decoding.
+        s32 p = (sTileFmt != G_IM_FMT_CI) ? prebuilt_find(sTexAddr) : -1;
+
+        if (p >= 0 && sPrebuilt[p].width == sTileWidth && sPrebuilt[p].height == sTileHeight) {
+            GfxTexture *t = &sTexCache[sTexCacheCount++];
+
+            gfx_texture_set_wrap(sPrebuilt[p].handle, sTileCmS, sTileCmT);
+            t->timg = sTexAddr;
+            t->tlut = (u32) tlut;
+            t->fmt = sTileFmt;
+            t->siz = sTileSiz;
+            t->swapped = (u8) sTexSwapped;
+            t->width = sTileWidth;
+            t->height = sTileHeight;
+            t->cmS = sTileCmS;
+            t->cmT = sTileCmT;
+            t->lastUsed = sGfxFrameCount;
+            t->handle = sPrebuilt[p].handle;
+            t->prebuilt = 1;
+            tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
+            sTexPrebuiltHits++;
+            return t->handle;
+        }
+    }
+    sTexDecodes++;
 
     {
         const u8 *texels = (const u8 *) sTexAddr;
@@ -848,6 +1021,7 @@ static u32 texture_lookup(void) {
         t->cmT = sTileCmT;
         t->lastUsed = sGfxFrameCount;
         t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileCmS, sTileCmT);
+        t->prebuilt = 0;
         tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
         return t->handle;
     }
@@ -2555,7 +2729,9 @@ static void debug_view_apply(void) {
     gfx_set_cutout_mode(modes[sDebugMode - 1][0], modes[sDebugMode - 1][1]);
     // The format is chosen when a texture is created, so make them all anew.
     for (i = 0; i < sTexCacheCount; i++) {
-        gfx_delete_texture(sTexCache[i].handle);
+        if (!sTexCache[i].prebuilt) {
+            gfx_delete_texture(sTexCache[i].handle);
+        }
     }
     sTexCacheCount = 0;
     memset(sTexHint, 0, sizeof(sTexHint));

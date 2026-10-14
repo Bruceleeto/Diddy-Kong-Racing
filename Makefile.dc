@@ -37,6 +37,8 @@ DEMO_LEVEL ?= -1
 SKIP_WATER ?= 0
 DEBUG_VIEW ?= 0
 # 0 stores cutout textures with 4 bits a channel instead of 5-5-5-1.
+# 0 stores textures in linear rows instead of twiddled.
+TWIDDLE ?= 1
 CUTOUT_1555 ?= 1
 # Return to the loader after this many seconds; 0 runs until reset.
 AUTO_EXIT_SECONDS ?= 0
@@ -58,7 +60,7 @@ DEFINES := \
 	-DGBI_FLOAT_MTX \
 	-DAUDIO_NO_REVERB
 
-DEFINES += -DDKR_AICAFLOW -DDKR_AICAFLOW_BENCHMARK=$(AICAFLOW_BENCHMARK) -DDKR_AICAFLOW_TRACE_SOUND=$(AICAFLOW_TRACE_SOUND) -DDKR_GFX_PROFILE=$(GFX_PROFILE) -DDKR_GFX_PROFILE_SKIP=$(GFX_PROFILE_SKIP) -DDKR_AUTO_EXIT_SECONDS=$(AUTO_EXIT_SECONDS) -DPC_LOGIC_UPDATE_RATE=$(FRAME_FIELDS) -DDKR_FSAA=$(FSAA) -DDKR_CUTOUT_1555=$(CUTOUT_1555) -DDKR_DEBUG_VIEW=$(DEBUG_VIEW) -DDKR_DEMO_LEVEL=$(DEMO_LEVEL) -DDKR_SKIP_WATER=$(SKIP_WATER)
+DEFINES += -DDKR_AICAFLOW -DDKR_AICAFLOW_BENCHMARK=$(AICAFLOW_BENCHMARK) -DDKR_AICAFLOW_TRACE_SOUND=$(AICAFLOW_TRACE_SOUND) -DDKR_GFX_PROFILE=$(GFX_PROFILE) -DDKR_GFX_PROFILE_SKIP=$(GFX_PROFILE_SKIP) -DDKR_AUTO_EXIT_SECONDS=$(AUTO_EXIT_SECONDS) -DPC_LOGIC_UPDATE_RATE=$(FRAME_FIELDS) -DDKR_FSAA=$(FSAA) -DDKR_CUTOUT_1555=$(CUTOUT_1555) -DDKR_TWIDDLE=$(TWIDDLE) -DDKR_DEBUG_VIEW=$(DEBUG_VIEW) -DDKR_DEMO_LEVEL=$(DEMO_LEVEL) -DDKR_SKIP_WATER=$(SKIP_WATER)
 LIBS := $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a -lsh4zam -lm
 
 
@@ -337,8 +339,11 @@ cdi:
 	$(MAKE) -f Makefile.dc DKR_ASSET_MOUNT=/cd all
 	mkdir -p cdrom/assets
 	cp assets/assets.bin assets/assets.lut.bin cdrom/assets/
+	# Start the disc's audio tree afresh, so files older builds put there do not linger.
+	rm -rf cdrom/build/dc/aicaflow
 	mkdir -p cdrom/build/dc/aicaflow/music_raw cdrom/build/dc/aicaflow/jingle_controls
 	cp $(BUILD)/aicaflow/core.afb $(BUILD)/aicaflow/vehicle.afb $(JINGLE_BANK) cdrom/build/dc/aicaflow/
+	cp $(TEXTURE_PACK) cdrom/build/dc/
 	cp $(JINGLE_CONTROLS)/*.afx cdrom/build/dc/aicaflow/jingle_controls/
 	cp $(MUSIC_RAW_DIR)/*.afb $(MUSIC_RAW_DIR)/*.afx cdrom/build/dc/aicaflow/music_raw/
 	cp -R $(BUILD)/aicaflow/core $(BUILD)/aicaflow/vehicle $(BUILD)/aicaflow/scenes $(BUILD)/aicaflow/voices $(BUILD)/aicaflow/fallback cdrom/build/dc/aicaflow/
@@ -355,6 +360,15 @@ $(BUILD)/dkr_asset_mount.h: force-asset-mount
 
 $(BUILD)/dreamcast/reimpl.o: $(BUILD)/dkr_asset_mount.h
 $(BUILD)/dreamcast/audio_aicaflow.o: $(BUILD)/dkr_asset_mount.h
+$(BUILD)/dreamcast/main.o: $(BUILD)/dkr_asset_mount.h
+
+# Every texture asset converted offline for the PVR; see dreamcast/build_pvr_textures.py.
+PVRTEX ?= $(KOS_BASE)/utils/pvrtex/pvrtex
+TEXTURE_PACK := $(BUILD)/textures.dtp
+$(TEXTURE_PACK): dreamcast/build_pvr_textures.py assets/.vanilla/us.v77/asset_textures_2d.meta.json \
+	assets/.vanilla/us.v77/asset_textures_3d.meta.json
+	$(PYTHON) dreamcast/build_pvr_textures.py . $(PVRTEX) $@
+$(TARGET): $(TEXTURE_PACK)
 
 all: $(MUSIC_AFX) $(MUSIC_BANK)
 $(TARGET): | $(SFX_FALLBACK)

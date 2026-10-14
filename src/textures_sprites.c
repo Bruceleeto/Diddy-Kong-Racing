@@ -631,6 +631,14 @@ TextureHeader *load_texture(s32 id) {
         assetOffset += TEXTURE_GFX_SIZE; // I'm guessing it takes 12 f3d commands to load the texture
         texTemp = (TextureHeader *) ((s32) texTemp + texTemp->textureSize);
     }
+#ifdef TARGET_PC
+    {
+        // Put this asset's offline-converted frames in video memory now, while
+        // the scene loads, so nothing is decoded when they are first drawn.
+        extern void pc_texture_loaded(void *first, s32 id, s32 frames);
+        pc_texture_loaded(tex, id, numberOfTextures);
+    }
+#endif
     if (gCiPalettesSize >= MAX_TEX_PALETTE_SIZE) {
         stubbed_printf("TEX Error: Palette memory overflow!!\n");
         return NULL;

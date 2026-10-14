@@ -22,6 +22,9 @@
 #ifndef DKR_CUTOUT_1555
 #define DKR_CUTOUT_1555 1
 #endif
+#ifndef DKR_TWIDDLE
+#define DKR_TWIDDLE 1
+#endif
 // How cutout textures are stored and drawn. Set at build time; the debug view
 // (DEBUG_VIEW=1) switches them while a frame is held, to compare the results.
 static int sCutout1555 = DKR_CUTOUT_1555; // 5-5-5-1 instead of 4-4-4-4
@@ -51,6 +54,7 @@ typedef struct {
     // a cutout, which the punch-through list can draw without blending.
     int cutout;
     int format; // PVR_TXRFMT_RGB565, _ARGB1555 or _ARGB4444, chosen from the above
+    int linear; // stored in rows rather than twiddled
 } DcTexture;
 
 static DcTexture sTextures[MAX_TEXTURES];
@@ -392,7 +396,14 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
         return 0;
     }
 
+#if DKR_TWIDDLE
+    // Twiddled: the PVR reads texels in small squares, so the four a bilinear
+    // sample needs mostly arrive in one fetch. Linear rows make the texture
+    // cache miss on almost every step down a row.
+    pvr_txr_load_ex(tmp, vram, (uint32_t) pw, (uint32_t) ph, PVR_TXRLOAD_16BPP);
+#else
     pvr_txr_load(tmp, vram, (uint32_t) (pw * ph * 2)); // plain copy, non-twiddled
+#endif
 
     free(tmp);
 
@@ -408,7 +419,66 @@ unsigned int gfx_create_texture(const void *rgba, int width, int height, int cmS
     sTextures[slot].opaque = opaque;
     sTextures[slot].cutout = cutout;
     sTextures[slot].format = format;
+    sTextures[slot].linear = !DKR_TWIDDLE;
     return (unsigned int) (slot + 1);
+}
+
+/**
+ * A texture converted offline (dreamcast/build_pvr_textures.py): its texels are
+ * already in their final, twiddled form and only need copying to video memory.
+ * kind is 0 opaque, 1 cutout, 2 translucent; format is its PVR_TXRFMT_* bits.
+ */
+unsigned int gfx_create_texture_prebuilt(const void *texels, int width, int height, int pw, int ph,
+                                         unsigned int format, int kind) {
+    pvr_ptr_t vram;
+    int slot;
+
+    if (!sPvrReady || texels == NULL) {
+        return 0;
+    }
+    for (slot = 0; slot < MAX_TEXTURES; slot++) {
+        if (sTextures[slot].data == NULL) {
+            break;
+        }
+    }
+    if (slot == MAX_TEXTURES) {
+        printf("gfx: TEXTURE SLOTS FULL (%d)\n", MAX_TEXTURES);
+        return 0;
+    }
+    vram = pvr_mem_malloc((size_t) pw * ph * 2);
+    if (vram == NULL) {
+        printf("gfx: VRAM ALLOC FAILED for a prebuilt %dx%d texture, %d free\n", pw, ph, (int) pvr_mem_available());
+        return 0;
+    }
+    header_cache_clear();
+    pvr_txr_load(texels, vram, (uint32_t) (pw * ph * 2));
+    sTextures[slot].data = vram;
+    sTextures[slot].w = width;
+    sTextures[slot].h = height;
+    sTextures[slot].padded_w = pw;
+    sTextures[slot].padded_h = ph;
+    sTextures[slot].u_scale = (float) width / (float) pw;
+    sTextures[slot].v_scale = (float) height / (float) ph;
+    sTextures[slot].cmS = 0;
+    sTextures[slot].cmT = 0;
+    sTextures[slot].opaque = kind == 0;
+    sTextures[slot].cutout = kind == 1;
+    sTextures[slot].format = (int) format;
+    sTextures[slot].linear = 0;
+    return (unsigned int) (slot + 1);
+}
+
+/** The wrap and clamp a prebuilt texture is drawn with, which the display list decides. */
+void gfx_texture_set_wrap(unsigned int handle, int cmS, int cmT) {
+    if (handle == 0 || handle > MAX_TEXTURES || sTextures[handle - 1].data == NULL) {
+        return;
+    }
+    if (sTextures[handle - 1].cmS != cmS || sTextures[handle - 1].cmT != cmT) {
+        sTextures[handle - 1].cmS = cmS;
+        sTextures[handle - 1].cmT = cmT;
+        header_cache_clear();
+        sHdrDirty = 1;
+    }
 }
 
 void gfx_delete_texture(unsigned int handle) {
@@ -779,9 +849,8 @@ static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
 
     if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
         DcTexture *t = &sTextures[sBoundTex - 1];
-        // Padded (power-of-two) dims, and NON-twiddled to match the plain copy in
-        // gfx_create_texture.
-        pvr_poly_cxt_txr(&cxt, list, t->format | PVR_TXRFMT_NONTWIDDLED,
+        // Padded (power-of-two) dims, stored as gfx_create_texture loaded them.
+        pvr_poly_cxt_txr(&cxt, list, t->format | (t->linear ? PVR_TXRFMT_NONTWIDDLED : PVR_TXRFMT_TWIDDLED),
                          t->padded_w, t->padded_h, t->data,
                          sFilterPoint ? PVR_FILTER_NEAREST : PVR_FILTER_BILINEAR);
         cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
