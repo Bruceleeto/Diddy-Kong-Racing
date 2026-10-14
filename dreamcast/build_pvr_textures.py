@@ -188,6 +188,8 @@ def encode(workdir, tag, w, h, pixels, kind, pvrtex, flags):
     src = workdir / f"{tag}.png"
     dst = workdir / f"{tag}.dt"
     write_png(src, pw, ph, padded)
+    if pw != ph:
+        flags = [f for f in flags if f not in ("-m", "--mipmap")]  # the PVR mipmaps square textures only
     subprocess.run((str(pvrtex), "-i", str(src), "-o", str(dst), "-f", PVRTEX_FORMAT[kind], *flags),
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     data = dst.read_bytes()

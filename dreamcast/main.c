@@ -19,6 +19,8 @@ extern u64 pc_uptime_ns(void);
 #define DKR_TEX_TRACE 0 // log why textures are decoded instead of prebuilt
 #endif
 static u32 sTexDecodes, sTexPrebuiltHits; // what texture lookups did, for the profile
+static u32 sTexLoadsInFrame;  // prebuilt textures read since the last frame
+static u64 sTexLoadNsInFrame;
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
 // main_game_loop() forever-loop. Called directly on the host thread.
@@ -166,6 +168,13 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         u32 work = sFrameStart ? (u32) ((t3 - sFrameStart - sProf.waitFrame) / 1000u) : 0;
 
         if (work > sProf.workMax) sProf.workMax = work;
+        if (work > 20000 && pc_scene_is_ready()) {
+            printf("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us\n", (unsigned long) work,
+                   (unsigned long) ((t2 - t1) / 1000u), (unsigned long) sTexLoadsInFrame,
+                   (unsigned long) (sTexLoadNsInFrame / 1000u));
+        }
+        sTexLoadsInFrame = 0;
+        sTexLoadNsInFrame = 0;
         sFrameStart = t3;
         sProf.waitFrame = 0;
     }
@@ -674,6 +683,11 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
     }
     free(chunk);
     sTexLoadNs += timer_ns_gettime64() - started;
+    if (pc_scene_is_ready()) {
+        // A texture loaded while the scene runs: a disc read in the middle of play.
+        sTexLoadsInFrame++;
+        sTexLoadNsInFrame += timer_ns_gettime64() - started;
+    }
 }
 
 /** Prints and resets what loading prebuilt textures cost; the scene gate calls it. */
