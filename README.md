@@ -15,7 +15,13 @@ KallistiOS `environ.sh`, then run:
 It checks what it needs first: a KallistiOS toolchain, KOS's `pvrtex` utility
 (`make -C $KOS_BASE/utils/pvrtex`), the sh4zam addon, Python 3.10 or newer, and
 `mkdcdisc` for `--cdi`. It then initialises the submodules and runs
-`make setup`, `make extract`, `make build_assets` and `make -f Makefile.dc`.
+`make setup`, `make extract`, `make build_assets` and `make -f Makefile.dc`,
+and leaves `bin/dkracing.elf` (and `bin/dkracing.cdi`).
+
+The Dreamcast build uses enDjinn's build system (`third_party/enDjinn`):
+`Makefile.dc` holds DKR's options and asset pipeline and includes enDjinn's
+`base_link.mk`, which compiles, links and makes the disc image with the
+settings in `local.cfg.mk`.
 Everything the port adds (PVR textures, scene bundles, AICAflow sound and
 music) is generated from your ROM during the build; none of it is in the
 repository.

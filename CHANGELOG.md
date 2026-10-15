@@ -139,6 +139,13 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 
 ## Build
 
+- **enDjinn is the Dreamcast build system.** `Makefile.dc` keeps DKR's options
+  and asset pipeline and includes enDjinn's `base_link.mk`, which compiles
+  every `.c` in `dreamcast/`, the game's sources and enDjinn's runtime, links
+  and makes the disc image; `local.cfg.mk` holds the project settings. The
+  compile flags are unchanged. The ELF and disc image are now
+  `bin/dkracing.elf` and `bin/dkracing.cdi`. enDjinn is pinned at main
+  (`1d73a64`).
 - `dreamcast/build.sh` builds the port from a clean clone and your ROM, after
   checking the toolchain, `pvrtex`, sh4zam and Python. A fresh clone built with
   it produces the same textures, scene bundles and AICAflow files, byte for

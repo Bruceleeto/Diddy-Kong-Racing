@@ -1,7 +1,8 @@
+# The Dreamcast build. enDjinn's build system (third_party/enDjinn/base_link.mk)
+# compiles, links and makes the disc image; local.cfg.mk holds the project
+# settings it reads. This file adds DKR's options and its asset pipeline: PVR
+# textures and scene bundles, the scene maps, and AICAflow sound and music.
 
-include $(KOS_BASE)/Makefile.rules
-
-CC      := kos-cc
 BUILD   := build/dc
 PYTHON  ?= $(shell for candidate in .venv/bin/python3 /opt/homebrew/bin/python3 python3.14 python3.13 python3.12 python3.11 python3.10 python3; do if command -v "$$candidate" >/dev/null 2>&1; then command -v "$$candidate"; break; fi; done)
 PYTHON_310_OR_NEWER := $(shell $(PYTHON) -c 'import sys; print(int(sys.version_info >= (3, 10)))' 2>/dev/null)
@@ -51,277 +52,20 @@ CUTOUT_1555 ?= 1
 # Return to the loader after this many seconds; 0 runs until reset.
 AUTO_EXIT_SECONDS ?= 0
 
-DEFINES := \
-	-DTARGET_PC \
-	-DTARGET_DC \
-	-D_LANGUAGE_C \
-	-D_FINALROM \
-	-DNDEBUG \
-	-DF3DDKR_GBI \
-	-DVERSION_US_V77 \
-	-DAVOID_UB \
-	-DNON_MATCHING \
-	-DBUILD_VERSION=VERSION_G \
-	-DBUILD_VERSION_STRING=\"2.0G\" \
-	-D_MIPS_SZLONG=32 \
-	-DPC_MAIN_POOL_BYTES='(3 * 1024 * 1024)' \
-	-DGBI_FLOAT_MTX \
-	-DAUDIO_NO_REVERB
-
-DEFINES += -DDKR_AICAFLOW -DDKR_AICAFLOW_BENCHMARK=$(AICAFLOW_BENCHMARK) -DDKR_AICAFLOW_TRACE_SOUND=$(AICAFLOW_TRACE_SOUND) -DDKR_GFX_PROFILE=$(GFX_PROFILE) -DDKR_GFX_PROFILE_SKIP=$(GFX_PROFILE_SKIP) -DDKR_AUTO_EXIT_SECONDS=$(AUTO_EXIT_SECONDS) -DPC_LOGIC_UPDATE_RATE=$(FRAME_FIELDS) -DDKR_FSAA=$(FSAA) -DDKR_CUTOUT_1555=$(CUTOUT_1555) -DDKR_TWIDDLE=$(TWIDDLE) -DDKR_DEBUG_VIEW=$(DEBUG_VIEW) -DDKR_DEMO_LEVEL=$(DEMO_LEVEL) -DDKR_TEX_TRACE=$(TEX_TRACE) -DDKR_SKIP_WATER=$(SKIP_WATER) -DDKR_SKIP_PARTICLES=$(SKIP_PARTICLES) -DDKR_FSAA_PARTICLE_THIN=$(FSAA_PARTICLE_THIN) -DDKR_FSAA_PARTICLE_NEAR=$(FSAA_PARTICLE_NEAR) -DDKR_FSAA_PARTICLE_NEAR_FADE=$(FSAA_PARTICLE_NEAR_FADE) -DDKR_FSAA_PARTICLE_NEAR_CULL=$(FSAA_PARTICLE_NEAR_CULL)
-LIBS := $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a -lsh4zam -lm
-
-
 # Seed the RAM-backed EEPROM with the 100%-completion image in
 # include/eeprom_preset.h (slots 1 and 2 complete) instead of erased 0xFF.
 # On by default; disable with: make -f Makefile.dc EEPROM_PRESET_100=0
 EEPROM_PRESET_100 ?= 1
-ifeq ($(EEPROM_PRESET_100),1)
-DEFINES += -DEEPROM_PRESET_100
-endif
-
-
-INCLUDES_REIMPL := \
-	-I$(BUILD) \
-	-I . \
-	-I include \
-	-I include/PR \
-	-I include/sys \
-	-I assets \
-	-I src \
-	-I src/hasm \
-	-I libultra \
-	-I libultra/src/gu \
-	-I libultra/src/io \
-	-I libultra/src/sc \
-	-I libultra/src/audio \
-	-I libultra/src/os
-
-INCLUDES_REIMPL += -I$(AICAFLOW_ROOT)/driver/include -I$(AICAFLOW_ROOT)/driver/format/include -I$(AICAFLOW_ROOT)/driver/sh4/include -I$(BUILD)/aicaflow
-# enDjinn (third_party/enDjinn): so far only its texture loader.
-ENJDIR := third_party/enDjinn
-INCLUDES_REIMPL += -I$(ENJDIR)/include -I$(KOS_BASE)/utils
-DEFINES += -DENJ_CBASEPATH='"$(DKR_ASSET_MOUNT)/"'
-INCLUDES := $(INCLUDES_REIMPL)
-
-OPT      ?= -O3
-
+# sh4zam's backend; SHZ_SW is the portable C one, built without fast math.
 SHZ_BACKEND ?= SHZ_SH4
-FAST_MATH   ?= $(if $(filter SHZ_SW,$(SHZ_BACKEND)),-fno-fast-math,-ffast-math)
+FAST_MATH ?= $(if $(filter SHZ_SW,$(SHZ_BACKEND)),-fno-fast-math,-ffast-math)
 
-BASE_CFLAGS := $(OPT) -g $(DEFINES) \
-	-std=gnu23 \
-	-fno-common \
-	-fno-strict-aliasing \
-	-Wno-int-conversion \
-	-funsigned-char \
-	-fwrapv \
-	-ffp-contract=fast \
-	-fsingle-precision-constant \
-	-mfsrra \
-	-mfsca \
-	-flto \
-	-DSHZ_BACKEND=$(SHZ_BACKEND) \
-	$(FAST_MATH)
-BASE_CFLAGS += -MMD -MP
+# How the port is compiled and linked: local.cfg.mk, read by enDjinn's
+# base_link.mk.
+include third_party/enDjinn/base_link.mk
 
-LTO_FLAGS := $(OPT) $(filter -f%,$(BASE_CFLAGS)) $(filter -m%,$(BASE_CFLAGS))
-CFLAGS        := $(BASE_CFLAGS) $(INCLUDES)
-CFLAGS_REIMPL := $(BASE_CFLAGS) $(INCLUDES_REIMPL)
-
-# Every game-code source file, individually.
-SRC_FILES := \
-	dreamcast/main.c \
-	$(ENJDIR)/code/enj_texture.c \
-	dreamcast/frame_interp.c \
-	dreamcast/scene_gate.c \
-	dreamcast/audio.c \
-	dreamcast/audio_aicaflow.c \
-	dreamcast/dkr_dsp_room.c \
-	dreamcast/audio_hle.c \
-	dreamcast/gfx.c \
-	dreamcast/input.c \
-	dreamcast/reimpl.c \
-	src/asset_loading.c \
-	src/audio.c \
-	src/audiomgr.c \
-	src/audiosfx.c \
-	src/audio_spatial.c \
-	dreamcast/audio_vehicle_dc.c \
-	src/borders.c \
-	src/camera.c \
-	src/fade_transition.c \
-	src/font.c \
-	src/game.c \
-	src/game_text.c \
-	src/game_ui.c \
-	src/get_stack_pointer.c \
-	src/gzip.c \
-	src/joypad.c \
-	src/lights.c \
-	src/main.c \
-	src/memory.c \
-	src/menu.c \
-	src/object_functions.c \
-	src/object_models.c \
-	src/objects.c \
-	src/os_yield_data.c \
-	src/particles.c \
-	src/printf.c \
-	src/racer.c \
-	src/rcp_dkr.c \
-	src/save_data.c \
-	src/screen_asset.c \
-	src/set_rsp_segment.c \
-	src/textures_sprites.c \
-	src/thread0_epc.c \
-	src/thread30_bgload.c \
-	src/thread3_main.c \
-	src/tracks.c \
-	src/vehicle_bluey.c \
-	src/vehicle_bubbler.c \
-	src/vehicle_rocket.c \
-	src/vehicle_smokey.c \
-	src/vehicle_tricky.c \
-	src/vehicle_wizpig.c \
-	src/video.c \
-	src/waves.c \
-	src/weather.c \
-	src/hasm/collision.c \
-	src/hasm/math_util.c \
-	src/hasm/obj_animate.c \
-	src/hasm/obj_shade_fast.c
-
-
-LIBULTRA_FILES := \
-	libultra/src/audio/bnkf.c \
-	libultra/src/audio/cents2ratio.c \
-	libultra/src/audio/copy.c \
-	libultra/src/audio/cseq.c \
-	libultra/src/audio/cspgetchlvol.c \
-	libultra/src/audio/cspgetstate.c \
-	libultra/src/audio/cspgettempo.c \
-	libultra/src/audio/cspplay.c \
-	libultra/src/audio/cspsetbank.c \
-	libultra/src/audio/cspsetchlvol.c \
-	libultra/src/audio/cspsetpan.c \
-	libultra/src/audio/cspsetseq.c \
-	libultra/src/audio/cspsettempo.c \
-	libultra/src/audio/cspsetvol.c \
-	libultra/src/audio/cspstop.c \
-	libultra/src/audio/env.c \
-	libultra/src/audio/event.c \
-	libultra/src/audio/filter.c \
-	libultra/src/audio/heapalloc.c \
-	libultra/src/audio/heapinit.c \
-	libultra/src/audio/load.c \
-	libultra/src/audio/mainbus.c \
-	libultra/src/audio/mips1/auxbus.c \
-	libultra/src/audio/mips1/cspgetfadein.c \
-	libultra/src/audio/mips1/csplayer.c \
-	libultra/src/audio/mips1/cspsetfadein.c \
-	libultra/src/audio/mips1/drvrnew.c \
-	libultra/src/audio/mips1/reverb.c \
-	libultra/src/audio/mips1/seqchannel.c \
-	libultra/src/audio/mips1/seqplayer.c \
-	libultra/src/audio/mips1/synallocfx.c \
-	libultra/src/audio/mips1/synsetpan.c \
-	libultra/src/audio/mips1/synstartvoiceparam.c \
-	libultra/src/audio/mips1/synthesizer.c \
-	libultra/src/audio/mips1/unknown_064690.c \
-	libultra/src/audio/resample.c \
-	libultra/src/audio/save.c \
-	libultra/src/audio/seqpgetfxmix.c \
-	libultra/src/audio/sl.c \
-	libultra/src/audio/synaddplayer.c \
-	libultra/src/audio/synallocvoice.c \
-	libultra/src/audio/syndelete.c \
-	libultra/src/audio/synfreevoice.c \
-	libultra/src/audio/synsetfxmix.c \
-	libultra/src/audio/synsetpitch.c \
-	libultra/src/audio/synsetpriority.c \
-	libultra/src/audio/synsetvol.c \
-	libultra/src/audio/synstartvoice.c \
-	libultra/src/audio/synstopvoice.c \
-	libultra/src/debug/assert.c \
-	libultra/src/debug/kdebugserver.c \
-	libultra/src/gu/mtxutil.c \
-	libultra/src/gu/perspective.c \
-	libultra/src/io/crc.c \
-	libultra/src/io/devmgr.c \
-	libultra/src/io/dp.c \
-	libultra/src/io/dpgetstat.c \
-	libultra/src/io/dpsetnextbuf.c \
-	libultra/src/io/dpsetstat.c \
-	libultra/src/io/epirawdma.c \
-	libultra/src/io/epirawwrite.c \
-	libultra/src/io/leointerrupt.c \
-	libultra/src/io/piacs.c \
-	libultra/src/io/pidma.c \
-	libultra/src/io/pigetcmdq.c \
-	libultra/src/io/pimgr.c \
-	libultra/src/io/pirawdma.c \
-	libultra/src/io/pirawread.c \
-	libultra/src/io/si.c \
-	libultra/src/io/siacs.c \
-	libultra/src/io/sirawread.c \
-	libultra/src/io/sirawwrite.c \
-	libultra/src/io/sp.c \
-	libultra/src/io/spgetstat.c \
-	libultra/src/io/sprawdma.c \
-	libultra/src/io/spsetpc.c \
-	libultra/src/io/spsetstat.c \
-	libultra/src/io/sptask.c \
-	libultra/src/io/sptaskyield.c \
-	libultra/src/io/sptaskyielded.c \
-	libultra/src/io/vi.c \
-	libultra/src/io/viblack.c \
-	libultra/src/io/vigetcurrcontext.c \
-	libultra/src/io/vigetcurrframebuf.c \
-	libultra/src/io/vigetnextframebuf.c \
-	libultra/src/io/vimgr.c \
-	libultra/src/io/visetevent.c \
-	libultra/src/io/visetmode.c \
-	libultra/src/io/visetspecial.c \
-	libultra/src/io/viswapbuf.c \
-	libultra/src/io/viswapcontext.c \
-	libultra/src/io/vitbl.c \
-	libultra/src/libc/ldiv.c \
-	libultra/src/libc/ll.c \
-	libultra/src/libc/llcvt.c \
-	libultra/src/libc/rmonPrintf.c \
-	libultra/src/libc/xldtob.c \
-	libultra/src/libc/xlitob.c \
-	libultra/src/libc/xprintf.c \
-	libultra/src/os/createmesgqueue.c \
-	libultra/src/os/createthread.c \
-	libultra/src/os/destroythread.c \
-	libultra/src/os/getactivequeue.c \
-	libultra/src/os/getthreadpri.c \
-	libultra/src/os/gettime.c \
-	libultra/src/os/initialize.c \
-	libultra/src/os/jammesg.c \
-	libultra/src/os/recvmesg.c \
-	libultra/src/os/resetglobalintmask.c \
-	libultra/src/os/sendmesg.c \
-	libultra/src/os/seteventmesg.c \
-	libultra/src/os/sethwinterrupt.c \
-	libultra/src/os/setthreadpri.c \
-	libultra/src/os/settime.c \
-	libultra/src/os/settimer.c \
-	libultra/src/os/startthread.c \
-	libultra/src/os/stopthread.c \
-	libultra/src/os/thread.c \
-	libultra/src/os/timerintr.c \
-	libultra/src/os/virtualtophysical.c \
-	libultra/src/os/yieldthread.c \
-	libultra/src/sc/sched.c
-
-O_FILES := $(addprefix $(BUILD)/,$(SRC_FILES:.c=.o) $(LIBULTRA_FILES:.c=.o))
-D_FILES := $(O_FILES:.o=.d)
-
-TARGET := dkracing.elf
-MAP    := $(TARGET:.elf=.map)
+# bin/dkracing.elf
+TARGET := $(ENJ_BINDIR)/$(ENJ_BASENAME).elf
 MUSIC_SEQUENCES := 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65
 MUSIC_RAW_DIR := $(BUILD)/aicaflow/music_raw
 MUSIC_RAW_AFX := $(MUSIC_SEQUENCES:%=$(MUSIC_RAW_DIR)/sequence_%.afx)
@@ -342,14 +86,11 @@ DKR_SFX_MAP := $(DKR_AICAFLOW_TOOLS)/dkr.afsfx
 SFX_MANIFEST := $(BUILD)/aicaflow/sfx_manifest.h
 SFX_FALLBACK := $(BUILD)/aicaflow/fallback/manifest.json
 
-.PHONY: all clean
-
-all: $(TARGET)
-
-MKDCDISC ?= mkdcdisc
 .PHONY: cdi
+# The disc: the game's assets under cdrom/, then enDjinn's mkdcdisc rule
+# (bin/dkracing.cdi).
 cdi:
-	@command -v $(MKDCDISC) >/dev/null || { echo "mkdcdisc is required to build a CDI"; exit 1; }
+	@command -v mkdcdisc >/dev/null || { echo "mkdcdisc is required to build a CDI"; exit 1; }
 	$(MAKE) -f Makefile.dc DKR_ASSET_MOUNT=/cd all
 	mkdir -p cdrom/assets
 	cp assets/assets.bin assets/assets.lut.bin cdrom/assets/
@@ -364,7 +105,11 @@ cdi:
 	cp $(JINGLE_CONTROLS)/*.afx cdrom/build/dc/aicaflow/jingle_controls/
 	cp $(MUSIC_RAW_DIR)/*.afb $(MUSIC_RAW_DIR)/*.afx cdrom/build/dc/aicaflow/music_raw/
 	cp -R $(BUILD)/aicaflow/core $(BUILD)/aicaflow/vehicle $(BUILD)/aicaflow/scenes $(BUILD)/aicaflow/voices $(BUILD)/aicaflow/fallback cdrom/build/dc/aicaflow/
-	$(MKDCDISC) -N -e $(TARGET) -D cdrom -n "Diddy Kong Racing" -o $(TARGET:.elf=.cdi)
+	$(MAKE) -f Makefile.dc DKR_ASSET_MOUNT=/cd $(ENJ_BINDIR)/$(ENJ_BASENAME).cdi
+
+# enDjinn's disc rule only looks at the ELF; the files staged in cdrom/ change
+# too, so the disc is always written again.
+$(ENJ_BINDIR)/$(ENJ_BASENAME).cdi: force-asset-mount
 
 # Only rebuild path users when the selected mount changes.
 .PHONY: force-asset-mount
@@ -480,18 +225,3 @@ $(BUILD)/dreamcast/audio_aicaflow.o: $(SFX_MANIFEST) $(MUSIC_MANIFEST) \
 	$(AICAFLOW_ROOT)/firmware/aicaflow.drv \
 	$(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a
 
-$(TARGET): $(O_FILES)
-	$(CC) $(LTO_FLAGS) $(O_FILES) -o $(TARGET) -Wl,-Map,$(MAP) $(LIBS)
-
-$(BUILD)/dreamcast/%.o: dreamcast/%.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS_REIMPL) -c -o $@ $<
-
-$(BUILD)/%.o: %.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
-
-clean:
-	rm -rf $(BUILD) $(TARGET) $(MAP)
-
--include $(D_FILES)

@@ -36,7 +36,7 @@ pvrtex=${PVRTEX:-$KOS_BASE/utils/pvrtex/pvrtex}
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null ||
     fail "Python 3.10 or newer is needed as python3"
 if [[ $cdi == 1 ]]; then
-    command -v "${MKDCDISC:-mkdcdisc}" >/dev/null || fail "mkdcdisc is needed for --cdi"
+    command -v mkdcdisc >/dev/null || fail "mkdcdisc is needed on PATH for --cdi"
 fi
 shopt -s nullglob
 roms=(baseroms/*.z64)
@@ -66,4 +66,4 @@ if [[ $cdi == 1 ]]; then
     echo "== the disc image (make -f Makefile.dc cdi)"
     make -f Makefile.dc cdi "$@"
 fi
-echo "== done: dkracing.elf$([[ $cdi == 1 ]] && echo ' and the .cdi')"
+echo "== done: bin/dkracing.elf$([[ $cdi == 1 ]] && echo ' and bin/dkracing.cdi')"
