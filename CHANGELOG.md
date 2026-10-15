@@ -191,14 +191,22 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   and the result no longer depends on the link order.
 - **`assets.bin` stays on disc.** The port loaded the whole 10 MB asset
   image into RAM, as a cart is to the N64; each asset "DMA" now reads it from
-  the file, except for 1.3 MB kept in RAM from boot because scenes read it
-  while they play: every section under 128 KB (tables, headers, text) and the
-  2D textures (HUD, menu and sprite images). That leaves 8.8 MB free. The
-  large sections (level and object models, animations, 3D textures) are read
-  only while a scene loads, and the N64 sound samples (3.8 MB) never, since
-  AICAflow plays its own. In two attract runs there were 53 and 55 late
-  frames, as with the whole image in RAM; one run read 2 KB from disc while a
-  scene played. Scene loads took 0.4–0.9 s longer over `/pc`. Reads while a
+  the file, which leaves 8.8 MB free. What scenes read comes from RAM:
+  - every section under 128 KB (tables, headers, text) and the 2D textures
+    (HUD, menu and sprite images), 1.3 MB, are read at boot and kept;
+  - each scene has a pack (`build/dc/assetscenes/LEVEL.dsp`, made by
+    `dreamcast/build_asset_scenes.py`), which the scene gate reads in one pass
+    when the scene starts loading and drops when the next one does. It holds
+    the level's header, level model, object map and level-model textures,
+    found from the level itself, and what `dreamcast/assets.scenes` lists:
+    ranges a `TEX_TRACE=1` run saw the scene read beyond that (the objects it
+    spawns), merged by `dreamcast/record_scenes.py`. The attract scenes' packs
+    are 12–414 KB, read in 4–56 ms over `/pc`.
+
+  In two attract runs nothing was read from disc while a scene played, scene
+  loads took as long as with the whole image in RAM (2.0–2.4 s for a race),
+  and there were 50 and 46 late frames (53 and 55 before). The N64 sound
+  samples (3.8 MB) are never read, since AICAflow plays its own. Reads while a
   scene plays are counted per scene (`ASSET PLAY` with `GFX_PROFILE=1`).
   `ASSET_RESIDENT=1` loads the whole image as before; `ASSET_TRACE=1` prints
   which parts of it a run read.

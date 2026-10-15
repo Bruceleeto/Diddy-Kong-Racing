@@ -94,6 +94,15 @@ static u32 sPlayReads, sPlayBytes, sPlayMaxUs;
 #define RESIDENT_SMALL_MAX (128u * 1024u)
 #define RESIDENT_RANGES_MAX 16
 
+// The scene's pack (build/dc/assetscenes/LEVEL.dsp, dreamcast/build_asset_scenes.py):
+// the ranges of assets.bin the scene reads, found from its level and recorded
+// in dreamcast/assets.scenes. The gate reads it in one pass when the scene
+// starts loading; it is dropped when the next one does.
+#define SCENE_PACK_MAGIC 0x4B505344u /* DSPK */
+static u8 *sScenePack;
+static const u32 *sScenePackTable; // offset, size, file position per range
+static u32 sScenePackRanges;
+
 static u8 *sResidentBuf;
 static u32 sResidentLo[RESIDENT_RANGES_MAX], sResidentHi[RESIDENT_RANGES_MAX], sResidentAt[RESIDENT_RANGES_MAX];
 static u32 sResidentRanges;
@@ -196,6 +205,103 @@ static int resident_read(u32 offset, u8 *dst, u32 numBytes) {
         }
     }
     return 0;
+}
+
+/** Copies a read the scene's pack covers; 0 if it does not cover all of it. */
+static int scene_pack_read(u32 offset, u8 *dst, u32 numBytes) {
+    u32 lo = 0, hi;
+    int covered = 0;
+
+    mutex_lock(&sAssetsLock); // the audio thread reads too
+    hi = sScenePackRanges;
+    // The last range starting at or before offset.
+    while (hi - lo > 1) {
+        u32 mid = (lo + hi) / 2;
+
+        if (sScenePackTable[mid * 3] <= offset) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if (sScenePackRanges != 0) {
+        const u32 *r = &sScenePackTable[lo * 3];
+
+        if (r[0] <= offset && offset + numBytes <= r[0] + r[1]) {
+            shz_memcpy(dst, sScenePack + r[2] + (offset - r[0]), numBytes);
+            covered = 1;
+        }
+    }
+    mutex_unlock(&sAssetsLock);
+    return covered;
+}
+
+void pc_asset_scene_release(void) {
+    u8 *pack;
+
+    mutex_lock(&sAssetsLock);
+    pack = sScenePack;
+    sScenePack = NULL;
+    sScenePackTable = NULL;
+    sScenePackRanges = 0;
+    mutex_unlock(&sAssetsLock);
+    free(pack);
+}
+
+void pc_asset_scene_load(int level) {
+    char path[96];
+    u64 started = timer_us_gettime64();
+    file_t file;
+    u32 size, done = 0;
+    u8 *pack;
+
+    pc_asset_scene_release();
+    if (level < 0) {
+        return;
+    }
+    snprintf(path, sizeof(path), DKR_ASSET_MOUNT "/build/dc/assetscenes/%d.dsp", level);
+    file = fs_open(path, O_RDONLY);
+    if (file == FILEHND_INVALID) {
+        return;
+    }
+    size = (u32) fs_total(file);
+    pack = memalign(32, size);
+    if (pack == NULL) {
+        printf("ASSETS: no room for scene %d's pack (%lu KB)\n", level, (unsigned long) (size / 1024u));
+        fs_close(file);
+        return;
+    }
+    // Bounded transactions, as /pc wants them.
+    while (done < size) {
+        u32 count = size - done > 32768u ? 32768u : size - done;
+        ssize_t got = fs_read(file, pack + done, count);
+
+        if (got <= 0) {
+            break;
+        }
+        done += (u32) got;
+    }
+    fs_close(file);
+    if (done != size || size < 16u || ((u32 *) pack)[0] != SCENE_PACK_MAGIC || ((u32 *) pack)[1] != 1u ||
+        16u + 12u * ((u32 *) pack)[2] > size) {
+        printf("ASSETS: %s is not a version 1 scene pack\n", path);
+        free(pack);
+        return;
+    }
+    mutex_lock(&sAssetsLock);
+    sScenePack = pack;
+    sScenePackTable = (const u32 *) (pack + 16);
+    sScenePackRanges = ((u32 *) pack)[2];
+    mutex_unlock(&sAssetsLock);
+    printf("ASSETS: scene %d pack, %lu ranges, %lu KB, read in %lu ms\n", level, (unsigned long) sScenePackRanges,
+           (unsigned long) (size / 1024u), (unsigned long) ((timer_us_gettime64() - started) / 1000u));
+}
+#else
+void pc_asset_scene_release(void) {
+}
+
+void pc_asset_scene_load(int level) {
+    (void) level;
 }
 #endif
 
@@ -352,6 +458,13 @@ static void assets_read(u32 offset, u8 *dst, u32 numBytes) {
         sPlayBytes += numBytes;
         if (us > sPlayMaxUs) sPlayMaxUs = us;
     }
+#if DKR_TEX_TRACE
+    // What the scene's pack missed, loading or playing, for
+    // dreamcast/record_scenes.py to merge into dreamcast/assets.scenes.
+    if (pc_scene_level() >= 0) {
+        printf("ASSETUSE level=%d id=%lx:%lx\n", pc_scene_level(), (unsigned long) offset, (unsigned long) numBytes);
+    }
+#endif
 }
 #endif
 
@@ -469,7 +582,8 @@ void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
 #if DKR_ASSET_RESIDENT
             shz_memcpy((void *) (uintptr_t) ramAddress, sAssetsBin + offset, numBytes);
 #else
-            if (numBytes > 0 && !resident_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes)) {
+            if (numBytes > 0 && !resident_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes) &&
+                !scene_pack_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes)) {
                 assets_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes);
             }
 #endif

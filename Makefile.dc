@@ -115,8 +115,10 @@ cdi:
 	cp $(BUILD)/aicaflow/core.afb $(BUILD)/aicaflow/vehicle.afb $(JINGLE_BANK) cdrom/build/dc/aicaflow/
 	cp $(TEXTURE_PACK) cdrom/build/dc/
 	cp $(MODEL_SCENES) $(SONG_SCENES) cdrom/build/dc/
-	rm -rf cdrom/build/dc/texscenes
+	rm -rf cdrom/build/dc/texscenes cdrom/build/dc/assetscenes
 	cp -R $(BUILD)/texscenes cdrom/build/dc/
+	mkdir -p cdrom/build/dc/assetscenes
+	cp $(BUILD)/assetscenes/*.dsp cdrom/build/dc/assetscenes/
 	cp $(JINGLE_CONTROLS)/*.afx cdrom/build/dc/aicaflow/jingle_controls/
 	cp $(MUSIC_RAW_DIR)/*.afb $(MUSIC_RAW_DIR)/*.afx cdrom/build/dc/aicaflow/music_raw/
 	cp -R $(BUILD)/aicaflow/core $(BUILD)/aicaflow/vehicle $(BUILD)/aicaflow/scenes $(BUILD)/aicaflow/voices $(BUILD)/aicaflow/fallback cdrom/build/dc/aicaflow/
@@ -161,6 +163,13 @@ $(SONG_SCENES): dreamcast/songs.scenes
 	@mkdir -p $(dir $@)
 	cp $< $@
 $(TARGET): $(SONG_SCENES)
+# Each scene's pack of asset data (build/dc/assetscenes/LEVEL.dsp), read by the
+# scene gate in one pass: what the level needs, and dreamcast/assets.scenes.
+ASSET_SCENES_STAMP := $(BUILD)/assetscenes/.stamp
+$(ASSET_SCENES_STAMP): dreamcast/build_asset_scenes.py dreamcast/assets.scenes assets/assets.bin assets/assets.lut.bin
+	$(PYTHON) dreamcast/build_asset_scenes.py assets/assets.bin assets/assets.lut.bin dreamcast/assets.scenes $(BUILD)/assetscenes
+	@touch $@
+$(TARGET): $(ASSET_SCENES_STAMP)
 
 all: $(MUSIC_AFX) $(MUSIC_BANK)
 $(TARGET): | $(SFX_FALLBACK)

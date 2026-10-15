@@ -14,6 +14,7 @@ extern void pc_texture_scene_load(int level);
 extern void pc_model_scene_release(void);
 extern void pc_model_scene_load(int level);
 extern void pc_song_scene_load(int level);
+extern void pc_asset_scene_load(int level);
 #if DKR_GFX_PROFILE
 extern void pc_scene_prof_report(void);
 #endif
@@ -35,6 +36,8 @@ void pc_scene_loading(int level) {
     sSceneLevel = level;
     // The previous scene's held models go first, so the new level has the room.
     pc_model_scene_release();
+    // The scene's pack of asset data, in one read, before the level loads.
+    pc_asset_scene_load(level);
     // The scene's textures first, in one pass, before the game asks for any.
     pc_texture_scene_load(level);
 #ifdef DKR_AICAFLOW
