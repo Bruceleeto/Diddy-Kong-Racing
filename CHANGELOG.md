@@ -191,13 +191,17 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   and the result no longer depends on the link order.
 - **`assets.bin` stays on disc.** The port loaded the whole 10 MB asset
   image into RAM, as a cart is to the N64; each asset "DMA" now reads it from
-  the file instead, which leaves 10 MB free. An attract run reads 2.4 MB of it
-  at all: the N64 sound samples (3.8 MB) are never read, since AICAflow plays
-  its own. Reads while a scene plays are counted per scene (`ASSET PLAY` with
-  `GFX_PROFILE=1`): there are 11–629 of them, 3–188 KB, mostly 2D texture
-  headers and object data, which still have to move into the scene bundles.
-  Over `/pc` they cost about 3 late frames a run. `ASSET_RESIDENT=1` loads the
-  image as before; `ASSET_TRACE=1` prints which parts of it a run read.
+  the file, except for 1.3 MB kept in RAM from boot because scenes read it
+  while they play: every section under 128 KB (tables, headers, text) and the
+  2D textures (HUD, menu and sprite images). That leaves 8.8 MB free. The
+  large sections (level and object models, animations, 3D textures) are read
+  only while a scene loads, and the N64 sound samples (3.8 MB) never, since
+  AICAflow plays its own. In two attract runs there were 53 and 55 late
+  frames, as with the whole image in RAM; one run read 2 KB from disc while a
+  scene played. Scene loads took 0.4–0.9 s longer over `/pc`. Reads while a
+  scene plays are counted per scene (`ASSET PLAY` with `GFX_PROFILE=1`).
+  `ASSET_RESIDENT=1` loads the whole image as before; `ASSET_TRACE=1` prints
+  which parts of it a run read.
 - `ENJ_INPUT=1` reads all four controller ports through enDjinn's controller
   layer (`enj_ctrl`) instead of port 0 through KOS maple calls, and reports
   every connected pad to the game, so two to four players can join. Off by

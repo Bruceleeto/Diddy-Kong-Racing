@@ -89,6 +89,10 @@ int pc_scene_take_opening_frame(void) {
     return opening;
 }
 
+int pc_scene_level(void) {
+    return sSceneLevel;
+}
+
 int pc_scene_is_ready(void) {
     return sSceneReady;
 }

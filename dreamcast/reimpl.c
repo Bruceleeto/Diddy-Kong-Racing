@@ -83,6 +83,20 @@ static u32 sSwap16Lo[SWAP16_MAX], sSwap16Hi[SWAP16_MAX];
 static u32 sSwap16Count;
 
 static u32 sPlayReads, sPlayBytes, sPlayMaxUs;
+
+// Sections kept in RAM from boot, because scenes read them while they play:
+// every small one (tables, headers, text: about 0.4 MB) and the 2D textures
+// (0.9 MB: HUD, menu and sprite images, loaded and freed as screens change).
+// The large sections are read only while a scene loads: level and object
+// models, animations and 3D textures, which the scene bundles hold; the N64
+// sound banks are never read, since AICAflow has its own.
+#include "asset_enums.h"
+#define RESIDENT_SMALL_MAX (128u * 1024u)
+#define RESIDENT_RANGES_MAX 16
+
+static u8 *sResidentBuf;
+static u32 sResidentLo[RESIDENT_RANGES_MAX], sResidentHi[RESIDENT_RANGES_MAX], sResidentAt[RESIDENT_RANGES_MAX];
+static u32 sResidentRanges;
 #endif
 
 static u8 *pc_load_file(const char *path, u32 *sizeOut) {
@@ -124,6 +138,67 @@ static u8 *pc_load_file(const char *path, u32 *sizeOut) {
     return buf;
 }
 
+#if !DKR_ASSET_RESIDENT
+static void assets_read(u32 offset, u8 *dst, u32 numBytes);
+
+/** Reads the resident sections into RAM, adjacent ones as one range. */
+static void assets_resident_init(void) {
+    const u32 *lut = (const u32 *) sAssetLut;
+    u32 sections = sAssetLutSize / 4u - 2u; // the count, then each section's start and the end
+    u32 total = 0, s, i;
+
+    for (s = 0; s < sections; s++) {
+        u32 lo = lut[s + 1], hi = lut[s + 2];
+
+        if (hi <= lo || (hi - lo > RESIDENT_SMALL_MAX && s != ASSET_TEXTURES_2D)) {
+            continue;
+        }
+        if (sResidentRanges > 0 && sResidentHi[sResidentRanges - 1] == lo) {
+            sResidentHi[sResidentRanges - 1] = hi;
+        } else if (sResidentRanges < RESIDENT_RANGES_MAX) {
+            sResidentLo[sResidentRanges] = lo;
+            sResidentHi[sResidentRanges] = hi;
+            sResidentRanges++;
+        } else {
+            continue;
+        }
+        total += hi - lo;
+    }
+    sResidentBuf = malloc(total);
+    if (sResidentBuf == NULL) {
+        printf("ASSETS: no room for the resident sections (%lu KB)\n", (unsigned long) (total / 1024u));
+        sResidentRanges = 0;
+        return;
+    }
+    for (i = 0, total = 0; i < sResidentRanges; i++) {
+        sResidentAt[i] = total;
+        total += sResidentHi[i] - sResidentLo[i];
+    }
+    // Published only once filled, so a read meanwhile goes to the file.
+    s = sResidentRanges;
+    sResidentRanges = 0;
+    for (i = 0; i < s; i++) {
+        assets_read(sResidentLo[i], sResidentBuf + sResidentAt[i], sResidentHi[i] - sResidentLo[i]);
+    }
+    sResidentRanges = s;
+    printf("ASSETS: %lu KB resident in %lu ranges, the rest read from disc\n", (unsigned long) (total / 1024u),
+           (unsigned long) s);
+}
+
+/** Copies a read the resident sections cover; 0 if they do not cover all of it. */
+static int resident_read(u32 offset, u8 *dst, u32 numBytes) {
+    u32 i;
+
+    for (i = 0; i < sResidentRanges; i++) {
+        if (offset >= sResidentLo[i] && offset + numBytes <= sResidentHi[i]) {
+            shz_memcpy(dst, sResidentBuf + sResidentAt[i] + (offset - sResidentLo[i]), numBytes);
+            return 1;
+        }
+    }
+    return 0;
+}
+#endif
+
 static void pc_assets_init(void) {
     u32 i;
 
@@ -152,6 +227,9 @@ static void pc_assets_init(void) {
         p[3] = t0;
     }
     printf("ASSETS: lut %u bytes, data %u bytes\n", sAssetLutSize, sAssetsBinSize);
+#if !DKR_ASSET_RESIDENT
+    assets_resident_init();
+#endif
 }
 
 u32 pc_asset_lut_size(void) {
@@ -267,7 +345,7 @@ static void assets_read(u32 offset, u8 *dst, u32 numBytes) {
         }
     }
 
-    if (pc_scene_is_ready()) {
+    if (pc_scene_is_ready() && pc_scene_level() >= 0) { // not before the first scene
         u32 us = (u32) (timer_us_gettime64() - t0);
 
         sPlayReads++;
@@ -391,7 +469,7 @@ void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
 #if DKR_ASSET_RESIDENT
             shz_memcpy((void *) (uintptr_t) ramAddress, sAssetsBin + offset, numBytes);
 #else
-            if (numBytes > 0) {
+            if (numBytes > 0 && !resident_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes)) {
                 assets_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes);
             }
 #endif
