@@ -17,6 +17,9 @@ ENJ_TEXTURE_SRC_DIR := ./dreamcast/enj_assets/texture
 ENJ_SOUNDFX_SRC_DIR := ./dreamcast/enj_assets/sfx
 ENJ_FONTS_SRC_DIR := ./dreamcast/enj_assets/fonts
 ENJ_CBASEPATH := $(DKR_ASSET_MOUNT)/
+# enDjinn's coordinates follow DKR's FSAA; its quick font draws the frame rate.
+ENJ_FSAA := $(FSAA)
+ENJ_INJECT_QFONT := 1
 OPTLEVEL := 3
 # The old optimisation knob, OPT=-O2 and the like, still works.
 ifdef OPT

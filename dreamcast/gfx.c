@@ -7,6 +7,8 @@
 #include <string.h>
 
 #include <sh4zam/shz_sh4zam.h>
+#include <enDjinn/enj_font.h>
+#include <enDjinn/enj_qfont.h>
 
 // ---------------------------------------------------------------------------
 // State mirrored from the gfx.h setters
@@ -61,6 +63,7 @@ typedef struct {
 static DcTexture sTextures[MAX_TEXTURES];
 
 static int sPvrReady;
+static int sFpsFont; // enDjinn's quick font is in video memory, for the frame rate
 static int sInScene;
 
 // N64 framebuffer size the game draws in, and how we stretch it to fill the DC
@@ -155,9 +158,10 @@ static int sPendingFreeCount;
 static int sRoute;
 
 // PVR punch-through alpha threshold: a texel with alpha below this is discarded
-// before the depth stage. KOS neither names nor writes this register. 0x80 is the
-// RDP's ref = 0.5, which is what every alpha-tested material in the game asks for.
-#define PVR_PT_ALPHA_REF 0xA05F811C
+// before the depth stage. KOS names the register's offset (PVR_PT_ALPHA_REF) but
+// never writes it; this is its full address. 0x80 is the RDP's ref = 0.5, which
+// is what every alpha-tested material in the game asks for.
+#define DKR_PT_ALPHA_REF_ADDR 0xA05F811C
 #define PT_ALPHA_REF_VALUE 0x80
 
 /** Where the next 32-byte TA word goes: the store queues, or one of the recordings. */
@@ -224,9 +228,15 @@ void gfx_window_init(int width, int height, int scale) {
     printf("gfx: 24-bit framebuffer, %d bytes of video memory free\n", (int) pvr_mem_available());
 
     // Set after pvr_init so it cannot be clobbered by it.
-    *((volatile unsigned int *) PVR_PT_ALPHA_REF) = PT_ALPHA_REF_VALUE;
+    *((volatile unsigned int *) DKR_PT_ALPHA_REF_ADDR) = PT_ALPHA_REF_VALUE;
 
     pvr_ta_sq_addr = (void *)SQ_MASK_DEST(PVR_TA_INPUT);
+
+    // enDjinn's quick font for the frame-rate readout, in front of everything.
+    if (enj_qfont_init() == 0) {
+        enj_font_zvalue_set(1000.0f);
+        sFpsFont = 1;
+    }
 
     sPvrReady = 1;
 }
@@ -1294,27 +1304,29 @@ void gfx_blast_end(void *recordEnd) {
     }
 }
 
-/** Open a list, push a recording into it verbatim, close it. */
-static void replay_list(int list, unsigned char (*buf)[32], int count) {
-    int i;
-
-    if (count <= 0) {
+/** Open a list, push a recording into it verbatim, add `extra`, close it. */
+static void replay_list(int list, unsigned char (*buf)[32], int count, void (*extra)(void)) {
+    if (count <= 0 && extra == NULL) {
         return;
     }
     pvr_list_begin(list);
-    shz_sq_memcpy32_xmtrx(pvr_ta_sq_addr, buf, count * 32);
+    if (count > 0) {
+        shz_sq_memcpy32_xmtrx(pvr_ta_sq_addr, buf, count * 32);
+    }
+    if (extra != NULL) {
+        extra();
+    }
     pvr_list_finish();
 }
 
 // ---------------------------------------------------------------------------
-// FPS measurement (for the on-screen profiler overlay; see thread3_main.c)
+// FPS measurement and its on-screen readout
 // ---------------------------------------------------------------------------
 static float sFps = 0.0f;
 static uint64_t sLastFrameUs = 0;
 
 // Smoothed frames-per-second, measured from the wall-clock interval between
-// rendered frames. Exposed to game code (thread3_main.c) which draws it via the
-// debug-text font.
+// rendered frames.
 float pc_get_fps(void) {
     return sFps;
 }
@@ -1341,6 +1353,20 @@ static void fps_tick(void) {
     }
 }
 
+/** The frame rate in the top-right corner, white over a black shadow. */
+static void fps_draw(void) {
+    char text[16];
+    int fps10 = (int) (sFps * 10.0f + 0.5f);
+    int x;
+
+    snprintf(text, sizeof(text), "%d.%d fps", fps10 / 10, fps10 % 10);
+    x = DC_SCREEN_W - 12 - enj_font_string_width(text, enj_qfont_get_header());
+    enj_qfont_color_set(0, 0, 0);
+    enj_qfont_write(text, x + 1, 9, PVR_LIST_PT_POLY);
+    enj_qfont_color_set(255, 255, 255);
+    enj_qfont_write(text, x, 8, PVR_LIST_PT_POLY);
+}
+
 void gfx_frame_end(void) {
     if (!sInScene) {
         return;
@@ -1350,8 +1376,8 @@ void gfx_frame_end(void) {
 
     // Neither PT nor TR was opened this frame, so opening them now is legal — the
     // rule is that a list cannot be opened *again*, not that lists must go in order.
-    replay_list(PVR_LIST_PT_POLY, sPtBuf, sPtCount);
-    replay_list(PVR_LIST_TR_POLY, sTrBuf, sTrCount);
+    replay_list(PVR_LIST_PT_POLY, sPtBuf, sPtCount, sFpsFont ? fps_draw : NULL);
+    replay_list(PVR_LIST_TR_POLY, sTrBuf, sTrCount, NULL);
 
     pvr_scene_finish();
     sInScene = 0;
