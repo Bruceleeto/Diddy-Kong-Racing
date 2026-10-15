@@ -46,7 +46,7 @@ FSAA_PARTICLE_NEAR_FADE ?= 50
 FSAA_PARTICLE_NEAR_CULL ?= 100
 DEBUG_VIEW ?= 0
 # 1 skips level batches whose bounding box is wholly outside the view (src/tracks.c).
-LEVEL_CULL ?= 1
+LEVEL_CULL ?= 0
 # 0 stores cutout textures with 4 bits a channel instead of 5-5-5-1.
 # 0 stores textures in linear rows instead of twiddled.
 TWIDDLE ?= 1
