@@ -1458,7 +1458,7 @@ static void frame_pt(void *data) {
     }
 }
 
-void gfx_frame_render(void (*walk)(void *), void *data) {
+void gfx_frame_queue(void (*walk)(void *), void *data) {
     if (!sPvrReady) {
         return;
     }
@@ -1470,7 +1470,18 @@ void gfx_frame_render(void (*walk)(void *), void *data) {
     enj_render_list_add(PVR_LIST_OP_POLY, frame_op, NULL);
     enj_render_list_add(PVR_LIST_TR_POLY, frame_tr, NULL);
     enj_render_list_add(PVR_LIST_PT_POLY, frame_pt, NULL);
+}
+
+void gfx_frame_render(void (*walk)(void *), void *data) {
+    if (!sPvrReady) {
+        return;
+    }
+    gfx_frame_queue(walk, data);
     enj_render_scene();
+    frame_done();
+}
+
+void gfx_frame_submitted(void) {
     frame_done();
 }
 #endif

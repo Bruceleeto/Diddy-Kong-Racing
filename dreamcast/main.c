@@ -3355,7 +3355,16 @@ static void debug_view_draw(void) {
 
 static void gfx_task_draw(void *dlBegin, void *dlEnd);
 
+#if DKR_ENJ_LOOP
+static void gfx_task_queue(void *dlBegin, void *dlEnd);
+#endif
+
 void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
+#if DKR_ENJ_LOOP
+    // enDjinn draws it once the frame's iteration returns (pc_enj_loop_run).
+    gfx_task_queue(dlBegin, dlEnd);
+    return;
+#endif
     gfx_task_draw(dlBegin, dlEnd);
     pc_scene_frame_shown();
 #if DKR_DEBUG_VIEW
@@ -3493,6 +3502,63 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     }
 #endif
 }
+
+#if DKR_ENJ_LOOP
+#include <enDjinn/enj_mode.h>
+#include <enDjinn/enj_render.h>
+#include <enDjinn/enj_state.h>
+// ENJ_LOOP=1: enDjinn's enj_state_run is the game loop. Each frame it calls
+// the game's iteration (thread3_frame), which queues the display list it built
+// through gfx_task_queue; enDjinn then submits the scene, and its post-render
+// callback finishes the frame as gfx_task_draw's tail does.
+static FrameDl sQueuedFrame;
+#if DKR_GFX_PROFILE
+static u64 sQueuedT0;
+#endif
+
+static void gfx_task_queue(void *dlBegin, void *dlEnd) {
+    sQueuedFrame.begin = dlBegin;
+    sQueuedFrame.end = dlEnd;
+#if DKR_GFX_PROFILE
+    sQueuedT0 = pc_uptime_ns();
+#endif
+    sGfxFrameCount++;
+    gfx_frame_queue(frame_walk, &sQueuedFrame);
+}
+
+static void enj_frame_submitted(void *data) {
+    (void) data;
+    if (sQueuedFrame.begin == NULL) {
+        return; // nothing was drawn this frame
+    }
+    sQueuedFrame.begin = NULL;
+    gfx_frame_submitted();
+    pc_scene_frame_shown();
+#if DKR_GFX_PROFILE
+    prof_frame(sQueuedT0, sProfT1, sProfT2, pc_uptime_ns());
+#endif
+#if DKR_AUTO_EXIT_SECONDS
+    if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
+#if DKR_GFX_PROFILE
+        pc_scene_prof_report();
+#endif
+        prof_sample_write();
+        arch_exit();
+    }
+#endif
+}
+
+void pc_enj_loop_run(void (*frame)(void *)) {
+    static enj_mode_t sGameMode;
+
+    sGameMode.mode_updater = frame;
+    sGameMode.no_soft_reset = 1;
+    strncpy(sGameMode.name, "dkr", sizeof(sGameMode.name) - 1);
+    enj_render_post_callback_set(enj_frame_submitted, NULL);
+    enj_mode_push(&sGameMode);
+    enj_state_run();
+}
+#endif
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
     (void)addr;

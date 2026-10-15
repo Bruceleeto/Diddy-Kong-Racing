@@ -119,5 +119,9 @@ void gfx_frame_end(void);
 // ENJ_RENDER=1: submit a frame through enDjinn's render lists, calling `walk`
 // inside the opaque list where gfx_frame_begin/gfx_frame_end would bracket it.
 void gfx_frame_render(void (*walk)(void *), void *data);
+// ENJ_LOOP=1: queue the same renderers for enDjinn's loop to submit, and finish
+// the frame once it has (enDjinn's post-render callback).
+void gfx_frame_queue(void (*walk)(void *), void *data);
+void gfx_frame_submitted(void);
 
 #endif

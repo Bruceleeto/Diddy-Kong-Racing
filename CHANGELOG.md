@@ -172,6 +172,13 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   frames, but display-list time was 4% higher in every category: the same
   code, laid out about 600 bytes further on, so the hot loops (larger than the
   8 KB instruction cache) evict each other differently.
+- `ENJ_LOOP=1` (with `ENJ_RENDER=1`) runs the game inside enDjinn's loop:
+  `enj_state_run` calls one iteration of the game's loop as a mode updater,
+  and the display list that iteration built is submitted when it returns,
+  which is the same moment the plain loop draws it at the top of the next
+  iteration. Off by default. In two interleaved attract runs each way it had
+  54 late frames against 58, every scene lasted the same number of frames, and
+  the pictures matched.
 - LTO uses one partition (`-flto-partition=one`). With the default
   partitioning, enDjinn's object order changed how the display-list code was
   inlined and laid out: 1.5x the frames with over 11 ms of display-list time.
