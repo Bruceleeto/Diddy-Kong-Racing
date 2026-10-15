@@ -41,6 +41,7 @@
 #include "waves.h"
 #include "weather.h"
 #include "pc_swap.h"
+#include "../dreamcast/prof.h"
 
 #ifdef TARGET_DC
 #   include <sh4zam/shz_sh4zam.h>
@@ -3961,6 +3962,9 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
         return;
     }
     update_object_stack_trace(OBJECT_DRAW, obj->objectID);
+    PC_PROF_CATEGORY(*dList, obj->behaviorId == BHV_RACER                ? PC_PROF_CAT_RACERS
+                             : (obj->trans.flags & OBJ_FLAGS_PARTICLE) ? PC_PROF_CAT_PARTICLES
+                                                                         : PC_PROF_CAT_OBJECTS);
     gObjectCurrDisplayList = *dList;
     gObjectCurrMatrix = *mtx;
     gObjectCurrVertexList = *verts;

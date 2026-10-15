@@ -1726,173 +1726,6 @@ void set_anti_aliasing(s32 setting) {
     gAntiAliasing = setting;
 }
 
-/**
- * Find which segments can and should be rendered, then render their opaque geometry.
- * Render all objects inside visible segments then render the level's semitransparent geometry.
- * Afterwards, render particles.
- */
-void render_level_geometry_and_objects(void) {
-    s32 objCount;
-    s32 numberOfSegments;
-    s32 objFlags;
-    s32 sp160;
-    s32 i;
-    s32 visibleFlags;
-    u8 segmentIds[LEVEL_SEGMENT_MAX];
-    u8 objectsVisible[LEVEL_SEGMENT_MAX];
-    s32 visible;
-    Object *obj;
-
-    func_80012C30();
-
-    if (get_settings()->courseId == ASSET_LEVEL_OPENINGSEQUENCE) {
-        gAntiAliasing = TRUE;
-    }
-
-    sp160 = get_first_active_object(&objCount);
-
-    if (gCurrentLevelModel->numberOfSegments > 1) {
-        numberOfSegments = 0;
-        traverse_segments_bsp_tree(0, 0, gCurrentLevelModel->numberOfSegments - 1, segmentIds, &numberOfSegments);
-    } else {
-        numberOfSegments = 1;
-        segmentIds[0] = 0;
-    }
-
-    for (i = 1; i <= gCurrentLevelModel->numberOfSegments; i++) {
-        objectsVisible[i] = FALSE; // why not a bzero?
-    }
-
-    objectsVisible[0] = TRUE;
-
-    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL);
-    if (gDrawLevelSegments) {
-        for (i = 0; i < numberOfSegments; i++) {
-            render_level_segment(segmentIds[i], FALSE); // Render opaque segments
-            objectsVisible[segmentIds[i] + 1] = TRUE;
-        }
-    }
-
-    if (gCurrentLevelModel->numberOfSegments < 2) {
-        objectsVisible[1] = TRUE;
-    }
-
-    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OBJECTS);
-    rendermode_reset(&gTrackDL);
-    sort_objects_by_dist(sp160, objCount - 1);
-    visibleFlags = OBJ_FLAGS_INVIS_PLAYER1 << (get_current_viewport() & 1);
-
-    for (i = sp160; i < objCount; i++) {
-        obj = get_object(i);
-        visible = 255;
-        objFlags = obj->trans.flags;
-        if (objFlags & OBJ_FLAGS_UNK_0080) {
-            visible = 0;
-        } else if (!(objFlags & OBJ_FLAGS_PARTICLE)) {
-            visible = obj->opacity;
-        }
-        if (objFlags & visibleFlags) {
-            visible = 0;
-        }
-        if (obj != NULL && visible == 255 && check_if_in_draw_range(obj) &&
-            (objectsVisible[obj->segmentID + 1] || obj->unk34 > 1000.0)) {
-            if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
-                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-                continue;
-            } else if (obj->shadow != NULL) {
-                shadow_render(obj, obj->shadow);
-            }
-            render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-            if (obj->waterEffect != NULL && obj->header->flags & HEADER_FLAGS_WATER_EFFECT) {
-                watereffect_render(obj, obj->waterEffect);
-            }
-        }
-    }
-
-    for (i = objCount - 1; i >= sp160; i--) {
-        obj = get_object(i);
-        objFlags = obj->trans.flags;
-        if (objFlags & visibleFlags) {
-            visible = FALSE;
-        } else {
-            visible = TRUE;
-        }
-        if (obj != NULL && visible && objFlags & OBJ_FLAGS_UNK_0100 && objectsVisible[obj->segmentID + 1] &&
-            check_if_in_draw_range(obj)) {
-            if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
-                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-                continue;
-            } else if (obj->shadow != NULL) {
-                shadow_render(obj, obj->shadow);
-            }
-            render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-            if (obj->waterEffect != NULL && obj->header->flags & HEADER_FLAGS_WATER_EFFECT) {
-                watereffect_render(obj, obj->waterEffect);
-            }
-        }
-    }
-
-    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL_TR);
-    if (gDrawLevelSegments) {
-        for (i = numberOfSegments - 1; i >= 0; i--) {
-            render_level_segment(segmentIds[i], TRUE); // Render transparent segments
-        }
-    }
-
-    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_WATER);
-    if (gWaveBlockCount != 0) {
-        waves_render(&gTrackDL, &gTrackMtxPtr, get_current_viewport());
-    }
-
-    rendermode_reset(&gTrackDL);
-    material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE | RENDER_Z_COMPARE);
-    func_80012C3C(&gTrackDL);
-
-    // Particles and FX
-    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_PARTICLES);
-    for (i = objCount - 1; i >= sp160; i--) {
-        obj = get_object(i);
-        visible = 255;
-        objFlags = obj->trans.flags;
-        if (objFlags & OBJ_FLAGS_UNK_0080) {
-            visible = 1;
-        } else if (!(objFlags & OBJ_FLAGS_PARTICLE)) {
-            visible = obj->opacity;
-        }
-        if (objFlags & visibleFlags) {
-            visible = 0;
-        }
-        if (obj->behaviorId == BHV_RACER && visible >= 255) {
-            visible = 0;
-        }
-        if (obj != NULL && visible < 255 && objectsVisible[obj->segmentID + 1] && check_if_in_draw_range(obj)) {
-            if (visible > 0) {
-                if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
-                    render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-                    goto skip;
-                } else if (obj->shadow != NULL) {
-                    shadow_render(obj, obj->shadow);
-                }
-                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-                if ((obj->waterEffect != 0) && (obj->header->flags & HEADER_FLAGS_WATER_EFFECT)) {
-                    watereffect_render(obj, obj->waterEffect);
-                }
-            }
-        skip:
-            if (obj->behaviorId == BHV_RACER) {
-                render_racer_shield(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-                render_racer_magnet(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
-            }
-        }
-    }
-
-    if (gVoidData != NULL && func_80027568()) {
-        void_check(segmentIds, numberOfSegments, get_current_viewport());
-    }
-    gAntiAliasing = FALSE;
-    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OTHER);
-}
-
 #if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
 /*
  * Per-batch frustum culling of the level geometry. The game only drops whole
@@ -1911,7 +1744,16 @@ extern void pc_prof_level_batch(s32 tris, s32 culled);
 #endif
 static s16 (*sBatchBox)[6];
 static s32 sBatchBoxBase[LEVEL_SEGMENT_MAX + 1];
-static LevelModel *sBatchBoxModel;
+static LevelModel *sBatchBoxModel; // the level the boxes were computed for; NULL when a level loads
+// The view-projection the level is drawn with, taken before any object is
+// drawn: drawing objects can change gViewProjMatrixF, while the level's
+// translucent batches still use the matrix set before them.
+static MtxF sCullMatrix;
+#if DKR_GFX_PROFILE
+extern void pc_prof_cull_matrix_changed(void);
+extern void pc_prof_cull_matrix(const float m[4][4]);
+extern void pc_prof_false_cull(void);
+#endif
 
 static void level_batch_boxes(void) {
     s32 seg, batch, total = 0;
@@ -1964,9 +1806,9 @@ static s32 level_batch_outside(s32 segmentId, s32 batch) {
         f32 x = box[(corner & 1) ? 3 : 0];
         f32 y = box[(corner & 2) ? 4 : 1];
         f32 z = box[(corner & 4) ? 5 : 2];
-        f32 cx = x * gViewProjMatrixF[0][0] + y * gViewProjMatrixF[1][0] + z * gViewProjMatrixF[2][0] + gViewProjMatrixF[3][0];
-        f32 cy = x * gViewProjMatrixF[0][1] + y * gViewProjMatrixF[1][1] + z * gViewProjMatrixF[2][1] + gViewProjMatrixF[3][1];
-        f32 cw = x * gViewProjMatrixF[0][3] + y * gViewProjMatrixF[1][3] + z * gViewProjMatrixF[2][3] + gViewProjMatrixF[3][3];
+        f32 cx = x * sCullMatrix[0][0] + y * sCullMatrix[1][0] + z * sCullMatrix[2][0] + sCullMatrix[3][0];
+        f32 cy = x * sCullMatrix[0][1] + y * sCullMatrix[1][1] + z * sCullMatrix[2][1] + sCullMatrix[3][1];
+        f32 cw = x * sCullMatrix[0][3] + y * sCullMatrix[1][3] + z * sCullMatrix[2][3] + sCullMatrix[3][3];
         s32 code = 0;
         if (cx < -cw) code |= 1;
         if (cx > cw) code |= 2;
@@ -1975,9 +1817,209 @@ static s32 level_batch_outside(s32 segmentId, s32 batch) {
         if (cw <= 0.0f) code |= 16;
         outside &= code;
     }
+#if DKR_GFX_PROFILE
+    if (outside) {
+        // Check the box against the batch's own vertices: none may be in view.
+        LevelModelSegment *segment = &gCurrentLevelModel->segments[segmentId];
+        s32 v = segment->batches[batch].verticesOffset;
+        s32 end = segment->batches[batch + 1].verticesOffset;
+        for (; v < end; v++) {
+            Vertex *vtx = &segment->vertices[v];
+            f32 cx = vtx->x * sCullMatrix[0][0] + vtx->y * sCullMatrix[1][0] + vtx->z * sCullMatrix[2][0] + sCullMatrix[3][0];
+            f32 cy = vtx->x * sCullMatrix[0][1] + vtx->y * sCullMatrix[1][1] + vtx->z * sCullMatrix[2][1] + sCullMatrix[3][1];
+            f32 cw = vtx->x * sCullMatrix[0][3] + vtx->y * sCullMatrix[1][3] + vtx->z * sCullMatrix[2][3] + sCullMatrix[3][3];
+            if (cw > 0.0f && cx >= -cw && cx <= cw && cy >= -cw && cy <= cw) {
+                pc_prof_false_cull();
+                break;
+            }
+        }
+    }
+#endif
     return outside != 0;
 }
 #endif
+
+/**
+ * Find which segments can and should be rendered, then render their opaque geometry.
+ * Render all objects inside visible segments then render the level's semitransparent geometry.
+ * Afterwards, render particles.
+ */
+void render_level_geometry_and_objects(void) {
+    s32 objCount;
+    s32 numberOfSegments;
+    s32 objFlags;
+    s32 sp160;
+    s32 i;
+    s32 visibleFlags;
+    u8 segmentIds[LEVEL_SEGMENT_MAX];
+    u8 objectsVisible[LEVEL_SEGMENT_MAX];
+    s32 visible;
+    Object *obj;
+
+    func_80012C30();
+
+    if (get_settings()->courseId == ASSET_LEVEL_OPENINGSEQUENCE) {
+        gAntiAliasing = TRUE;
+    }
+
+    sp160 = get_first_active_object(&objCount);
+
+    if (gCurrentLevelModel->numberOfSegments > 1) {
+        numberOfSegments = 0;
+        traverse_segments_bsp_tree(0, 0, gCurrentLevelModel->numberOfSegments - 1, segmentIds, &numberOfSegments);
+    } else {
+        numberOfSegments = 1;
+        segmentIds[0] = 0;
+    }
+
+    for (i = 1; i <= gCurrentLevelModel->numberOfSegments; i++) {
+        objectsVisible[i] = FALSE; // why not a bzero?
+    }
+
+    objectsVisible[0] = TRUE;
+
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
+    __builtin_memcpy(&sCullMatrix, &gViewProjMatrixF, sizeof(sCullMatrix));
+#if DKR_GFX_PROFILE
+    pc_prof_cull_matrix(sCullMatrix); // the DL walk checks the level is drawn with it
+#endif
+#endif
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL);
+    if (gDrawLevelSegments) {
+        for (i = 0; i < numberOfSegments; i++) {
+            render_level_segment(segmentIds[i], FALSE); // Render opaque segments
+            objectsVisible[segmentIds[i] + 1] = TRUE;
+        }
+    }
+
+    if (gCurrentLevelModel->numberOfSegments < 2) {
+        objectsVisible[1] = TRUE;
+    }
+
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OBJECTS);
+    rendermode_reset(&gTrackDL);
+    sort_objects_by_dist(sp160, objCount - 1);
+    visibleFlags = OBJ_FLAGS_INVIS_PLAYER1 << (get_current_viewport() & 1);
+
+    for (i = sp160; i < objCount; i++) {
+        obj = get_object(i);
+        visible = 255;
+        objFlags = obj->trans.flags;
+        if (objFlags & OBJ_FLAGS_UNK_0080) {
+            visible = 0;
+        } else if (!(objFlags & OBJ_FLAGS_PARTICLE)) {
+            visible = obj->opacity;
+        }
+        if (objFlags & visibleFlags) {
+            visible = 0;
+        }
+        if (obj != NULL && visible == 255 && check_if_in_draw_range(obj) &&
+            (objectsVisible[obj->segmentID + 1] || obj->unk34 > 1000.0)) {
+            if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
+                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+                continue;
+            } else if (obj->shadow != NULL) {
+                PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_SHADOWS);
+                shadow_render(obj, obj->shadow);
+            }
+            render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+            if (obj->waterEffect != NULL && obj->header->flags & HEADER_FLAGS_WATER_EFFECT) {
+                watereffect_render(obj, obj->waterEffect);
+            }
+        }
+    }
+
+    for (i = objCount - 1; i >= sp160; i--) {
+        obj = get_object(i);
+        objFlags = obj->trans.flags;
+        if (objFlags & visibleFlags) {
+            visible = FALSE;
+        } else {
+            visible = TRUE;
+        }
+        if (obj != NULL && visible && objFlags & OBJ_FLAGS_UNK_0100 && objectsVisible[obj->segmentID + 1] &&
+            check_if_in_draw_range(obj)) {
+            if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
+                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+                continue;
+            } else if (obj->shadow != NULL) {
+                PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_SHADOWS);
+                shadow_render(obj, obj->shadow);
+            }
+            render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+            if (obj->waterEffect != NULL && obj->header->flags & HEADER_FLAGS_WATER_EFFECT) {
+                watereffect_render(obj, obj->waterEffect);
+            }
+        }
+    }
+
+#if defined(TARGET_DC) && DKR_GFX_PROFILE
+    if (__builtin_memcmp(&gViewProjMatrixF, &sCullMatrix, sizeof(sCullMatrix)) != 0) {
+        pc_prof_cull_matrix_changed();
+    }
+#endif
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL_TR);
+    if (gDrawLevelSegments) {
+        for (i = numberOfSegments - 1; i >= 0; i--) {
+            render_level_segment(segmentIds[i], TRUE); // Render transparent segments
+        }
+    }
+
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_WATER);
+    if (gWaveBlockCount != 0) {
+        waves_render(&gTrackDL, &gTrackMtxPtr, get_current_viewport());
+    }
+
+    rendermode_reset(&gTrackDL);
+    material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE | RENDER_Z_COMPARE);
+    func_80012C3C(&gTrackDL);
+
+    // Particles and FX
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_PARTICLES);
+    for (i = objCount - 1; i >= sp160; i--) {
+        obj = get_object(i);
+        visible = 255;
+        objFlags = obj->trans.flags;
+        if (objFlags & OBJ_FLAGS_UNK_0080) {
+            visible = 1;
+        } else if (!(objFlags & OBJ_FLAGS_PARTICLE)) {
+            visible = obj->opacity;
+        }
+        if (objFlags & visibleFlags) {
+            visible = 0;
+        }
+        if (obj->behaviorId == BHV_RACER && visible >= 255) {
+            visible = 0;
+        }
+        if (obj != NULL && visible < 255 && objectsVisible[obj->segmentID + 1] && check_if_in_draw_range(obj)) {
+            if (visible > 0) {
+                if (obj->trans.flags & OBJ_FLAGS_PARTICLE) {
+                    render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+                    goto skip;
+                } else if (obj->shadow != NULL) {
+                    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_SHADOWS);
+                    shadow_render(obj, obj->shadow);
+                }
+                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+                if ((obj->waterEffect != 0) && (obj->header->flags & HEADER_FLAGS_WATER_EFFECT)) {
+                    watereffect_render(obj, obj->waterEffect);
+                }
+            }
+        skip:
+            if (obj->behaviorId == BHV_RACER) {
+                render_racer_shield(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+                render_racer_magnet(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
+            }
+        }
+    }
+
+    if (gVoidData != NULL && func_80027568()) {
+        void_check(segmentIds, numberOfSegments, get_current_viewport());
+    }
+    gAntiAliasing = FALSE;
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OTHER);
+}
+
 
 /**
  * Render a batch of level geometry.
@@ -3029,6 +3071,11 @@ void generate_track(s32 modelId) {
     set_texture_colour_tag(COLOUR_TAG_GREEN);
     gTrackModelHeap = mempool_alloc_safe(LEVEL_MODEL_MAX_SIZE, COLOUR_TAG_YELLOW);
     gCurrentLevelModel = gTrackModelHeap;
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
+    // Every level is loaded into the same heap, so the model pointer does not
+    // tell levels apart: the batch boxes are recomputed for this one.
+    sBatchBoxModel = NULL;
+#endif
     gCollisionCandidates = mempool_alloc_safe(MAX_COLLISION_CANDIDATES * 4, COLOUR_TAG_YELLOW);
     gCollisionSurfaces = mempool_alloc_safe(MAX_COLLISION_CANDIDATES, COLOUR_TAG_YELLOW);
     gNumCollisionCandidates = 0;

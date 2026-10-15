@@ -83,7 +83,7 @@ static struct {
 // - how much level geometry a per-batch frustum test would drop (src/tracks.c).
 // ---------------------------------------------------------------------------
 static const char *const sCatNames[PC_PROF_CAT_COUNT] = {
-    "other", "level", "objects", "level-tr", "water", "particles", "hud",
+    "other", "level", "objects", "level-tr", "water", "particles", "hud", "racers", "shadows",
 };
 static struct {
     u32 frames, lateFrames, lateFields, maxFields;
@@ -91,7 +91,11 @@ static struct {
     u64 catNs[PC_PROF_CAT_COUNT];
     u32 catTris[PC_PROF_CAT_COUNT];
     u32 levelBatches, levelTris, cullBatches, cullTris;
+    u32 cullMatrixChanged; // frames where objects changed gViewProjMatrixF before the translucent level
+    u32 falseCulls;        // culled batches with a vertex in view
+    u32 levelVtx, levelVtxOtherMatrix; // level G_VTX loads, and those not drawn with the cull matrix
 } sScene;
+static const float (*sLevelCullMatrix)[4];
 static s32 sCatCur;
 static u64 sCatStart;
 static u32 sCatTrisStart;
@@ -106,6 +110,18 @@ static void scene_category(s32 cat) {
     sCatCur = (cat >= 0 && cat < PC_PROF_CAT_COUNT) ? cat : PC_PROF_CAT_OTHER;
     sCatStart = now;
     sCatTrisStart = sProf.tris;
+}
+
+void pc_prof_cull_matrix_changed(void) {
+    sScene.cullMatrixChanged++;
+}
+
+void pc_prof_cull_matrix(const float m[4][4]) {
+    sLevelCullMatrix = m;
+}
+
+void pc_prof_false_cull(void) {
+    sScene.falseCulls++;
 }
 
 /** src/tracks.c: one level batch drawn, and whether a frustum test would drop it. */
@@ -136,7 +152,10 @@ void pc_scene_prof_report(void) {
             printf(" %s %lu us %lu tris", sCatNames[c], (unsigned long) (sScene.catNs[c] / n / 1000u),
                    (unsigned long) (sScene.catTris[c] / n));
         }
-        printf("\n");
+        printf(" | view matrix changed under the level in %lu frames, %lu false culls, %lu of %lu level vertex loads "
+               "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
+               (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
+               (unsigned long) sScene.levelVtx);
     }
     memset(&sScene, 0, sizeof(sScene));
     sSceneVbl = 0;
@@ -2855,6 +2874,14 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 break;
             }
             case G_VTX: {
+#if DKR_GFX_PROFILE
+                if ((sCatCur == PC_PROF_CAT_LEVEL || sCatCur == PC_PROF_CAT_LEVEL_TR) && sLevelCullMatrix != NULL) {
+                    sScene.levelVtx++;
+                    if (memcmp(sMatrices[sCurMatrix], sLevelCullMatrix, sizeof(sMatrices[0])) != 0) {
+                        sScene.levelVtxOtherMatrix++;
+                    }
+                }
+#endif
                 // Peephole: a G_VTX immediately followed by the one G_TRIN that
                 // consumes it is the common object/model batch shape, and the
                 // pair can be fused into the native blast path — skipping the

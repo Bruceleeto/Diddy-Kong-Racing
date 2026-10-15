@@ -64,11 +64,12 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   path.
 - **Level geometry is culled per batch** (`LEVEL_CULL=1`, the default). The
   game only drops whole segments; inside a visible segment it drew every batch,
-  and in races 63-93% of those triangles lie outside the view. A batch whose
-  bounding box is wholly outside one side of the view is now skipped. Level
-  display-list time in races fell from 1.2-2.0 ms to 0.1-0.7 ms a frame, the
-  total from 7.7-9.1 ms to 6.3-7.1 ms, and late frames in races 18, 28 and 29
-  from 8, 17 and 4 to 0, 1 and 1 per 5-minute attract run.
+  and in the attract races 16-35% of those triangles lie outside the view. A
+  batch whose bounding box is wholly outside one side of the view is now
+  skipped. Level display-list time in races fell by 0.25-0.6 ms a frame and
+  late frames in races 18 and 28 from 9 and 16 to 1 and 9 per 5-minute attract
+  run. The GFX_PROFILE build checks every culled batch against its own
+  vertices and the level's draw matrix against the cull matrix.
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.

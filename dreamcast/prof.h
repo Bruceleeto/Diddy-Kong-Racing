@@ -23,11 +23,13 @@ enum {
 enum {
     PC_PROF_CAT_OTHER,     // camera, sky, weather, transitions, menus
     PC_PROF_CAT_LEVEL,     // opaque level geometry
-    PC_PROF_CAT_OBJECTS,   // racers, objects, shadows
+    PC_PROF_CAT_OBJECTS,   // other objects
     PC_PROF_CAT_LEVEL_TR,  // translucent level geometry
     PC_PROF_CAT_WATER,     // waves
     PC_PROF_CAT_PARTICLES, // translucent objects, particles and effects
     PC_PROF_CAT_HUD,
+    PC_PROF_CAT_RACERS,    // racer objects (render_object)
+    PC_PROF_CAT_SHADOWS,   // object shadows
     PC_PROF_CAT_COUNT
 };
 #define PC_PROF_CAT_TAG 0xD0CA7E00u
