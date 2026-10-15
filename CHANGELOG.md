@@ -97,6 +97,11 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   made display-list time 0.15-0.3 ms a frame worse in every attract scene.
 - Drawing blended cutouts twice (punch-through under blended): no better edges,
   up to 1 ms slower.
+- Queuing every batch as its own enDjinn renderer (all three lists recorded,
+  the display-list walk before the PVR wait, 170–310 renderers a frame in
+  races): 168 and 169 late frames in two attract runs, against 58 and 56 for
+  `ENJ_LOOP=1` with three renderers. Recording the opaque list and replaying it
+  cost 0.6–0.8 ms a frame, up to 3.7 ms, on top of a 10% slower walk.
 
 ## Audio (AICAflow)
 
@@ -184,6 +189,19 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   inlined and laid out: 1.5x the frames with over 11 ms of display-list time.
   With one partition there were about a third as many as before the switch,
   and the result no longer depends on the link order.
+- **`assets.bin` stays on disc.** The port loaded the whole 10 MB asset
+  image into RAM, as a cart is to the N64; each asset "DMA" now reads it from
+  the file instead, which leaves 10 MB free. An attract run reads 2.4 MB of it
+  at all: the N64 sound samples (3.8 MB) are never read, since AICAflow plays
+  its own. Reads while a scene plays are counted per scene (`ASSET PLAY` with
+  `GFX_PROFILE=1`): there are 11–629 of them, 3–188 KB, mostly 2D texture
+  headers and object data, which still have to move into the scene bundles.
+  Over `/pc` they cost about 3 late frames a run. `ASSET_RESIDENT=1` loads the
+  image as before; `ASSET_TRACE=1` prints which parts of it a run read.
+- `ENJ_INPUT=1` reads all four controller ports through enDjinn's controller
+  layer (`enj_ctrl`) instead of port 0 through KOS maple calls, and reports
+  every connected pad to the game, so two to four players can join. Off by
+  default until it has been played with.
 - `dreamcast/build.sh` builds the port from a clean clone and your ROM, after
   checking the toolchain, `pvrtex`, sh4zam and Python. A fresh clone built with
   it produces the same textures, scene bundles and AICAflow files, byte for

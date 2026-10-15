@@ -176,6 +176,10 @@ void pc_scene_prof_report(void) {
                "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
                (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
                (unsigned long) sScene.levelVtx);
+        {
+            extern void pc_asset_play_report(void);
+            pc_asset_play_report();
+        }
         if (sRacerProf.tris > 0) {
             printf("RACER PROF per frame (ns for t*):");
             RACER_PROF_FIELDS(RACER_PROF_PRINT)
@@ -3498,6 +3502,12 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
         pc_scene_prof_report();
 #endif
         prof_sample_write();
+#if DKR_ASSET_TRACE
+        {
+            extern void pc_asset_trace_report(void);
+            pc_asset_trace_report();
+        }
+#endif
         arch_exit();
     }
 #endif
@@ -3543,6 +3553,12 @@ static void enj_frame_submitted(void *data) {
         pc_scene_prof_report();
 #endif
         prof_sample_write();
+#if DKR_ASSET_TRACE
+        {
+            extern void pc_asset_trace_report(void);
+            pc_asset_trace_report();
+        }
+#endif
         arch_exit();
     }
 #endif

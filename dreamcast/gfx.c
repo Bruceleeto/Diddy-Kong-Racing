@@ -237,7 +237,7 @@ void gfx_window_init(int width, int height, int scale) {
         state->video.pvr_params = params;
         state->flags.soft_reset_enabled = 0;
         state->flags.no_snd_init = 1;
-        state->flags.no_input_init = 1;
+        state->flags.no_input_init = !DKR_ENJ_INPUT; // ENJ_INPUT=1: enDjinn reads the pads
         if (enj_state_startup() != 0) {
             return;
         }
