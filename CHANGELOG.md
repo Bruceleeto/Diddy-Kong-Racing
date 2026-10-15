@@ -124,6 +124,12 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   their scene packs.
 - AICAflow and AICAforge are pinned to their current mains, with the review
   and firmware fixes.
+- AICAflow is pinned to its status interrupt (firmware ABI 8,
+  [AICAflow #12](https://github.com/dfchil/AICAflow/pull/12)): the AICA reports
+  a sound or song that started, ended or failed by interrupt, and
+  `dkr_afx_update()`, called every audio tick, reads AICA RAM only after one
+  arrived. DKR's own code is unchanged; it only reads the state of its
+  instances. Not yet run on hardware.
 
 - No audio loader thread: a sound that no pack lists is loaded by the game
   thread between frames, outside any lock, instead of on a `sfx-loader`
