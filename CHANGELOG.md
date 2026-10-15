@@ -86,6 +86,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 ### Tried and removed
 
 - Triangle strips: 36% fewer vertices, but the display list got 2–4 ms slower.
+- Prefetching the display list four commands ahead, and keeping the blast
+  path's clip-space corners only for batches that need the near-clipper: each
+  made display-list time 0.15-0.3 ms a frame worse in every attract scene.
 - Drawing blended cutouts twice (punch-through under blended): no better edges,
   up to 1 ms slower.
 

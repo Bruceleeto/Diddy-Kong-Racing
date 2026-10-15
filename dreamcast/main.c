@@ -96,6 +96,19 @@ static struct {
     u32 levelVtx, levelVtxOtherMatrix; // level G_VTX loads, and those not drawn with the cull matrix
 } sScene;
 static const float (*sLevelCullMatrix)[4];
+
+// What the display-list walk spends on racers (PC_PROF_CAT_RACERS), by
+// handler: the timers need GFX_PROFILE=2, the counts work at 1 too.
+#define RACER_PROF_FIELDS(X)                                                                                         \
+    X(blast) X(fallback) X(verts) X(tris) X(culled) X(clipped) X(sent) X(slowTris) X(rects) X(slowBatches)           \
+    X(whyCombiner) X(whyBillboard) X(whyState) X(whyFull) X(whyAppend) X(whyShared) X(whyLoose) X(tBlast)           \
+    X(tFallback) X(tVtx) X(tPoly) X(tRect) X(tMtx) X(tState) X(tXform) X(tEmit) X(tPolyState) X(tPolyEmit)          \
+    X(tPolyDraw)
+#define RACER_PROF_DECLARE(f) u64 f;
+static struct { RACER_PROF_FIELDS(RACER_PROF_DECLARE) } sRacerProf, sRacerStart;
+#define RACER_PROF_SNAP(f) sRacerStart.f = sProf.f;
+#define RACER_PROF_ADD(f) sRacerProf.f += sProf.f - sRacerStart.f;
+#define RACER_PROF_PRINT(f) printf(" %s=%llu", #f, (unsigned long long) (sRacerProf.f / n));
 static s32 sCatCur;
 static u64 sCatStart;
 static u32 sCatTrisStart;
@@ -104,6 +117,13 @@ static u32 sSceneVbl; // vblank count at the previous frame's start; 0 after a l
 /** Closes the current display-list stretch and starts one of `cat`. */
 static void scene_category(s32 cat) {
     u64 now = pc_uptime_ns();
+
+    if (sCatCur == PC_PROF_CAT_RACERS) {
+        RACER_PROF_FIELDS(RACER_PROF_ADD)
+    }
+    if (cat == PC_PROF_CAT_RACERS) {
+        RACER_PROF_FIELDS(RACER_PROF_SNAP)
+    }
 
     sScene.catNs[sCatCur] += now - sCatStart;
     sScene.catTris[sCatCur] += sProf.tris - sCatTrisStart;
@@ -156,8 +176,14 @@ void pc_scene_prof_report(void) {
                "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
                (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
                (unsigned long) sScene.levelVtx);
+        if (sRacerProf.tris > 0) {
+            printf("RACER PROF per frame (ns for t*):");
+            RACER_PROF_FIELDS(RACER_PROF_PRINT)
+            printf("\n");
+        }
     }
     memset(&sScene, 0, sizeof(sScene));
+    memset(&sRacerProf, 0, sizeof(sRacerProf));
     sSceneVbl = 0;
 }
 void pc_prof_add(int part, unsigned long long ns) {
