@@ -62,6 +62,12 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   around their vertex loads, sprites, alpha-tested, depth-off and decal
   batches, and combiners that mix shade all used to fall back to the emulated
   path.
+- **Frames are paced on the vblank interrupt** (`VBL_PACER=1`, the default)
+  instead of a sleep to a clock time, which overshot its target by up to 5 ms.
+  Late frames in a 5-minute attract run fell from 103-174 to 60-61, most of it
+  in the character demo (62-63 to 23-24 on its first visit). Game speed follows
+  the real refresh rate (59.94 Hz on NTSC, as on the N64); every attract scene
+  lasted the same number of frames as before.
 - **Level geometry is culled per batch** (`LEVEL_CULL=1`, the default). The
   game only drops whole segments; inside a visible segment it drew every batch,
   and in the attract races 16-35% of those triangles lie outside the view. A

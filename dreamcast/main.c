@@ -408,6 +408,68 @@ void pc_retrace_reset(void) {
     sRetraceReset = TRUE;
 }
 
+#if DKR_VBL_PACER
+// The vblank pacer (VBL_PACER=1): waits for the video interrupt itself instead
+// of sleeping until a clock time. nanosleep overshot its target by up to 5 ms,
+// which pushed frames that were close to the limit a whole field late. Game
+// speed then follows the real refresh rate (59.94 Hz on NTSC, as on the N64).
+static volatile u32 sPacerVbl;
+static semaphore_t sPacerSem = SEM_INITIALIZER(0);
+
+static void pacer_vblank(u32 code, void *data) {
+    (void) code;
+    (void) data;
+    sPacerVbl++;
+    sem_signal(&sPacerSem);
+}
+
+s32 pc_retrace_wait(void) {
+    static s32 sStarted;
+    static u32 sLastVbl;
+    s32 periods;
+
+    if (!sStarted) {
+        sStarted = TRUE;
+        vblank_handler_add(&pacer_vblank, NULL);
+        sLastVbl = sPacerVbl;
+        sRetraceReset = FALSE;
+        return PC_LOGIC_UPDATE_RATE;
+    }
+    if (sRetraceReset) {
+        sRetraceReset = FALSE;
+        sLastVbl = sPacerVbl;
+        return PC_LOGIC_UPDATE_RATE;
+    }
+#if DKR_GFX_PROFILE
+    {
+        u64 slept = pc_uptime_ns();
+#endif
+        // Every vblank signals the semaphore, so none is lost between the test
+        // and the wait; signals left over from busy frames just drain here.
+        while ((u32) (sPacerVbl - sLastVbl) < (u32) PC_LOGIC_UPDATE_RATE) {
+            sem_wait(&sPacerSem);
+        }
+#if DKR_GFX_PROFILE
+        slept = pc_uptime_ns() - slept;
+        sProf.wait += slept;
+        sProf.waitFrame += slept;
+    }
+#endif
+    periods = (s32) (sPacerVbl - sLastVbl);
+    if (periods > PC_MAX_UPDATE_RATE) {
+        // A disc read in a menu or a paused debugger: not the game's time.
+        sLastVbl = sPacerVbl;
+        return PC_LOGIC_UPDATE_RATE;
+    }
+#if DKR_GFX_PROFILE
+    if (periods > PC_LOGIC_UPDATE_RATE) {
+        sProf.missed++;
+    }
+#endif
+    sLastVbl += (u32) periods;
+    return periods;
+}
+#else
 s32 pc_retrace_wait(void) {
     static u64 sLastNs = 0;
     u64 targetNs;
@@ -470,6 +532,7 @@ s32 pc_retrace_wait(void) {
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
     return periods;
 }
+#endif
 
 #define N64_SCREEN_W 320
 #define N64_SCREEN_H 240
