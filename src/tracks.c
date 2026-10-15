@@ -1893,17 +1893,22 @@ void render_level_geometry_and_objects(void) {
     PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OTHER);
 }
 
-#if defined(TARGET_DC) && DKR_GFX_PROFILE
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
 /*
- * Measurement only (SCENE PROF in dreamcast/main.c): how much of the level
- * geometry the game draws would a per-batch frustum test drop? Nothing is
- * culled. Each batch's bounding box is computed once per level from its
- * vertices and tested against the camera's view-projection matrix.
+ * Per-batch frustum culling of the level geometry. The game only drops whole
+ * segments it cannot see; inside a visible segment it draws every batch, and in
+ * races 63-93% of those triangles lie outside the view. Each batch's bounding
+ * box is computed once per level from its vertices and tested against the
+ * camera's view-projection matrix: a batch is dropped only when all eight
+ * corners are outside the same side. LEVEL_CULL=0 draws everything again; the
+ * GFX_PROFILE build counts what the test drops either way (SCENE PROF).
  */
 extern MtxF gViewProjMatrixF;
 extern void *malloc(__SIZE_TYPE__ size);
 extern void free(void *ptr);
+#if DKR_GFX_PROFILE
 extern void pc_prof_level_batch(s32 tris, s32 culled);
+#endif
 static s16 (*sBatchBox)[6];
 static s32 sBatchBoxBase[LEVEL_SEGMENT_MAX + 1];
 static LevelModel *sBatchBoxModel;
@@ -2047,8 +2052,18 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             vertices = (s32) &segment->vertices[batchInfo->verticesOffset];
         } while (0);
         triangles = (s32) &segment->triangles[batchInfo->facesOffset];
-#if defined(TARGET_DC) && DKR_GFX_PROFILE
-        pc_prof_level_batch(numberTriangles, level_batch_outside(segmentId, i));
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
+        {
+            s32 outside = level_batch_outside(segmentId, i);
+#if DKR_GFX_PROFILE
+            pc_prof_level_batch(numberTriangles, outside);
+#endif
+#if DKR_LEVEL_CULL
+            if (outside) {
+                continue;
+            }
+#endif
+        }
 #endif
         texOffset = batchInfo->texOffset << 14;
         levelHeaderIndex = (batchFlags >> 28) & 7;
