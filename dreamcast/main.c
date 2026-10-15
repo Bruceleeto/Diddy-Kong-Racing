@@ -3369,15 +3369,19 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
 #endif
 }
 
-static void gfx_task_draw(void *dlBegin, void *dlEnd) {
+typedef struct {
+    void *begin, *end;
+} FrameDl;
 #if DKR_GFX_PROFILE
-    u64 profT0 = pc_uptime_ns(), profT1, profT2;
+static u64 sProfT1, sProfT2; // the walk's start and end, for prof_frame
 #endif
-    sGfxFrameCount++;
 
-    gfx_frame_begin();
+/** One frame's display-list walk, inside the opaque list. */
+static void frame_walk(void *data) {
+    const FrameDl *frame = data;
+
 #if DKR_GFX_PROFILE
-    profT1 = pc_uptime_ns();
+    sProfT1 = pc_uptime_ns();
     {
         // The previous scene was flipped by now (gfx_frame_begin waits for the
         // PVR), so the vblank count between two frame starts is how many
@@ -3395,7 +3399,7 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
         sSceneVbl = vbl;
     }
     sCatCur = PC_PROF_CAT_OTHER;
-    sCatStart = profT1;
+    sCatStart = sProfT1;
     sCatTrisStart = sProf.tris;
 #endif
 
@@ -3423,7 +3427,7 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     sScisY1 = sVpClipY1 = (f32) N64_SCREEN_H;
     gfx_disable_scissor();
 
-    run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
+    run_dl((const Gfx *) frame->begin, (const Gfx *) frame->end - (const Gfx *) frame->begin, 0);
 #if DKR_GFX_PROFILE
     scene_category(PC_PROF_CAT_OTHER);
 #endif
@@ -3431,7 +3435,7 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     debug_view_draw();
 #endif
 #if DKR_GFX_PROFILE
-    profT2 = pc_uptime_ns();
+    sProfT2 = pc_uptime_ns();
     {
         int pt, tr;
         gfx_recorded_words(&pt, &tr);
@@ -3459,9 +3463,24 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     }
 #endif
 
-    gfx_frame_end();
+}
+
+static void gfx_task_draw(void *dlBegin, void *dlEnd) {
+    FrameDl frame = { dlBegin, dlEnd };
 #if DKR_GFX_PROFILE
-    prof_frame(profT0, profT1, profT2, pc_uptime_ns());
+    u64 profT0 = pc_uptime_ns();
+#endif
+    sGfxFrameCount++;
+
+#if DKR_ENJ_RENDER
+    gfx_frame_render(frame_walk, &frame);
+#else
+    gfx_frame_begin();
+    frame_walk(&frame);
+    gfx_frame_end();
+#endif
+#if DKR_GFX_PROFILE
+    prof_frame(profT0, sProfT1, sProfT2, pc_uptime_ns());
 #endif
 #if DKR_AUTO_EXIT_SECONDS
     // Unattended measurement runs: return to the loader by ourselves.

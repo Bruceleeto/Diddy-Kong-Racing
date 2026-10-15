@@ -164,6 +164,14 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   and makes the disc image; `local.cfg.mk` holds the project settings. The
   compile flags are unchanged. The ELF and disc image are now
   `bin/dkracing.elf` and `bin/dkracing.cdi`.
+- `ENJ_RENDER=1` submits each frame through enDjinn's render lists
+  (`enj_state_startup`, `enj_render_scene`) instead of the port's own PVR scene
+  calls: the display-list walk runs in the opaque list's renderer, and the
+  recorded translucent and punch-through lists are replayed by theirs. It is
+  off by default. In attract runs it matched the default within noise for late
+  frames, but display-list time was 4% higher in every category: the same
+  code, laid out about 600 bytes further on, so the hot loops (larger than the
+  8 KB instruction cache) evict each other differently.
 - LTO uses one partition (`-flto-partition=one`). With the default
   partitioning, enDjinn's object order changed how the display-list code was
   inlined and laid out: 1.5x the frames with over 11 ms of display-list time.

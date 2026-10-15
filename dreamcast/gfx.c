@@ -9,6 +9,10 @@
 #include <sh4zam/shz_sh4zam.h>
 #include <enDjinn/enj_font.h>
 #include <enDjinn/enj_qfont.h>
+#if DKR_ENJ_RENDER
+#include <enDjinn/enj_render.h>
+#include <enDjinn/enj_state.h>
+#endif
 
 // ---------------------------------------------------------------------------
 // State mirrored from the gfx.h setters
@@ -220,11 +224,31 @@ void gfx_window_init(int width, int height, int scale) {
     // A 24-bit framebuffer instead of the default RGB565: no banding in skies,
     // fog and fades. The packed format costs 307 KB more video memory for each
     // of the two buffers than 16-bit does; RGB0888 would cost twice that.
+#if DKR_ENJ_RENDER
+    // enDjinn sets the video mode and starts the PVR (ENJ_RENDER=1); AICAflow
+    // keeps the AICA, and the port reads the controllers itself.
+    {
+        enj_state_t *state;
+
+        enj_state_init_defaults();
+        state = enj_state_get();
+        state->video.display_mode = DM_640x480;
+        state->video.pixel_mode = PM_RGB888P;
+        state->video.pvr_params = params;
+        state->flags.soft_reset_enabled = 0;
+        state->flags.no_snd_init = 1;
+        state->flags.no_input_init = 1;
+        if (enj_state_startup() != 0) {
+            return;
+        }
+    }
+#else
     vid_set_mode(DM_640x480, PM_RGB888P);
 
     if (pvr_init(&params) < 0) {
         return;
     }
+#endif
     printf("gfx: 24-bit framebuffer, %d bytes of video memory free\n", (int) pvr_mem_available());
 
     // Set after pvr_init so it cannot be clobbered by it.
@@ -233,7 +257,12 @@ void gfx_window_init(int width, int height, int scale) {
     pvr_ta_sq_addr = (void *)SQ_MASK_DEST(PVR_TA_INPUT);
 
     // enDjinn's quick font for the frame-rate readout, in front of everything.
+    // enj_state_startup has loaded it already when enDjinn renders.
+#if DKR_ENJ_RENDER
+    if (enj_qfont_get_header() != NULL) {
+#else
     if (enj_qfont_init() == 0) {
+#endif
         enj_font_zvalue_set(1000.0f);
         sFpsFont = 1;
     }
@@ -622,12 +651,8 @@ void gfx_disable_scissor(void) {
 // Frame
 // ---------------------------------------------------------------------------
 
-void gfx_frame_begin(void) {
-    if (!sPvrReady) {
-        return;
-    }
-    pvr_scene_begin();
-    pvr_list_begin(PVR_LIST_OP_POLY);
+/** What every frame starts from, whoever opens the scene. */
+static void frame_state_reset(void) {
     sInScene = 1;
     sHdrDirty = 1;
     sScisDirty = 1;
@@ -637,6 +662,15 @@ void gfx_frame_begin(void) {
     sTrCount = 0;
     sSeenDepth = 0;
     sRoute = ROUTE_OP;
+}
+
+void gfx_frame_begin(void) {
+    if (!sPvrReady) {
+        return;
+    }
+    pvr_scene_begin();
+    pvr_list_begin(PVR_LIST_OP_POLY);
+    frame_state_reset();
 }
 
 // User clip is specified in 32-pixel tiles, lower-right inclusive.
@@ -1304,15 +1338,20 @@ void gfx_blast_end(void *recordEnd) {
     }
 }
 
+/** Push a recording verbatim into the list that is open. */
+static void replay_words(unsigned char (*buf)[32], int count) {
+    if (count > 0) {
+        shz_sq_memcpy32_xmtrx(pvr_ta_sq_addr, buf, count * 32);
+    }
+}
+
 /** Open a list, push a recording into it verbatim, add `extra`, close it. */
 static void replay_list(int list, unsigned char (*buf)[32], int count, void (*extra)(void)) {
     if (count <= 0 && extra == NULL) {
         return;
     }
     pvr_list_begin(list);
-    if (count > 0) {
-        shz_sq_memcpy32_xmtrx(pvr_ta_sq_addr, buf, count * 32);
-    }
+    replay_words(buf, count);
     if (extra != NULL) {
         extra();
     }
@@ -1367,6 +1406,15 @@ static void fps_draw(void) {
     enj_qfont_write(text, x, 8, PVR_LIST_PT_POLY);
 }
 
+/** After the scene is submitted. */
+static void frame_done(void) {
+    sInScene = 0;
+    // Safe now: every recording that could name these has been submitted.
+    while (sPendingFreeCount > 0) {
+        pvr_mem_free(sPendingFree[--sPendingFreeCount]);
+    }
+}
+
 void gfx_frame_end(void) {
     if (!sInScene) {
         return;
@@ -1380,10 +1428,49 @@ void gfx_frame_end(void) {
     replay_list(PVR_LIST_TR_POLY, sTrBuf, sTrCount, NULL);
 
     pvr_scene_finish();
-    sInScene = 0;
+    frame_done();
+}
 
-    // Safe now: every recording that could name these has been submitted.
-    while (sPendingFreeCount > 0) {
-        pvr_mem_free(sPendingFree[--sPendingFreeCount]);
+#if DKR_ENJ_RENDER
+// ENJ_RENDER=1: enDjinn's render lists submit the scene. The display-list walk
+// runs inside the opaque list, as between gfx_frame_begin and gfx_frame_end;
+// the punch-through and translucent recordings it makes are replayed by the
+// later lists.
+static void (*sFrameWalk)(void *);
+static void *sFrameWalkData;
+
+static void frame_op(void *data) {
+    (void) data;
+    frame_state_reset();
+    sFrameWalk(sFrameWalkData);
+}
+
+static void frame_tr(void *data) {
+    (void) data;
+    replay_words(sTrBuf, sTrCount);
+}
+
+static void frame_pt(void *data) {
+    (void) data;
+    replay_words(sPtBuf, sPtCount);
+    if (sFpsFont) {
+        fps_draw();
     }
 }
+
+void gfx_frame_render(void (*walk)(void *), void *data) {
+    if (!sPvrReady) {
+        return;
+    }
+    sFrameWalk = walk;
+    sFrameWalkData = data;
+    fps_tick();
+    // The recordings are only known after the walk, but enDjinn runs the lists
+    // in order (opaque first), so the later lists read them once it is done.
+    enj_render_list_add(PVR_LIST_OP_POLY, frame_op, NULL);
+    enj_render_list_add(PVR_LIST_TR_POLY, frame_tr, NULL);
+    enj_render_list_add(PVR_LIST_PT_POLY, frame_pt, NULL);
+    enj_render_scene();
+    frame_done();
+}
+#endif

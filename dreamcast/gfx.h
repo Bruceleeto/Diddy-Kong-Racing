@@ -116,5 +116,8 @@ void gfx_disable_scissor(void);
 
 // Presents the frame and pumps the event queue (exits the process on quit).
 void gfx_frame_end(void);
+// ENJ_RENDER=1: submit a frame through enDjinn's render lists, calling `walk`
+// inside the opaque list where gfx_frame_begin/gfx_frame_end would bracket it.
+void gfx_frame_render(void (*walk)(void *), void *data);
 
 #endif

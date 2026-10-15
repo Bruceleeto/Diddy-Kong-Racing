@@ -49,6 +49,9 @@ DEBUG_VIEW ?= 0
 LEVEL_CULL ?= 1
 # 1 paces frames on the vblank interrupt instead of a sleep to a clock time.
 VBL_PACER ?= 1
+# 1 submits each frame through enDjinn's render lists (enj_state_startup,
+# enj_render_scene) instead of the port's own PVR scene calls.
+ENJ_RENDER ?= 0
 # 0 stores cutout textures with 4 bits a channel instead of 5-5-5-1.
 # 0 stores textures in linear rows instead of twiddled.
 TWIDDLE ?= 1
