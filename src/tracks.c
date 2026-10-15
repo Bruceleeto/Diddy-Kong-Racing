@@ -407,8 +407,10 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         }
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
+        PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_HUD);
         PC_PROF(PC_PROF_HUD, hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr,
                                                get_racer_object_by_port(gSceneCurrentPlayerID), updateRate));
+        PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OTHER);
     }
     // Show TT Cam toggle for the fourth viewport when playing 3 player.
     if (numViewports == 3 && level_type() != RACETYPE_CHALLENGE_EGGS && level_type() != RACETYPE_CHALLENGE_BATTLE &&
@@ -1763,6 +1765,7 @@ void render_level_geometry_and_objects(void) {
 
     objectsVisible[0] = TRUE;
 
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL);
     if (gDrawLevelSegments) {
         for (i = 0; i < numberOfSegments; i++) {
             render_level_segment(segmentIds[i], FALSE); // Render opaque segments
@@ -1774,6 +1777,7 @@ void render_level_geometry_and_objects(void) {
         objectsVisible[1] = TRUE;
     }
 
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OBJECTS);
     rendermode_reset(&gTrackDL);
     sort_objects_by_dist(sp160, objCount - 1);
     visibleFlags = OBJ_FLAGS_INVIS_PLAYER1 << (get_current_viewport() & 1);
@@ -1828,12 +1832,14 @@ void render_level_geometry_and_objects(void) {
         }
     }
 
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL_TR);
     if (gDrawLevelSegments) {
         for (i = numberOfSegments - 1; i >= 0; i--) {
             render_level_segment(segmentIds[i], TRUE); // Render transparent segments
         }
     }
 
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_WATER);
     if (gWaveBlockCount != 0) {
         waves_render(&gTrackDL, &gTrackMtxPtr, get_current_viewport());
     }
@@ -1843,6 +1849,7 @@ void render_level_geometry_and_objects(void) {
     func_80012C3C(&gTrackDL);
 
     // Particles and FX
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_PARTICLES);
     for (i = objCount - 1; i >= sp160; i--) {
         obj = get_object(i);
         visible = 255;
@@ -1883,7 +1890,89 @@ void render_level_geometry_and_objects(void) {
         void_check(segmentIds, numberOfSegments, get_current_viewport());
     }
     gAntiAliasing = FALSE;
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OTHER);
 }
+
+#if defined(TARGET_DC) && DKR_GFX_PROFILE
+/*
+ * Measurement only (SCENE PROF in dreamcast/main.c): how much of the level
+ * geometry the game draws would a per-batch frustum test drop? Nothing is
+ * culled. Each batch's bounding box is computed once per level from its
+ * vertices and tested against the camera's view-projection matrix.
+ */
+extern MtxF gViewProjMatrixF;
+extern void *malloc(__SIZE_TYPE__ size);
+extern void free(void *ptr);
+extern void pc_prof_level_batch(s32 tris, s32 culled);
+static s16 (*sBatchBox)[6];
+static s32 sBatchBoxBase[LEVEL_SEGMENT_MAX + 1];
+static LevelModel *sBatchBoxModel;
+
+static void level_batch_boxes(void) {
+    s32 seg, batch, total = 0;
+
+    free(sBatchBox);
+    sBatchBox = NULL;
+    sBatchBoxModel = gCurrentLevelModel;
+    for (seg = 0; seg < gCurrentLevelModel->numberOfSegments && seg < LEVEL_SEGMENT_MAX; seg++) {
+        sBatchBoxBase[seg] = total;
+        total += gCurrentLevelModel->segments[seg].numberOfBatches;
+    }
+    sBatchBox = malloc(total * sizeof(*sBatchBox) + 1);
+    if (sBatchBox == NULL) {
+        return;
+    }
+    for (seg = 0; seg < gCurrentLevelModel->numberOfSegments && seg < LEVEL_SEGMENT_MAX; seg++) {
+        LevelModelSegment *segment = &gCurrentLevelModel->segments[seg];
+        for (batch = 0; batch < segment->numberOfBatches; batch++) {
+            s16 *box = sBatchBox[sBatchBoxBase[seg] + batch];
+            s32 v = segment->batches[batch].verticesOffset;
+            s32 end = segment->batches[batch + 1].verticesOffset;
+            box[0] = box[1] = box[2] = 0x7FFF;
+            box[3] = box[4] = box[5] = -0x8000;
+            for (; v < end; v++) {
+                Vertex *vtx = &segment->vertices[v];
+                if (vtx->x < box[0]) box[0] = vtx->x;
+                if (vtx->y < box[1]) box[1] = vtx->y;
+                if (vtx->z < box[2]) box[2] = vtx->z;
+                if (vtx->x > box[3]) box[3] = vtx->x;
+                if (vtx->y > box[4]) box[4] = vtx->y;
+                if (vtx->z > box[5]) box[5] = vtx->z;
+            }
+        }
+    }
+}
+
+/** Whether all eight corners of a batch's box lie outside one side of the view. */
+static s32 level_batch_outside(s32 segmentId, s32 batch) {
+    s16 *box;
+    s32 corner, outside = 0x1F;
+
+    if (sBatchBoxModel != gCurrentLevelModel) {
+        level_batch_boxes();
+    }
+    if (sBatchBox == NULL || segmentId >= LEVEL_SEGMENT_MAX) {
+        return FALSE;
+    }
+    box = sBatchBox[sBatchBoxBase[segmentId] + batch];
+    for (corner = 0; corner < 8 && outside; corner++) {
+        f32 x = box[(corner & 1) ? 3 : 0];
+        f32 y = box[(corner & 2) ? 4 : 1];
+        f32 z = box[(corner & 4) ? 5 : 2];
+        f32 cx = x * gViewProjMatrixF[0][0] + y * gViewProjMatrixF[1][0] + z * gViewProjMatrixF[2][0] + gViewProjMatrixF[3][0];
+        f32 cy = x * gViewProjMatrixF[0][1] + y * gViewProjMatrixF[1][1] + z * gViewProjMatrixF[2][1] + gViewProjMatrixF[3][1];
+        f32 cw = x * gViewProjMatrixF[0][3] + y * gViewProjMatrixF[1][3] + z * gViewProjMatrixF[2][3] + gViewProjMatrixF[3][3];
+        s32 code = 0;
+        if (cx < -cw) code |= 1;
+        if (cx > cw) code |= 2;
+        if (cy < -cw) code |= 4;
+        if (cy > cw) code |= 8;
+        if (cw <= 0.0f) code |= 16;
+        outside &= code;
+    }
+    return outside != 0;
+}
+#endif
 
 /**
  * Render a batch of level geometry.
@@ -1958,6 +2047,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             vertices = (s32) &segment->vertices[batchInfo->verticesOffset];
         } while (0);
         triangles = (s32) &segment->triangles[batchInfo->facesOffset];
+#if defined(TARGET_DC) && DKR_GFX_PROFILE
+        pc_prof_level_batch(numberTriangles, level_batch_outside(segmentId, i));
+#endif
         texOffset = batchInfo->texOffset << 14;
         levelHeaderIndex = (batchFlags >> 28) & 7;
         if (levelHeaderIndex != (batchInfo->verticesOffset * 0)) {

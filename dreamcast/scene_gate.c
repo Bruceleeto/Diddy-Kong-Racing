@@ -14,6 +14,9 @@ extern void pc_texture_scene_load(int level);
 extern void pc_model_scene_release(void);
 extern void pc_model_scene_load(int level);
 extern void pc_song_scene_load(int level);
+#if DKR_GFX_PROFILE
+extern void pc_scene_prof_report(void);
+#endif
 
 static volatile int sSceneReady = 1;
 static volatile int sAwaitingStep;  // loaded, but its first logic step has not run
@@ -23,6 +26,9 @@ static int sSceneLevel = -1;
 static unsigned long long sLoadStarted;
 
 void pc_scene_loading(int level) {
+#if DKR_GFX_PROFILE
+    pc_scene_prof_report(); // the scene that is ending
+#endif
     sSceneReady = 0;
     sAwaitingStep = sAwaitingFrame = 0;
     sLoadStarted = timer_ms_gettime64();

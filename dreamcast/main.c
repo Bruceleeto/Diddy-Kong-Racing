@@ -73,6 +73,74 @@ static struct {
     u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
 } sProf;
 #define PROF_ADD(field, n) (sProf.field += (n))
+
+// ---------------------------------------------------------------------------
+// Per-scene profile (SCENE PROF), printed as the next scene starts loading:
+// - late frames counted on the PVR's vblank counter, not the frame's own time;
+// - how long the pacer overslept its target;
+// - display-list time and triangles by category, as the game marks them
+//   (PC_PROF_CATEGORY in prof.h);
+// - how much level geometry a per-batch frustum test would drop (src/tracks.c).
+// ---------------------------------------------------------------------------
+static const char *const sCatNames[PC_PROF_CAT_COUNT] = {
+    "other", "level", "objects", "level-tr", "water", "particles", "hud",
+};
+static struct {
+    u32 frames, lateFrames, lateFields, maxFields;
+    u64 overNs, maxOverNs;
+    u64 catNs[PC_PROF_CAT_COUNT];
+    u32 catTris[PC_PROF_CAT_COUNT];
+    u32 levelBatches, levelTris, cullBatches, cullTris;
+} sScene;
+static s32 sCatCur;
+static u64 sCatStart;
+static u32 sCatTrisStart;
+static u32 sSceneVbl; // vblank count at the previous frame's start; 0 after a load
+
+/** Closes the current display-list stretch and starts one of `cat`. */
+static void scene_category(s32 cat) {
+    u64 now = pc_uptime_ns();
+
+    sScene.catNs[sCatCur] += now - sCatStart;
+    sScene.catTris[sCatCur] += sProf.tris - sCatTrisStart;
+    sCatCur = (cat >= 0 && cat < PC_PROF_CAT_COUNT) ? cat : PC_PROF_CAT_OTHER;
+    sCatStart = now;
+    sCatTrisStart = sProf.tris;
+}
+
+/** src/tracks.c: one level batch drawn, and whether a frustum test would drop it. */
+void pc_prof_level_batch(s32 tris, s32 culled) {
+    sScene.levelBatches++;
+    sScene.levelTris += tris;
+    if (culled) {
+        sScene.cullBatches++;
+        sScene.cullTris += tris;
+    }
+}
+
+/** Prints the scene that just ended and starts counting the next one. */
+void pc_scene_prof_report(void) {
+    u32 n = sScene.frames ? sScene.frames : 1;
+    s32 c;
+
+    if (sScene.frames > 0) {
+        printf("SCENE PROF %lu frames: late %lu (%lu fields, max %lu), pacer oversleep %lu us max %lu us | "
+               "level %lu batches %lu tris/frame, frustum would drop %lu batches %lu tris (%lu%%) |",
+               (unsigned long) sScene.frames, (unsigned long) sScene.lateFrames, (unsigned long) sScene.lateFields,
+               (unsigned long) sScene.maxFields, (unsigned long) (sScene.overNs / n / 1000u),
+               (unsigned long) (sScene.maxOverNs / 1000u), (unsigned long) (sScene.levelBatches / n),
+               (unsigned long) (sScene.levelTris / n), (unsigned long) (sScene.cullBatches / n),
+               (unsigned long) (sScene.cullTris / n),
+               (unsigned long) (sScene.levelTris ? sScene.cullTris * 100u / sScene.levelTris : 0));
+        for (c = 0; c < PC_PROF_CAT_COUNT; c++) {
+            printf(" %s %lu us %lu tris", sCatNames[c], (unsigned long) (sScene.catNs[c] / n / 1000u),
+                   (unsigned long) (sScene.catTris[c] / n));
+        }
+        printf("\n");
+    }
+    memset(&sScene, 0, sizeof(sScene));
+    sSceneVbl = 0;
+}
 void pc_prof_add(int part, unsigned long long ns) {
     sProf.part[part] += ns;
 }
@@ -319,9 +387,14 @@ s32 pc_retrace_wait(void) {
         nanosleep(&req, NULL);
 #if DKR_GFX_PROFILE
         {
-            u64 slept = pc_uptime_ns() - nowNs;
+            u64 woke = pc_uptime_ns();
+            u64 slept = woke - nowNs;
             sProf.wait += slept;
             sProf.waitFrame += slept;
+            if (woke > targetNs) {
+                sScene.overNs += woke - targetNs;
+                if (woke - targetNs > sScene.maxOverNs) sScene.maxOverNs = woke - targetNs;
+            }
         }
 #endif
         nowNs = targetNs;
@@ -2874,6 +2947,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     return; // a branch, not a call
                 }
                 break;
+            case (u8) G_NOOP:
+#if DKR_GFX_PROFILE
+                if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
+                    scene_category((s32) (w1 & 0xFF));
+                }
+#endif
+                break;
             case G_DMADL:
                 run_dl((const Gfx *) w1, (w0 >> 16) & 0xFF, depth + 1);
                 break;
@@ -3182,6 +3262,25 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     gfx_frame_begin();
 #if DKR_GFX_PROFILE
     profT1 = pc_uptime_ns();
+    {
+        // The previous scene was flipped by now (gfx_frame_begin waits for the
+        // PVR), so the vblank count between two frame starts is how many
+        // fields the frame before took.
+        u32 vbl = (u32) pvr_get_vbl_count();
+        if (sSceneVbl != 0 && pc_scene_is_ready()) {
+            u32 fields = vbl - sSceneVbl;
+            sScene.frames++;
+            if (fields > (u32) PC_LOGIC_UPDATE_RATE) {
+                sScene.lateFrames++;
+                sScene.lateFields += fields - (u32) PC_LOGIC_UPDATE_RATE;
+            }
+            if (fields > sScene.maxFields) sScene.maxFields = fields;
+        }
+        sSceneVbl = vbl;
+    }
+    sCatCur = PC_PROF_CAT_OTHER;
+    sCatStart = profT1;
+    sCatTrisStart = sProf.tris;
 #endif
 
     sCurMatrix = 0;
@@ -3209,6 +3308,9 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
     gfx_disable_scissor();
 
     run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
+#if DKR_GFX_PROFILE
+    scene_category(PC_PROF_CAT_OTHER);
+#endif
 #if DKR_DEBUG_VIEW
     debug_view_draw();
 #endif
@@ -3248,6 +3350,9 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
 #if DKR_AUTO_EXIT_SECONDS
     // Unattended measurement runs: return to the loader by ourselves.
     if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
+#if DKR_GFX_PROFILE
+        pc_scene_prof_report();
+#endif
         prof_sample_write();
         arch_exit();
     }
