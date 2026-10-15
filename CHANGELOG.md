@@ -21,6 +21,8 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 
 ### Added
 
+- **Frame-rate readout** in the top-right corner, drawn with enDjinn's quick
+  font, instead of the yellow debug text on the left.
 - **60 fps** (`FRAME_FIELDS=1`). The game logic keeps the two-field step its
   physics is tuned for; a frame that steps it draws the scene part-way between
   the old state and the new one, and the next frame draws the new state. Boosts,
@@ -144,8 +146,12 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   every `.c` in `dreamcast/`, the game's sources and enDjinn's runtime, links
   and makes the disc image; `local.cfg.mk` holds the project settings. The
   compile flags are unchanged. The ELF and disc image are now
-  `bin/dkracing.elf` and `bin/dkracing.cdi`. enDjinn is pinned at main
-  (`1d73a64`).
+  `bin/dkracing.elf` and `bin/dkracing.cdi`.
+- LTO uses one partition (`-flto-partition=one`). With the default
+  partitioning, enDjinn's object order changed how the display-list code was
+  inlined and laid out: 1.5x the frames with over 11 ms of display-list time.
+  With one partition there were about a third as many as before the switch,
+  and the result no longer depends on the link order.
 - `dreamcast/build.sh` builds the port from a clean clone and your ROM, after
   checking the toolchain, `pvrtex`, sh4zam and Python. A fresh clone built with
   it produces the same textures, scene bundles and AICAflow files, byte for

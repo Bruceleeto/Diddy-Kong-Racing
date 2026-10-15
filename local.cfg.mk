@@ -90,8 +90,14 @@ ENJ_CFLAGS := \
 
 # --- Linking -----------------------------------------------------------------
 # LTO runs at link time, so the link gets the optimisation and code flags too.
+# One LTO partition: GCC optimises the whole program at once, so inlining and
+# code layout do not depend on the order of the objects. With the default
+# partitioning, enDjinn's object order put the display-list code elsewhere,
+# inlined differently, and took 1.5x the frames with over 11 ms of DL time;
+# one partition took a third of them.
 ENJ_LDLIBS := $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a -lsh4zam -lm
-ENJ_LDFLAGS = -O$(OPTLEVEL) $(filter -f% -m%,$(ENJ_CFLAGS)) -Wl,-Map,$(ENJ_BINDIR)/$(ENJ_BASENAME).map
+ENJ_LDFLAGS = -O$(OPTLEVEL) $(filter -f% -m%,$(ENJ_CFLAGS)) -flto-partition=one \
+	-Wl,-Map,$(ENJ_BINDIR)/$(ENJ_BASENAME).map
 
 # --- Sources -----------------------------------------------------------------
 # The game's sources. enDjinn adds every .c in dreamcast/ (ENJ_CODEDIR) and
