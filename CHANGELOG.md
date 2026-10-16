@@ -143,6 +143,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - Sound effects were silently dropped while music and engine loops played,
   because the SH4 refused work it counted as over budget.
 
+## Boot screen
+
+- **The Dreamcast swirl spins in place of the N64 logo.** It is a 3D model in
+  the game's own object format, built by `dreamcast/swirl/make_swirl.py` from
+  the swirl in the public-domain Dreamcast logo SVG on Wikimedia Commons, and
+  embedded in the program; the port serves it when the boot screen loads the
+  N64 logo model, so `assets.bin` is unchanged. It is orange, and blue on a
+  European console, as the flash ROM's region says.
+
 ## Scenes
 
 ### Added

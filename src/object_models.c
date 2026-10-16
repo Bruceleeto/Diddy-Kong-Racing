@@ -16,6 +16,9 @@
 
 #ifdef TARGET_PC
 extern void pc_model_loaded(s32 modelID); // dreamcast/main.c: traces and counts disc loads
+#ifdef TARGET_DC
+extern u32 pc_object_model_override(s32 modelID, void *out); // dreamcast/swirl.c
+#endif
 #endif
 
 /************ .data ************/
@@ -160,6 +163,9 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 #endif
     u32 compressedData;
     s32 modelSize;
+#ifdef TARGET_DC
+    u32 overrideSize;
+#endif
 
     if (modelID >= gNumModelIDs) {
         stubbed_printf("Error: Model no. out of range on load. !!\n");
@@ -198,6 +204,13 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 
     temp_s0 = gObjectModelTable[modelID];
     sp48 = gObjectModelTable[modelID + 1] - temp_s0;
+#ifdef TARGET_DC
+    // The port may supply a model of its own (dreamcast/swirl.c).
+    overrideSize = pc_object_model_override(modelID, NULL);
+    if (overrideSize != 0) {
+        modelSize = overrideSize + sizeof(ObjectModel);
+    } else
+#endif
     modelSize = gzip_size_uncompressed(ASSET_OBJECT_MODELS, temp_s0) + sizeof(ObjectModel);
     objMdl = (ObjectModel *) mempool_alloc(modelSize, COLOUR_TAG_RED);
     if (objMdl == NULL) {
@@ -211,12 +224,20 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 #endif
         return NULL;
     }
+#ifdef TARGET_DC
+    if (overrideSize != 0) {
+        pc_object_model_override(modelID, objMdl);
+    } else {
+#endif
     compressedData = (u32) ((u8 *) objMdl + modelSize) - sp48;
 #ifdef TARGET_PC
     pc_model_loaded(modelID);
 #endif
     asset_load(ASSET_OBJECT_MODELS, compressedData, temp_s0, sp48);
     gzip_inflate((u8 *) compressedData, (u8 *) objMdl);
+#ifdef TARGET_DC
+    }
+#endif
 #ifdef TARGET_PC
     pc_swap_object_model(objMdl);
 #endif

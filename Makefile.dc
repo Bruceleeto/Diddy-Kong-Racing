@@ -163,6 +163,12 @@ $(SONG_SCENES): dreamcast/songs.scenes
 	@mkdir -p $(dir $@)
 	cp $< $@
 $(TARGET): $(SONG_SCENES)
+# The Dreamcast swirl that replaces the N64 logo model (dreamcast/swirl.c embeds it).
+SWIRL_MODEL := $(BUILD)/swirl.model
+$(SWIRL_MODEL): dreamcast/swirl/make_swirl.py dreamcast/swirl/dreamcast_logo_orange.svg
+	@mkdir -p $(dir $@)
+	$(PYTHON) dreamcast/swirl/make_swirl.py $@
+$(BUILD)/dreamcast/swirl.o: $(SWIRL_MODEL)
 # Each scene's pack of asset data (build/dc/assetscenes/LEVEL.dsp), read by the
 # scene gate in one pass: what the level needs, and dreamcast/assets.scenes.
 ASSET_SCENES_STAMP := $(BUILD)/assetscenes/.stamp
