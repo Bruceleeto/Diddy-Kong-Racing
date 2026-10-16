@@ -22,7 +22,8 @@ little-endian: three u32 counts (distinct vertices, strips, strip indices);
 each distinct vertex (by position and normal) as its position and unit
 normal, six floats; each strip's length, a u16; and the strips' indices of
 distinct vertices, u16s. Next to them, OUT.glow: the swirl's silhouette,
-filled and blurred, for the soft halo drawn behind it (see write_glow). OUT.gltf is the same mesh for viewing.
+filled and blurred, square on and from the side, for the soft halo drawn
+behind it (see write_glow). OUT.gltf is the same mesh for viewing.
 """
 import base64
 import json
@@ -464,14 +465,37 @@ def blurred(grid, blur):
     return out
 
 
+def side_coverage(poly):
+    """How much of each texel the swirl covers seen from the side, along X:
+    its thickness (DEPTH) across, at every height its outline reaches. Rows
+    from +Y down, columns from -Z."""
+    n, sub = GLOW_SIZE, GLOW_SUBSAMPLES
+    texel = 2 * GLOW_EXTENT / n
+    lo, hi = min(y for _, y in poly), max(y for _, y in poly)
+    grid = [[0.0] * n for _ in range(n)]
+    for row in range(n * sub):
+        y = GLOW_EXTENT - (row + 0.5) * texel / sub
+        if not lo <= y <= hi:
+            continue
+        first = max(0, math.ceil((GLOW_EXTENT - DEPTH / 2) / texel * sub - 0.5))
+        last = min(n * sub - 1, math.floor((GLOW_EXTENT + DEPTH / 2) / texel * sub - 0.5))
+        for col in range(first, last + 1):
+            grid[row // sub][col // sub] += 1.0 / (sub * sub)
+    return grid
+
+
 def write_glow(path, poly):
     """OUT.glow, little-endian: the size in texels (u32) and the extent
-    (float); then the halo's coverage, a byte per texel, rows from +Y down,
-    columns from -X, scaled to peak at 255 (the port sets how strong it is)."""
-    soft = blurred(coverage(poly), HALO_BLUR)
-    peak = max(max(line) for line in soft)
+    (float); then the halo's coverage seen square on, a byte per texel, rows
+    from +Y down, columns from -X; then the same seen from the side (columns
+    from -Z), each scaled so the square-on one peaks at 255 (the port sets how
+    strong they are)."""
+    face = blurred(coverage(poly), HALO_BLUR)
+    side = blurred(side_coverage(poly), HALO_BLUR)
+    peak = max(max(line) for line in face)
     blob = struct.pack("<If", GLOW_SIZE, GLOW_EXTENT)
-    blob += bytes(min(255, round(255 * v / peak)) for line in soft for v in line)
+    for soft in (face, side):
+        blob += bytes(min(255, round(255 * v / peak)) for line in soft for v in line)
     Path(path).write_bytes(blob)
 
 

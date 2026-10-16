@@ -138,6 +138,14 @@ static const float sGlintColour[3] = { 1.0f, 0.96f, 0.88f }; // the key light's 
 // Edge on, the square would show as a line across the sky: the halo fades out
 // over the last few degrees before the swirl is edge on, between these cosines
 // of the angle from square on (82 and 88 degrees).
+// HALO_CROSS: a second halo stands across the first, in the plane through the
+// swirl's vertical axis and its thickness, with the swirl's outline seen from
+// the side; each is weighted by how squarely it faces the eye (the cosine
+// squared), so the two cross-fade and neither shows edge on. Without it, the
+// one halo fades out over the last degrees (HALO_EDGE_*).
+#ifndef HALO_CROSS
+#define HALO_CROSS 1
+#endif
 #ifndef HALO_EDGE_FULL
 #define HALO_EDGE_FULL 0.14f
 #endif
@@ -154,10 +162,10 @@ static u32 sArgb[SWIRL_MAX_POINTS];  // this frame's light, per distinct vertex
 static u8 sOpacity;
 // By opacity (opaque, translucent), then without and with the glint.
 static pvr_poly_hdr_t sHeader[2][2] __attribute__((aligned(32)));
-static pvr_poly_hdr_t sHaloHeader __attribute__((aligned(32)));
+static pvr_poly_hdr_t sHaloHeader[2] __attribute__((aligned(32))); // square on, from the side
 static pvr_vertex_t sStrip[SWIRL_MAX_STRIP] __attribute__((aligned(32)));
 static float sScreen[SWIRL_MAX_POINTS][3];
-static pvr_ptr_t sGlintTexture, sHaloTexture;
+static pvr_ptr_t sGlintTexture, sHaloTexture, sHaloSideTexture;
 static u32 sHaloArgb;       // the halo's colour at full opacity
 static int sDraws;          // frames drawn since the model was loaded
 static int sGlintArmed;     // 1 once away from square on after fading in, -1 while one is under way
@@ -244,6 +252,7 @@ static void headers_init(void) {
     }
     if (sHaloTexture == NULL) {
         sHaloTexture = texture(size, size, sSwirlGlow + 8, NULL);
+        sHaloSideTexture = texture(size, size, sSwirlGlow + 8 + size * size, NULL);
     }
     for (int tr = 0; tr < 2; tr++) {
         for (int glint = 0; glint < 2; glint++) {
@@ -266,17 +275,19 @@ static void headers_init(void) {
             pvr_poly_compile(&sHeader[tr][glint], &cxt);
         }
     }
-    pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED, size, size,
-                     sHaloTexture, PVR_FILTER_BILINEAR);
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
-    cxt.txr.env = PVR_TXRENV_MODULATE;
-    cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
-    cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
-    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
-    cxt.blend.src = PVR_BLEND_ONE; // sky + glow
-    cxt.blend.dst = PVR_BLEND_ONE;
-    pvr_poly_compile(&sHaloHeader, &cxt);
+    for (int side = 0; side < 2; side++) {
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED, size, size,
+                         side ? sHaloSideTexture : sHaloTexture, PVR_FILTER_BILINEAR);
+        cxt.gen.culling = PVR_CULLING_NONE;
+        cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
+        cxt.txr.env = PVR_TXRENV_MODULATE;
+        cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
+        cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+        cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+        cxt.blend.src = PVR_BLEND_ONE; // sky + glow
+        cxt.blend.dst = PVR_BLEND_ONE;
+        pvr_poly_compile(&sHaloHeader[side], &cxt);
+    }
     // The albedo a little towards white, as sRGB.
     sHaloArgb = argb(HALO_STRENGTH * shz_sqrtf(sAlbedo[0] + (sHaloTowards[0] - sAlbedo[0]) * HALO_WHITE),
                      HALO_STRENGTH * shz_sqrtf(sAlbedo[1] + (sHaloTowards[1] - sAlbedo[1]) * HALO_WHITE),
@@ -508,46 +519,19 @@ static void glint_update(shz_vec3_t eye) {
     sGlintU[2] = GLINT_LEAN_Y / GLINT_SPAN;
 }
 
-/**
- * The halo: a square of the blurred silhouette in the swirl's plane, behind
- * it, fading out as the swirl turns edge on to the eye (in the model's space).
- */
-static void halo_draw(shz_vec3_t eye) {
-    const float e = ((const float *) sSwirlGlow)[1];
-    float corner[4][3], screen[4][3];
+/** One halo square, given its four corners in the model's space, at `level` (0-255). */
+static void halo_square(const pvr_poly_hdr_t *hdr, float corner[4][3], u32 level) {
+    float screen[4][3];
     pvr_vertex_t quad[4] __attribute__((aligned(32)));
-    u32 colour = sHaloArgb, level = sOpacity;
-    float facing, t;
+    u32 colour = sHaloArgb;
 
-    if (sHaloTexture == NULL) {
+    if (level == 0) {
         return;
-    }
-    // The cosine of the angle between the swirl's axis and the eye, then a
-    // smoothstep from gone to full.
-    facing = shz_fabsf(eye.z) * shz_inv_sqrtf(shz_vec3_dot(eye, eye));
-    t = (facing - HALO_EDGE_GONE) * shz_invf(HALO_EDGE_FULL - HALO_EDGE_GONE);
-    if (t <= 0.0f) {
-        return;
-    }
-    if (t < 1.0f) {
-        level = (u32) (level * t * t * (3.0f - 2.0f * t));
-    }
-    if (HALO_BREATHE != 0.0f) {
-        // Slowly, from its full strength down and back: 1 - BREATHE (1 - cos) / 2.
-        float c = shz_cosf((float) (sDraws % HALO_BREATH) * (2.0f * SHZ_F_PI / HALO_BREATH));
-
-        level = (u32) (level * (1.0f - HALO_BREATHE * 0.5f * (1.0f - c)));
     }
     if (level < 255) {
         u32 r = (colour >> 16 & 0xFF) * level / 255, g = (colour >> 8 & 0xFF) * level / 255,
             b = (colour & 0xFF) * level / 255;
         colour = 0xFF000000u | r << 16 | g << 8 | b;
-    }
-    for (int i = 0; i < 4; i++) {
-        // Top left, top right, bottom left, bottom right.
-        corner[i][0] = i & 1 ? e : -e;
-        corner[i][1] = i & 2 ? -e : e;
-        corner[i][2] = 0.0f;
     }
     pc_project_points(corner[0], 3, 4, screen);
     for (int i = 0; i < 4; i++) {
@@ -565,7 +549,54 @@ static void halo_draw(shz_vec3_t eye) {
         v->argb = colour;
         v->oargb = 0;
     }
-    gfx_tr_native(&sHaloHeader, quad, 4);
+    gfx_tr_native(hdr, quad, 4);
+}
+
+/**
+ * The halo: squares of the blurred silhouette through the middle of the swirl,
+ * behind it, weighted by how squarely they face the eye (in the model's space).
+ */
+static void halo_draw(shz_vec3_t eye) {
+    const float e = ((const float *) sSwirlGlow)[1];
+    const float inv = shz_invf(shz_vec3_dot(eye, eye));
+    float corner[4][3];
+    float level = sOpacity, face, side;
+
+    if (sHaloTexture == NULL) {
+        return;
+    }
+    if (HALO_BREATHE != 0.0f) {
+        // Slowly, from its full strength down and back: 1 - BREATHE (1 - cos) / 2.
+        float c = shz_cosf((float) (sDraws % HALO_BREATH) * (2.0f * SHZ_F_PI / HALO_BREATH));
+
+        level *= 1.0f - HALO_BREATHE * 0.5f * (1.0f - c);
+    }
+    if (HALO_CROSS) {
+        face = eye.z * eye.z * inv; // the cosines squared: the two add to 1 with the eye level
+        side = eye.x * eye.x * inv;
+    } else {
+        // The cosine of the angle between the swirl's axis and the eye, then a
+        // smoothstep from gone to full.
+        float t = (shz_fabsf(eye.z) * shz_sqrtf(inv) - HALO_EDGE_GONE) * shz_invf(HALO_EDGE_FULL - HALO_EDGE_GONE);
+
+        t = shz_clampf(t, 0.0f, 1.0f);
+        face = t * t * (3.0f - 2.0f * t);
+        side = 0.0f;
+    }
+    for (int i = 0; i < 4; i++) {
+        // Top left, top right, bottom left, bottom right, in the swirl's plane.
+        corner[i][0] = i & 1 ? e : -e;
+        corner[i][1] = i & 2 ? -e : e;
+        corner[i][2] = 0.0f;
+    }
+    halo_square(&sHaloHeader[0], corner, (u32) (level * face));
+    for (int i = 0; i < 4; i++) {
+        // The same across it: through the vertical axis and the thickness.
+        corner[i][0] = 0.0f;
+        corner[i][1] = i & 2 ? -e : e;
+        corner[i][2] = i & 1 ? e : -e;
+    }
+    halo_square(&sHaloHeader[1], corner, (u32) (level * side));
 }
 
 void pc_swirl_draw(void) {
