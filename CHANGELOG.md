@@ -54,6 +54,13 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   controller.
 - The sampling profiler can sample any one map (`PROF_SAMPLE_MAP`), and
   `GFX_PROFILE=4` counts only the samples of frames that were late.
+- The scene report gives the PVR's render time per scene (`SCENE PVR`: map,
+  average, longest, frames over one field). `FILL_PROF=1` adds what each list
+  fills, by display-list category and translucent class, in screens of area
+  and tiles, the surfaces that fill most, and one `FF` line per frame for
+  fitting render time to fill. `PROF_SKIP` leaves part of the frame out
+  (a list, a category, a translucent class); `PROF_SKIP=999` cycles through
+  them every ten frames to measure them all in one run.
 - **The profile no longer makes the frames it measures late.** Its lines, the
   game's debug messages and the `fps:` line went out with printf as they came,
   each a round trip to the host over dcload, and a `GFX LONG FRAME` line made
@@ -97,6 +104,16 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   translucent list that frame, which would show through it. With FSAA the
   title beach's scene had 76-83 late frames, all in the iris-out at its end; it
   now has none there.
+- **Fades to black are drawn into the frame.** A full-screen fade was a
+  blended rect over every pixel, about 4.5 ms of PVR time a frame with FSAA.
+  The fade announces itself while the display list is built, and the port
+  draws everything before it with its colours scaled by what the fade leaves
+  of them, which is what blending black over them does, and leaves the rect
+  out. Each attract race opens with a 22-frame fade-in; with FSAA every one of
+  those frames was late. Frames the PVR alone made late fell from 35 to 14 in
+  race 18 and from 21 to 1 in race 28, and late frames in race 18 from 35 to
+  12-14 (two runs each, 120 s attract benchmark). The logo, swirl and title
+  scenes render about 1 ms faster on average. Fades to white still blend.
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.

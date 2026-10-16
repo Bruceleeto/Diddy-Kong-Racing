@@ -141,8 +141,45 @@ static struct {
     // instruction-cache misses, each counted on every other frame.
     u64 walkStall[2];
     u32 texLookups, texScans; // texture_lookup calls, and those that fell through to the linear scan
+    // PVR render time of each frame shown: sum, longest, and how many took
+    // longer than one field (a frame the PVR alone makes late at 60 fps).
+    u64 pvrNs, pvrMaxNs;
+    u32 pvrFrames, pvrOver;
+    s32 map; // gMapId while the scene ran
+    u32 fadeFrames; // frames drawn darkened for a fade (dreamcast/cover.h)
+#if DKR_PROF_SKIP == 999
+    // PVR render time by what was left out (see sSkipCodes).
+    u64 skipNs[32];
+    u32 skipFrames[32], skipOver[32];
+#endif
 } sScene DKR_HOT;
 static u32 sProfWalkSp; // where the walk's stack is, for the cache layout
+
+
+#if DKR_PROF_SKIP == 999
+// PROF_SKIP=999: every other block of frames leaves one part of the frame out
+// (the PROF_SKIP codes in dreamcast/gfx.c), the blocks between leave nothing
+// out, so one run measures what each part costs the PVR on the same content.
+// The first frames of a block are not counted: the render time read at a
+// frame's end is that of a frame or two before.
+#define SKIP_BLOCK 10
+#define SKIP_SETTLE 3
+static const s16 sSkipCodes[] = { 0,   1,   2,   100, 101, 102, 103, 104, 105, 107, 108,
+                                  200, 201, 202, 203, 205, 207, 208, 300, 301, 302, 303, 304, 305,
+                                  400, 401, 402, 407 };
+#define SKIP_CODES ((s32) (sizeof(sSkipCodes) / sizeof(sSkipCodes[0])))
+static u32 sSkipFrame;
+static s32 sSkipIdx, sSkipPhase;
+
+static void prof_skip_next_frame(void) {
+    u32 block = sSkipFrame / SKIP_BLOCK;
+
+    sSkipPhase = (s32) (sSkipFrame % SKIP_BLOCK);
+    sSkipIdx = (block & 1) ? 1 + (s32) ((block >> 1) % (u32) (SKIP_CODES - 1)) : 0;
+    sSkipFrame++;
+    gfx_prof_set_skip(sSkipCodes[sSkipIdx]);
+}
+#endif
 static const float (*sLevelCullMatrix)[4];
 
 // Vertices that ran the combiner per vertex (not passthrough or constant), by
@@ -186,6 +223,7 @@ static void scene_category(s32 cat) {
     sScene.catNs[sCatCur] += now - sCatStart;
     sScene.catTris[sCatCur] += sProf.tris - sCatTrisStart;
     sCatCur = (cat >= 0 && cat < PC_PROF_CAT_COUNT) ? cat : PC_PROF_CAT_OTHER;
+    gfx_prof_set_category(sCatCur);
     sCatStart = now;
     sCatTrisStart = sProf.tris;
 }
@@ -252,6 +290,23 @@ void pc_scene_prof_report(void) {
                "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
                (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
                (unsigned long) sScene.levelVtx);
+        if (sScene.pvrFrames > 0) {
+            printf("SCENE PVR map %ld render avg %lu us max %lu us, %lu of %lu frames over 16.7 ms, %lu faded\n",
+                   (long) sScene.map, (unsigned long) (sScene.pvrNs / sScene.pvrFrames / 1000u),
+                   (unsigned long) (sScene.pvrMaxNs / 1000u), (unsigned long) sScene.pvrOver,
+                   (unsigned long) sScene.pvrFrames, (unsigned long) sScene.fadeFrames);
+        }
+        gfx_fill_report();
+#if DKR_PROF_SKIP == 999
+        for (c = 0; c < SKIP_CODES; c++) {
+            if (sScene.skipFrames[c] > 0) {
+                printf("SCENE SKIP %d: %lu frames, render avg %lu us, %lu over 16.7 ms\n", (int) sSkipCodes[c],
+                       (unsigned long) sScene.skipFrames[c],
+                       (unsigned long) (sScene.skipNs[c] / sScene.skipFrames[c] / 1000u),
+                       (unsigned long) sScene.skipOver[c]);
+            }
+        }
+#endif
         {
             extern void pc_asset_play_report(void);
             pc_asset_play_report();
@@ -400,6 +455,20 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         pvr_stats_t stats;
         if (!pvr_get_stats(&stats)) {
             sProf.pvrRender += stats.rnd_last_time;
+            gfx_fill_frame_done((unsigned int) (stats.rnd_last_time / 1000u));
+            if (pc_scene_is_ready() && sSceneVbl != 0) {
+                sScene.pvrNs += stats.rnd_last_time;
+                sScene.pvrFrames++;
+                if (stats.rnd_last_time > sScene.pvrMaxNs) sScene.pvrMaxNs = stats.rnd_last_time;
+                if (stats.rnd_last_time > 16683000u) sScene.pvrOver++;
+#if DKR_PROF_SKIP == 999
+                if (sSkipPhase >= SKIP_SETTLE) {
+                    sScene.skipNs[sSkipIdx] += stats.rnd_last_time;
+                    sScene.skipFrames[sSkipIdx]++;
+                    sScene.skipOver[sSkipIdx] += stats.rnd_last_time > 16683000u;
+                }
+#endif
+            }
             sProf.pvrRegister += stats.reg_last_time;
             if (stats.vtx_buffer_used > sProf.pvrBytes) sProf.pvrBytes = (u32) stats.vtx_buffer_used;
         }
@@ -737,6 +806,16 @@ static DKR_HOT u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static DKR_HOT u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
 static DKR_HOT u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
+
+// A fade to black this frame (dreamcast/cover.h): its alpha as announced while
+// the display list was built, or -1; the frame's walk takes it.
+static s32 sFadeAnnounced = -1;
+static s32 sFadeAlpha = -1;
+static s32 sFadeSkipRect; // between the fade's tags: its rect is not drawn
+
+void pc_fade_announce(int alpha) {
+    sFadeAnnounced = alpha;
+}
 
 // Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
 // FogData system its fog-changer objects drive. gSPFogPosition packs a multiplier
@@ -2201,6 +2280,13 @@ static DKR_HOT f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
  * the flush, and there is no memory clobber to make the caller reload every
  * global around each vertex.
  */
+/** A fade to black drawn into the frame (dreamcast/cover.h), on a batch's colours. Out of the hot section. */
+static __attribute__((noinline, cold)) void blast_fade_colors(u32 *argb, s32 count) {
+    for (s32 i = 0; i < count; i++) {
+        argb[i] = gfx_fade_argb(argb[i]);
+    }
+}
+
 static inline void blast_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v,
                              u32 argb) {
     u8 *top = (u8 *) vt + 32;
@@ -2230,6 +2316,10 @@ static inline void blast_sq_flush(pvr_vertex_t *vt) {
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
     pvr_vertex_t *rec = sBlastRecord;
 
+#if DKR_FILL_PROF
+    gfx_prof_fill_vert(x * sBlastSX, y * sBlastSY, flags == PVR_CMD_VERTEX_EOL);
+#endif
+    color = gfx_fade_argb(color);
     if (rec) {
         blast_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
         sBlastRecord = rec + 1;
@@ -2598,6 +2688,10 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
         }
     }
 
+    if (gDcFadeOn) {
+        blast_fade_colors(argb, total);
+    }
+
     PROF_LAP(tXform);
 #if DKR_GFX_PROFILE
     if (sOtherModeL & FORCE_BL) {
@@ -2657,6 +2751,11 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
             PROF_ADD(sentFrame, 1);
 #if DKR_GFX_PROFILE_SKIP == 1
             continue;
+#endif
+#if DKR_FILL_PROF
+            gfx_prof_fill_vert(px[i0], py[i0], FALSE);
+            gfx_prof_fill_vert(px[i1], py[i1], FALSE);
+            gfx_prof_fill_vert(px[i2], py[i2], TRUE);
 #endif
             if (rec) {
                 o0 = rec;
@@ -3309,6 +3408,9 @@ static __attribute__((noinline)) void handle_fillrect(u32 w0, u32 w1) {
     u8 color[4];
     u8 unlit[3] = { 0, 0, 0 };
 
+    if (sFadeSkipRect) {
+        return;
+    }
     if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
         // Fill mode paints the fill colour flat, and its lower-right corner is
         // inclusive — one pixel further than the same rect in 1-cycle mode. The
@@ -3338,6 +3440,13 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
         pc_swirl_draw();
     } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
         gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
+    } else if (w1 == PC_FADE_BEGIN_TAG) {
+        // Everything before it is drawn darkened already; what comes after it
+        // is drawn over the fade, as it is.
+        sFadeSkipRect = sFadeAlpha > 0 && sFadeAlpha < 255;
+        gfx_set_fade(255);
+    } else if (w1 == PC_FADE_END_TAG) {
+        sFadeSkipRect = FALSE;
     }
 #if DKR_GFX_PROFILE
     if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
@@ -3955,6 +4064,10 @@ static void frame_walk(void *data) {
             u32 fields = vbl - sSceneVbl;
             prof_sample_frame_end(fields > (u32) PC_LOGIC_UPDATE_RATE);
             sScene.frames++;
+            {
+                extern s32 gMapId;
+                sScene.map = gMapId;
+            }
             if (fields > (u32) PC_LOGIC_UPDATE_RATE) {
                 sScene.lateFrames++;
                 sScene.lateFields += fields - (u32) PC_LOGIC_UPDATE_RATE;
@@ -3966,6 +4079,11 @@ static void frame_walk(void *data) {
         sSceneVbl = vbl;
     }
     sCatCur = PC_PROF_CAT_OTHER;
+    gfx_prof_set_category(sCatCur);
+#if DKR_PROF_SKIP == 999
+    prof_skip_next_frame();
+#endif
+    gfx_fill_frame(sSceneVbl != 0 && pc_scene_is_ready());
     sCatStart = sProfT1;
     sCatTrisStart = sProf.tris;
     {
@@ -3995,6 +4113,14 @@ static void frame_walk(void *data) {
     sTileUlt = 0;
     sOtherModeL = 0;
     sGeometryMode = GFX_GEOMETRY_MODE_INIT;
+    // The fade the display list ends with, drawn into the frame (dreamcast/cover.h).
+    sFadeAlpha = sFadeAnnounced;
+    sFadeAnnounced = -1;
+    sFadeSkipRect = FALSE;
+    gfx_set_fade((sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255);
+#if DKR_GFX_PROFILE
+    sScene.fadeFrames += gDcFadeOn != 0;
+#endif
 
     // The list sets its own scissor and viewport before it draws anything
     // (src/rcp_dkr.c), but don't inherit last frame's rects until it does.

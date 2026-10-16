@@ -16,9 +16,10 @@
 // the link if it outgrows one cache's worth, so the hot handlers sit at a fixed
 // place in the cache and never on top of each other. Their cold paths are
 // split out of them to keep it that way.
-#if defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE == 2
-// The per-handler timers do not fit in one cache's worth; they disturb the
-// timing anyway. Kept together all the same.
+#if (defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE == 2) || (defined(DKR_FILL_PROF) && DKR_FILL_PROF)
+// The per-handler timers, and the fill profile's per-vertex calls, do not fit
+// in one cache's worth; they disturb the timing anyway. Kept together all the
+// same.
 #define DKR_HOT_CODE __attribute__((section(".text.dkr_hot")))
 #else
 #define DKR_HOT_CODE __attribute__((section(".sub0.dkr_hot")))
@@ -114,9 +115,34 @@ int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int coun
 // The same in the opaque list, streamed as it comes (dreamcast/swirl.c).
 int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
 
+// Every colour drawn from here on scaled by keep / 255 (red, green, blue; not
+// alpha), for a fade to black drawn into the frame (dreamcast/cover.h). 255
+// draws colours as they are.
+void gfx_set_fade(int keep);
+extern int gDcFadeOn;
+extern unsigned char gDcFadeLut[256];
+
+static inline unsigned int gfx_fade_argb(unsigned int c) {
+    if (!gDcFadeOn) {
+        return c;
+    }
+    return (c & 0xFF000000u) | ((unsigned int) gDcFadeLut[(c >> 16) & 0xFF] << 16) |
+           ((unsigned int) gDcFadeLut[(c >> 8) & 0xFF] << 8) | gDcFadeLut[c & 0xFF];
+}
+
 // While set, opaque untextured 2D batches are a cover over the whole scene,
 // drawn in the opaque list; see gfx.c. The display list sets it (PC_COVER_*).
 void gfx_set_cover(int enable);
+
+// Fill profile (FILL_PROF=1, see gfx.c): the display list's category, one
+// vertex as it goes out in framebuffer pixels, the start of each frame's
+// walk, and the per-scene report.
+void gfx_prof_set_category(int cat);
+void gfx_prof_fill_vert(float x, float y, int eol);
+void gfx_fill_frame(int counted);
+void gfx_fill_frame_done(unsigned int renderUs);
+void gfx_fill_report(void);
+void gfx_prof_set_skip(int code);
 
 // Whether the surface blends with what is behind it (RDP FORCE_BL). One that
 // does not is opaque whatever its alpha says, and goes to the opaque list.
