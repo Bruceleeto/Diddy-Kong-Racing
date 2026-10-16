@@ -137,7 +137,11 @@ static struct {
     u32 cullMatrixChanged; // frames where objects changed gViewProjMatrixF before the translucent level
     u32 falseCulls;        // culled batches with a vertex in view
     u32 levelVtx, levelVtxOtherMatrix; // level G_VTX loads, and those not drawn with the cull matrix
+    // CPU cycles the display-list walk stood still on operand-cache and on
+    // instruction-cache misses, each counted on every other frame.
+    u64 walkStall[2];
 } sScene;
+static u32 sProfWalkSp; // where the walk's stack is, for the cache layout
 static const float (*sLevelCullMatrix)[4];
 
 // Vertices that ran the combiner per vertex (not passthrough or constant), by
@@ -227,6 +231,9 @@ void pc_scene_prof_report(void) {
             printf(" %s %lu us %lu tris", sCatNames[c], (unsigned long) (sScene.catNs[c] / n / 1000u),
                    (unsigned long) (sScene.catTris[c] / n));
         }
+        printf(" | walk stall data %lu us code %lu us", (unsigned long) (sScene.walkStall[0] * 2u / n / 200u),
+               (unsigned long) (sScene.walkStall[1] * 2u / n / 200u));
+        printf(" | walk stack %08lx", (unsigned long) sProfWalkSp);
         printf("\nSCENE CC classify %lu/frame, probed %lu/frame", (unsigned long) (sCcClassified / n),
                (unsigned long) (sCcProbed / n));
         sCcClassified = sCcProbed = 0;
@@ -3573,6 +3580,7 @@ typedef struct {
 } FrameDl;
 #if DKR_GFX_PROFILE
 static u64 sProfT1, sProfT2; // the walk's start and end, for prof_frame
+static s32 sProfStallKind;   // which stall the counter counts this frame: 0 data, 1 code
 #endif
 
 /** One frame's display-list walk, inside the opaque list. */
@@ -3603,6 +3611,16 @@ static void frame_walk(void *data) {
     sCatCur = PC_PROF_CAT_OTHER;
     sCatStart = sProfT1;
     sCatTrisStart = sProf.tris;
+    {
+        // The second performance counter (the first is KOS's clock) counts the
+        // cycles the pipeline waits on cache misses, during the walk only:
+        // operand-cache and instruction-cache misses take turns, a frame each.
+        // Starting it clears it.
+        sProfWalkSp = (u32) __builtin_frame_address(0);
+        sProfStallKind ^= 1;
+        perf_cntr_start(PRFC1, sProfStallKind ? PMCR_PIPELINE_FREEZE_BY_ICACHE_MISS_MODE :
+                                                PMCR_PIPELINE_FREEZE_BY_DCACHE_MISS_MODE, PMCR_COUNT_CPU_CYCLES);
+    }
 #endif
 
     sCurMatrix = 0;
@@ -3638,6 +3656,7 @@ static void frame_walk(void *data) {
 #endif
 #if DKR_GFX_PROFILE
     sProfT2 = pc_uptime_ns();
+    sScene.walkStall[sProfStallKind] += perf_cntr_count(PRFC1);
     {
         int pt, tr;
         gfx_recorded_words(&pt, &tr);
