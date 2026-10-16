@@ -207,8 +207,8 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   the game's own object format, built by `dreamcast/swirl/make_swirl.py` from
   the swirl in the public-domain Dreamcast logo SVG on Wikimedia Commons, and
   embedded in the program; the port serves it when the boot screen loads the
-  N64 logo model, so `assets.bin` is unchanged. It is orange, and blue on a
-  European console, as the flash ROM's region says.
+  N64 logo model, so `assets.bin` is unchanged. It is the European swirl's
+  blue on every console, which also sits best with the sky behind it.
 - **The swirl is lit and drawn natively.** Its faces are flat and its edge is
   rounded by a narrow bevel. Every frame each of its 1370 distinct vertices is
   lit on the SH4 with sh4zam from the rendering equation: Lambert diffuse and

@@ -14,8 +14,9 @@
 // Schlick's Fresnel) under two lights that keep to the camera (a warm key from
 // the upper left in front, a cool rim from behind), the sky's irradiance as a
 // hemisphere, and the sky reflected, Fresnel-weighted; the sky stays put as
-// the swirl turns. The result is tone mapped (ACES, fitted) to sRGB. Orange,
-// and the European swirl's blue on a European console. The eye, the lights
+// the swirl turns. The result is tone mapped (ACES, fitted) to sRGB. It is the
+// European swirl's blue on every console: DKR is a European game, and the blue
+// sits with the sky behind it. The eye, the lights
 // and the sky's up are taken into the model's own space once a frame, so each
 // vertex is lit from its model-space position and normal as they are.
 //
@@ -33,7 +34,6 @@
 // chime (dreamcast/swirl/make_chime.py; none unless the build was given one),
 // which the sound code starts as the scene gate opens: with the first frame
 // that draws it, as the boot screen starts to fade in from black.
-#include <dc/flashrom.h>
 #include <dc/pvr.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,8 +79,7 @@ typedef struct {
 #define SWIRL_TONE_STEPS 1024 // the tone curve's table, by the square root of radiance
 #define SWIRL_TONE_SCALE 256.0f
 
-// Linear albedo: the logo's orange #ED8432 and the European blue #1E55C0.
-static const float sOrange[3] = { 0.846f, 0.231f, 0.032f };
+// Linear albedo: the European swirl's blue, #1E55C0.
 static const float sBlue[3] = { 0.013f, 0.091f, 0.527f };
 
 // Light colours as irradiance (times pi, folded out of the diffuse term).
@@ -308,12 +307,7 @@ u32 pc_object_model_override(s32 modelID, void *out) {
     if (out != NULL) {
         memcpy(out, sSwirlModel, sizeof(sSwirlModel));
         sSwirl = out;
-#ifdef SWIRL_REGION_EUROPE
-        // Build-time override, to see the other region's swirl on one console.
-        memcpy(sAlbedo, SWIRL_REGION_EUROPE ? sBlue : sOrange, sizeof(sAlbedo));
-#else
-        memcpy(sAlbedo, flashrom_get_region() == FLASHROM_REGION_EUROPE ? sBlue : sOrange, sizeof(sAlbedo));
-#endif
+        memcpy(sAlbedo, sBlue, sizeof(sAlbedo));
         tone_init();
         headers_init();
     }
