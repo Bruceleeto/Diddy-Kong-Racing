@@ -357,15 +357,35 @@ static void music_ended(const afx_instance_status_t *status) {
 }
 
 /* AICAflow reports each instance that ended from its event thread, once it has
- * freed it. The sounds and the song belong to the game's audio, under its lock. */
+ * freed it. The sounds and the song belong to the game's audio, under its
+ * lock, but the event thread must not wait for that: the game holds it while
+ * it waits for an instance to end, which takes the event thread. So the
+ * callback only queues the report; the audio code takes it under its lock. */
+#define DKR_ENDED_CAPACITY 64u
+static struct { afx_instance_t instance; afx_instance_status_t status; } sEnded[DKR_ENDED_CAPACITY];
+static uint32_t sEndedHead, sEndedTail; /* written by the event thread / the audio code */
+
 static void on_instance_end(afx_instance_t instance, const afx_instance_status_t *status, void *user) {
-    uint32_t i;
+    uint32_t head = sEndedHead;
     (void)user;
-    pc_audio_lock();
-    for (i = 0; i < DKR_SFX_SLOTS; ++i)
-        if (sSfxSlots[i].instance == instance) sfx_ended(&sSfxSlots[i], status);
-    if (sMusic && sMusic == instance) music_ended(status);
-    pc_audio_unlock();
+    if (head - __atomic_load_n(&sEndedTail, __ATOMIC_ACQUIRE) >= DKR_ENDED_CAPACITY)
+        return; /* The handle is stale anyway; the audio code notices that. */
+    sEnded[head % DKR_ENDED_CAPACITY].instance = instance;
+    sEnded[head % DKR_ENDED_CAPACITY].status = *status;
+    __atomic_store_n(&sEndedHead, head + 1u, __ATOMIC_RELEASE);
+}
+
+/* With the audio lock held: settles the sounds and the song that ended. */
+static void take_ended(void) {
+    uint32_t tail = sEndedTail, head = __atomic_load_n(&sEndedHead, __ATOMIC_ACQUIRE), i;
+    for (; tail != head; ++tail) {
+        afx_instance_t instance = sEnded[tail % DKR_ENDED_CAPACITY].instance;
+        const afx_instance_status_t *status = &sEnded[tail % DKR_ENDED_CAPACITY].status;
+        for (i = 0; i < DKR_SFX_SLOTS; ++i)
+            if (sSfxSlots[i].instance == instance) sfx_ended(&sSfxSlots[i], status);
+        if (sMusic && sMusic == instance) music_ended(status);
+    }
+    __atomic_store_n(&sEndedTail, tail, __ATOMIC_RELEASE);
 }
 
 /* Whether an instance has ended and been freed. A caller that holds the audio
@@ -379,6 +399,7 @@ int dkr_afx_sfx_stop_all(void) {
     uint32_t i, attempt;
     for (attempt = 0; attempt < 100; ++attempt) {
         int active = 0;
+        take_ended();
         for (i = 0; i < DKR_SFX_SLOTS; ++i) {
             if (!sSfxSlots[i].instance) continue;
             if (instance_gone(sSfxSlots[i].instance)) {
@@ -1153,7 +1174,10 @@ static int music_retire(void) {
         return AFX_OK;
     for (unsigned attempt = 0; attempt < 200; ++attempt) {
         afx_instance_status_t status;
-        int result = afx_instance_status(sMusic, &status);
+        int result;
+        take_ended();
+        if (!sMusic) return AFX_OK;
+        result = afx_instance_status(sMusic, &status);
         if (result == -AFX_STALE_GENERATION) {
             music_ended(NULL);
             return AFX_OK;
@@ -1259,7 +1283,7 @@ static void apply_sfx_controls(dkr_sfx_slot_t *slot) {
 }
 
 /* Sends running sounds their controls. Sounds that end are reported by
- * on_instance_end. */
+ * on_instance_end and settled by take_ended. */
 static void update_sfx(void) {
     uint32_t i;
     for (i = 0; i < DKR_SFX_SLOTS; ++i) {
@@ -1282,6 +1306,7 @@ void dkr_afx_update(void) {
 #endif
 
     if (!sReady) goto done;
+    take_ended();
     apply_room_control();
     update_sfx();
     sndp_aicaflow_retry_pending();
@@ -1299,7 +1324,7 @@ void dkr_afx_update(void) {
             }
             goto done;
         }
-        /* It ended: on_instance_end clears sMusic once AICAflow has freed it. */
+        /* It ended: take_ended clears sMusic once AICAflow has freed it. */
         goto done;
     }
 

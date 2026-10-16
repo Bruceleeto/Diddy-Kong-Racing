@@ -127,11 +127,13 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - AICAflow is pinned to its event-driven driver (firmware ABI 8,
   [AICAflow #12](https://github.com/dfchil/AICAflow/pull/12)): the AICA reports
   every change of state by interrupt, AICAflow's event thread frees an instance
-  that ended, and its end callback tells DKR, which completes the sound's owner
-  or clears the song. Each audio tick now only sends commands: no
-  `afx_update()`, no recycling. Waits that run under the audio lock (stopping
-  every sound at a scene change, retiring the song) look for the stale handle
-  themselves, since the callback needs that lock. Not yet run on hardware.
+  that ended, and its end callback queues the report for DKR, which completes
+  the sound's owner or clears the song under its audio lock on the next tick.
+  The callback only queues because the game holds that lock while it waits for
+  instances to end. Each audio tick now only sends commands: no `afx_update()`,
+  no recycling. In attract runs DKR's audio took 2.20 ms of SH4 time a second
+  against 2.55 ms with the polling driver (event thread and callback
+  included), and the music and effects played as before.
 - No audio loader thread: a sound that no pack lists is loaded by the game
   thread between frames, outside any lock, instead of on a `sfx-loader`
   thread.
