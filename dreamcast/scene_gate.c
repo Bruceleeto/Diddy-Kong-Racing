@@ -2,6 +2,8 @@
 #include "scene_gate.h"
 
 #include <arch/timer.h>
+#include <malloc.h>
+#include <stdio.h>
 
 extern void pc_retrace_reset(void);
 extern void frame_interp_reset(void);
@@ -30,6 +32,14 @@ static unsigned long long sLoadStarted;
 void pc_scene_loading(int level) {
 #if DKR_GFX_PROFILE
     pc_scene_prof_report(); // the scene that is ending
+    {
+        // How much of the heap the ending scene left in use, for sizing what
+        // the next one may hold.
+        struct mallinfo heap = mallinfo();
+
+        printf("SCENE HEAP arena %lu KB, in use %lu KB, free %lu KB\n", (unsigned long) (heap.arena / 1024),
+               (unsigned long) (heap.uordblks / 1024), (unsigned long) (heap.fordblks / 1024));
+    }
 #endif
     sSceneReady = 0;
     sAwaitingStep = sAwaitingFrame = 0;
