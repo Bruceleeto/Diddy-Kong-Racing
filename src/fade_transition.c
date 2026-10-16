@@ -10,6 +10,9 @@
 #include "textures_sprites.h"
 #include "types.h"
 #include "video.h"
+#ifdef TARGET_DC
+#include "../dreamcast/cover.h"
+#endif
 
 /************ .data ************/
 
@@ -758,12 +761,28 @@ void transition_render_circle(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex **vtx
     trisToRender = (Triangle *) sTransitionTris[sTransitionTaskNum];
     gSPDisplayList(gfx++, dTransitionShapeSettings);
 
+#ifdef TARGET_DC
+    // The even quarters are solid, the odd ones the soft edge. The port draws
+    // the solid ones first and as a cover, in the opaque list; they don't
+    // overlap the edge, so the order shows nowhere.
+    gDPNoOpTag(gfx++, PC_COVER_BEGIN_TAG);
+    for (i = 0; i < 4; i += 2) {
+        gSPVertexDKR(gfx++, OS_K0_TO_PHYSICAL(vertsToRender + i * NUM_OF_VERTS), NUM_OF_VERTS, 0);
+        gSPPolygon(gfx++, OS_K0_TO_PHYSICAL(trisToRender + i * NUM_OF_TRIS), NUM_OF_TRIS, TRIN_DISABLE_TEXTURE);
+    }
+    gDPNoOpTag(gfx++, PC_COVER_END_TAG);
+    for (i = 1; i < 4; i += 2) {
+        gSPVertexDKR(gfx++, OS_K0_TO_PHYSICAL(vertsToRender + i * NUM_OF_VERTS), NUM_OF_VERTS, 0);
+        gSPPolygon(gfx++, OS_K0_TO_PHYSICAL(trisToRender + i * NUM_OF_TRIS), NUM_OF_TRIS, TRIN_DISABLE_TEXTURE);
+    }
+#else
     for (i = 0; i < 4; i++) {
         gSPVertexDKR(gfx++, OS_K0_TO_PHYSICAL(vertsToRender), NUM_OF_VERTS, 0);
         gSPPolygon(gfx++, OS_K0_TO_PHYSICAL(trisToRender), NUM_OF_TRIS, TRIN_DISABLE_TEXTURE);
         vertsToRender += NUM_OF_VERTS;
         trisToRender += NUM_OF_TRIS;
     }
+#endif
 
     *dList = gfx;
     rendermode_reset(dList);

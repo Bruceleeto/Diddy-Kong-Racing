@@ -76,6 +76,14 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   late frames in races 18 and 28 from 9 and 16 to 1 and 9 per 5-minute attract
   run. The GFX_PROFILE build checks every culled batch against its own
   vertices and the level's draw matrix against the cull matrix.
+- **The circle transition's solid black is opaque.** It was all blended, two
+  full-screen fills with FSAA. Its solid quarters are now a cover in the opaque
+  list, nearer than the whole scene and writing depth, so the punch-through and
+  translucent lists drawn after it stay under it; only the soft edge is
+  blended. A cover falls back to blending when 2D has already gone to the
+  translucent list that frame, which would show through it. With FSAA the
+  title beach's scene had 76-83 late frames, all in the iris-out at its end; it
+  now has none there.
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.

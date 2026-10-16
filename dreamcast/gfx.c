@@ -143,6 +143,15 @@ static int sSeenDepth;
 // (FLT_EPSILON in KOS) and behind any real surface.
 #define BACKDROP_Z 1.0e-6f
 static int sFarBackdrop;
+// A cover: an opaque 2D surface over the whole scene, the screen transitions'
+// solid black (gfx_set_cover). Drawn in OP rather than TR, which saves a
+// blended full-screen fill, at a depth nearer than any of the scene, and
+// writing it, so what the PVR draws after OP (PT, TR) stays under it. Only
+// while nothing 2D has gone to TR yet this frame: that would show through.
+#define COVER_Z 16.0f
+static int sCover;      // the display list is drawing a cover
+static int sCoverDraw;  // the batch being emitted is one
+static int sTrOverlay;  // something 2D was recorded to TR after the scene began
 
 // VRAM freed while a scene is open. A recorded header holds a raw texture
 // pointer and isn't replayed until frame end, so freeing mid-frame lets the next
@@ -661,6 +670,8 @@ static void frame_state_reset(void) {
     sPtCount = 0;
     sTrCount = 0;
     sSeenDepth = 0;
+    sCover = 0;
+    sTrOverlay = 0;
     sRoute = ROUTE_OP;
 }
 
@@ -875,7 +886,8 @@ static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     // Everything compile_header_uncached reads, and a top bit so no key is 0.
     unsigned int key = 0x80000000u | ((unsigned int) list << 20) | ((unsigned int) sBoundTex << 6) |
                        ((sFilterPoint != 0) << 5) | ((sScisEnable != 0) << 4) | ((sDepthTest != 0) << 3) |
-                       ((sFarBackdrop != 0) << 2) | ((sAlphaRef > 0.0f) << 1) | (sDepthWrite != 0);
+                       ((sFarBackdrop != 0) << 2) | ((sAlphaRef > 0.0f) << 1) | (sDepthWrite != 0) |
+                       ((unsigned int) (sCoverDraw != 0) << 30);
     unsigned int at = (key ^ (key >> 6) ^ (key >> 13)) & (HDR_CACHE - 1);
 
     if (sHdrCache[at].key != key) {
@@ -944,6 +956,11 @@ static void compile_header_uncached(int list, pvr_poly_hdr_t *out) {
         cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
     }
 
+    if (sCoverDraw) {
+        cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
+        cxt.depth.write = PVR_DEPTHWRITE_ENABLE;
+    }
+
     pvr_poly_compile(out, &cxt);
 }
 
@@ -967,6 +984,9 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
     }
     if (sFarBackdrop) {
         invw = BACKDROP_Z;
+    }
+    if (sCoverDraw) {
+        invw = COVER_Z;
     }
 
     v->flags = eol ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
@@ -1037,9 +1057,14 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         } else if (!sSeenDepth && sTrCount == 0 && sPtCount == 0 && emitAlpha == 0xFF &&
                    (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque)) {
             sRoute = ROUTE_OP;
+        } else if (sCover && !sTrOverlay && emitAlpha == 0xFF && sBoundTex == 0) {
+            sRoute = ROUTE_OP;
+            sCoverDraw = 1;
+            sHdrDirty = 1;
         } else {
             sRoute = ROUTE_TR;
             sFarBackdrop = !sSeenDepth;
+            sTrOverlay |= sSeenDepth;
         }
         if (sDepthTest) {
             sSeenDepth = 1;
@@ -1152,6 +1177,14 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 
     sRoute = ROUTE_OP;
     sFarBackdrop = 0;
+    if (sCoverDraw) {
+        sCoverDraw = 0;
+        sHdrDirty = 1;
+    }
+}
+
+void gfx_set_cover(int enable) {
+    sCover = enable;
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,7 +1218,8 @@ int gfx_blast_why(void) {
 }
 
 int gfx_blast_viable(void) {
-    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f && !USE_PT_LIST) && !scissor_needs_exact_clip();
+    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f && !USE_PT_LIST) && !scissor_needs_exact_clip() &&
+           !sCover;
 }
 
 static int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
@@ -1241,6 +1275,7 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
     } else {
         route = ROUTE_TR;
         farBackdrop = !sSeenDepth;
+        sTrOverlay |= sSeenDepth;
     }
     if (!sDepthTest && !(USE_PT_LIST && sAlphaRef > 0.0f)) {
         int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);

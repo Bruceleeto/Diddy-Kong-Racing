@@ -16,6 +16,7 @@ extern u64 pc_uptime_ns(void);
 #include "scene_gate.h"
 #include "scrawl.h"
 #include "swirl.h"
+#include "cover.h"
 
 #define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
 #ifndef DKR_TEX_TRACE
@@ -3112,6 +3113,8 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     pc_scrawl_draw();
                 } else if (w1 == PC_SWIRL_TAG) {
                     pc_swirl_draw();
+                } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
+                    gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
                 }
 #if DKR_GFX_PROFILE
                 if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {

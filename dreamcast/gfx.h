@@ -91,6 +91,10 @@ int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int coun
 // The same in the opaque list, streamed as it comes (dreamcast/swirl.c).
 int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
 
+// While set, opaque untextured 2D batches are a cover over the whole scene,
+// drawn in the opaque list; see gfx.c. The display list sets it (PC_COVER_*).
+void gfx_set_cover(int enable);
+
 // Whether the surface blends with what is behind it (RDP FORCE_BL). One that
 // does not is opaque whatever its alpha says, and goes to the opaque list.
 void gfx_set_blend(int enable);
