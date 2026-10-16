@@ -181,7 +181,7 @@ $(BUILD)/scrawl_normals.png: dreamcast/scrawl/make_scrawl.py
 	$(PYTHON) dreamcast/scrawl/make_scrawl.py assets/.vanilla/us.v77 $@ $(SCRAWL_GRID)
 $(SCRAWL_GRID): $(BUILD)/scrawl_normals.png
 $(SCRAWL_TEXTURE): $(BUILD)/scrawl_normals.png
-	$(PVRTEX) -i $< -o $@ -f NORMAL --normal-style REGULAR --mipmap
+	$(PVRTEX) -i $< -o $@ -f NORMAL --normal-style REGULAR --mipmap -c
 $(BUILD)/dreamcast/scrawl.o: $(SCRAWL_GRID) $(SCRAWL_TEXTURE)
 # Each scene's pack of asset data (build/dc/assetscenes/LEVEL.dsp), read by the
 # scene gate in one pass: what the level needs, and dreamcast/assets.scenes.

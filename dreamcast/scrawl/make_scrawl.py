@@ -29,8 +29,8 @@ LEVEL = 23                 # ASSET_LEVEL_TITLESCREENSEQUENCE
 LOGO_TEXTURE = 222         # ASSET_TEX3D_COMMON_NINTENDOLOGO
 LOGO_W, LOGO_H = 128, 32   # texels; level UVs are in 1/32 texel
 GAP = 3                    # texels between the logo's frame and the "n"
-WIDTH = 64                 # texels the scrawl covers, at the logo's scale
-TEX = 256                  # normal map resolution (square); mipmapped by pvrtex
+WIDTH = 44                 # texels the scrawl covers, at the logo's scale: the letters and their ridges
+TEX = 512                  # normal map resolution, square as mipmaps must be; VQ compressed by pvrtex
 GRID_U, GRID_V = 13, 7     # vertices along and across, close enough to follow the sand
 LIFT = 1.0                 # world units above the sand
 
@@ -135,11 +135,10 @@ def strokes(rng):
 def heightfield(rng):
     """Height of the sand over the scrawl, in logo texels: a round groove along
     each stroke, a little ridge of pushed sand beside it, finger pressure varying."""
-    size = TEX
-    xs = (np.arange(size) + 0.5) / size * WIDTH
-    ys = (np.arange(size) + 0.5) / size * LOGO_H
+    xs = (np.arange(TEX) + 0.5) / TEX * WIDTH
+    ys = (np.arange(TEX) + 0.5) / TEX * LOGO_H
     gx, gy = np.meshgrid(xs, ys)
-    height = np.zeros((size, size))
+    height = np.zeros((TEX, TEX))
     for stroke in strokes(rng):
         pts = np.array(stroke)
         depth = np.full(len(pts), 1.0)
@@ -159,11 +158,11 @@ def heightfield(rng):
         ridge = 0.28 * np.exp(-((dist - radius * 1.35) / (radius * 0.45)) ** 2) * weight
         height += groove + ridge
     height = np.maximum(height, -1.2)  # crossing strokes dig no deeper
-    return height + rng_noise(rng, size) * 0.03
+    return height + rng_noise(rng, TEX, TEX) * 0.03
 
 
-def rng_noise(rng, size):
-    field = np.array([[rng.uniform(-1, 1) for _ in range(size)] for _ in range(size)])
+def rng_noise(rng, width, height):
+    field = np.array([[rng.uniform(-1, 1) for _ in range(width)] for _ in range(height)])
     kernel = np.array([1, 4, 6, 4, 1], float) / 16
     for axis in (0, 1):
         field = np.apply_along_axis(lambda r: np.convolve(r, kernel, mode="same"), axis, field)
