@@ -1987,7 +1987,7 @@ void gfx_frame_end(void) {
 
     // Neither PT nor TR was opened this frame, so opening them now is legal — the
     // rule is that a list cannot be opened *again*, not that lists must go in order.
-    replay_list(PVR_LIST_PT_POLY, sPtBuf, sProfSkip == 1 ? 0 : sPtCount, sFpsFont ? fps_draw : NULL);
+    replay_list(PVR_LIST_PT_POLY, sPtBuf, sProfSkip == 1 ? 0 : sPtCount, DKR_SHOW_FPS && sFpsFont ? fps_draw : NULL);
     replay_list(PVR_LIST_TR_POLY, sTrBuf, sProfSkip == 2 ? 0 : sTrCount, NULL);
 
     pvr_scene_finish();
