@@ -154,6 +154,10 @@ static struct {
 #endif
 } sScene DKR_HOT;
 static u32 sProfWalkSp; // where the walk's stack is, for the cache layout
+// The frame just finished, for a LATE line about it: its work and display-list
+// time, and the PVR's last three render times (the one read at a frame's end is
+// that of a frame or two before).
+static u32 sLastWorkUs, sLastDlUs, sLastPvrUs[3];
 
 
 #if DKR_PROF_SKIP == 999
@@ -419,6 +423,8 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         u32 work = sFrameStart ? (u32) ((t3 - sFrameStart - sProf.waitFrame) / 1000u) : 0;
 
         if (work > sProf.workMax) sProf.workMax = work;
+        sLastWorkUs = work;
+        sLastDlUs = (u32) ((t2 - t1) / 1000u);
         // What each frame was made of, so a long one can say why.
         static u64 sLastPart[PC_PROF_COUNT], sLastAfxLoad;
         static u32 sLastTris;
@@ -455,6 +461,9 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         pvr_stats_t stats;
         if (!pvr_get_stats(&stats)) {
             sProf.pvrRender += stats.rnd_last_time;
+            sLastPvrUs[2] = sLastPvrUs[1];
+            sLastPvrUs[1] = sLastPvrUs[0];
+            sLastPvrUs[0] = (u32) (stats.rnd_last_time / 1000u);
             gfx_fill_frame_done((unsigned int) (stats.rnd_last_time / 1000u));
             if (pc_scene_is_ready() && sSceneVbl != 0) {
                 sScene.pvrNs += stats.rnd_last_time;
@@ -4074,8 +4083,18 @@ static void frame_walk(void *data) {
                 sScene.map = gMapId;
             }
             if (fields > (u32) PC_LOGIC_UPDATE_RATE) {
+                u32 pvr = sLastPvrUs[0];
+
+                if (sLastPvrUs[1] > pvr) pvr = sLastPvrUs[1];
+                if (sLastPvrUs[2] > pvr) pvr = sLastPvrUs[2];
                 sScene.lateFrames++;
                 sScene.lateFields += fields - (u32) PC_LOGIC_UPDATE_RATE;
+                // Where a frame was lost, to find it again in a capture: time
+                // since boot, the scene, its frame, and what the frame cost.
+                pc_prof_log("LATE t=%lu ms map %ld frame %lu fields %lu cpu %lu us dl %lu us pvr %lu us fade %d\n",
+                            (unsigned long) (pc_uptime_ns() / 1000000u), (long) sScene.map,
+                            (unsigned long) sScene.frames, (unsigned long) fields, (unsigned long) sLastWorkUs,
+                            (unsigned long) sLastDlUs, (unsigned long) pvr, (int) gDcFadeOn);
             }
             if (fields > sScene.maxFields) sScene.maxFields = fields;
         } else {

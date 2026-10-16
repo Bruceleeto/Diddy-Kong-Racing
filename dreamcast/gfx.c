@@ -146,12 +146,28 @@ static DKR_HOT int sFarBackdrop;
 // A cover: an opaque 2D surface over the whole scene, the screen transitions'
 // solid black (gfx_set_cover). Drawn in OP rather than TR, which saves a
 // blended full-screen fill, at a depth nearer than any of the scene, and
-// writing it, so what the PVR draws after OP (PT, TR) stays under it. Only
-// while nothing 2D has gone to TR yet this frame: that would show through.
+// writing it, so what the PVR draws after OP (PT, TR) stays under it.
+//
+// The 2D drawn after the scene (HUD, text, the title screen's logo) goes to TR
+// and needs a place in that order: what the display list draws before a cover
+// lies under it, and what it draws after, over it. So 2D is drawn at a depth
+// above the whole scene, with a depth test: under a frame's k-th cover (k from
+// 0), COVER_Z + 2k; the cover itself at COVER_Z + 2k + 1. The scene's depth
+// (1/w, w at least 1) is at most 1.
 #define COVER_Z 16.0f
 static DKR_HOT int sCover;      // the display list is drawing a cover
 static DKR_HOT int sCoverDraw;  // the batch being emitted is one
-static DKR_HOT int sTrOverlay;  // something 2D was recorded to TR after the scene began
+static DKR_HOT int sCoverDrawn; // a batch of the cover the display list is drawing went out
+static DKR_HOT int sCoverLayer; // covers finished this frame
+static DKR_HOT int sOverlayDraw; // the batch being emitted is 2D over the scene, in TR or PT
+
+static inline float cover_z(void) {
+    return COVER_Z + 2.0f * (float) sCoverLayer + 1.0f;
+}
+
+static inline float overlay_z(void) {
+    return COVER_Z + 2.0f * (float) sCoverLayer;
+}
 
 // VRAM freed while a scene is open. A recorded header holds a raw texture
 // pointer and isn't replayed until frame end, so freeing mid-frame lets the next
@@ -671,7 +687,9 @@ static void frame_state_reset(void) {
     sTrCount = 0;
     sSeenDepth = 0;
     sCover = 0;
-    sTrOverlay = 0;
+    sCoverDrawn = 0;
+    sCoverLayer = 0;
+    sOverlayDraw = 0;
     sRoute = ROUTE_OP;
 }
 
@@ -960,6 +978,10 @@ static __attribute__((noinline, cold)) void compile_header_uncached(int list, pv
     if (sCoverDraw) {
         cxt.depth.comparison = PVR_DEPTHCMP_ALWAYS;
         cxt.depth.write = PVR_DEPTHWRITE_ENABLE;
+    } else if (list != PVR_LIST_OP_POLY && !sDepthTest && !sFarBackdrop) {
+        // 2D over the scene: under the covers the display list draws after it.
+        cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+        cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
     }
 
     pvr_poly_compile(out, &cxt);
@@ -1006,7 +1028,9 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
         invw = BACKDROP_Z;
     }
     if (sCoverDraw) {
-        invw = COVER_Z;
+        invw = cover_z();
+    } else if (sOverlayDraw) {
+        invw = overlay_z();
     }
 
 #if DKR_FILL_PROF
@@ -1430,21 +1454,24 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         int emitAlpha = sTexEnvBlend ? sBlendColor[3] : verts[0].a;
 
         sFarBackdrop = 0;
+        sOverlayDraw = 0;
         if (USE_PT_LIST && sAlphaRef > 0.0f) {
             sRoute = ROUTE_PT;
+            sOverlayDraw = !sDepthTest; // alpha-tested 2D, drawn after OP like TR
         } else if (sDepthTest) {
             sRoute = sBlend ? ROUTE_TR : ROUTE_OP;
         } else if (!sSeenDepth && sTrCount == 0 && sPtCount == 0 && emitAlpha == 0xFF &&
                    (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque)) {
             sRoute = ROUTE_OP;
-        } else if (sCover && !sTrOverlay && emitAlpha == 0xFF && sBoundTex == 0) {
+        } else if (sCover && emitAlpha == 0xFF && sBoundTex == 0) {
             sRoute = ROUTE_OP;
             sCoverDraw = 1;
+            sCoverDrawn = 1;
             sHdrDirty = 1;
         } else {
             sRoute = ROUTE_TR;
             sFarBackdrop = !sSeenDepth;
-            sTrOverlay |= sSeenDepth;
+            sOverlayDraw = sSeenDepth;
         }
         if (sDepthTest) {
             sSeenDepth = 1;
@@ -1456,6 +1483,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             if (prof_skip(sRoute, kind)) {
                 sRoute = ROUTE_OP;
                 sFarBackdrop = 0;
+                sOverlayDraw = 0;
                 if (sCoverDraw) {
                     sCoverDraw = 0;
                     sHdrDirty = 1;
@@ -1495,6 +1523,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             }
             sRoute = ROUTE_OP;
             sFarBackdrop = 0;
+            sOverlayDraw = 0;
             return;
         }
     } else if (sRoute == ROUTE_TR) {
@@ -1507,6 +1536,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             }
             sRoute = ROUTE_OP;
             sFarBackdrop = 0;
+            sOverlayDraw = 0;
             return;
         }
     }
@@ -1574,6 +1604,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 
     sRoute = ROUTE_OP;
     sFarBackdrop = 0;
+    sOverlayDraw = 0;
     if (sCoverDraw) {
         sCoverDraw = 0;
         sHdrDirty = 1;
@@ -1581,7 +1612,11 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 }
 
 void gfx_set_cover(int enable) {
+    if (!enable && sCover && sCoverDrawn) {
+        sCoverLayer++; // 2D drawn from here on goes over it
+    }
     sCover = enable;
+    sCoverDrawn = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1672,7 +1707,6 @@ DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, fl
     } else {
         route = ROUTE_TR;
         farBackdrop = !sSeenDepth;
-        sTrOverlay |= sSeenDepth;
     }
 #if DKR_GFX_PROFILE
     if (!sDepthTest && !(USE_PT_LIST && sAlphaRef > 0.0f)) {
@@ -1715,8 +1749,14 @@ DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, fl
 
     // Depth as emit_vert sets it: decals sit a touch nearer, and a backdrop
     // drawn after the scene's first depth-tested batch goes to the far plane.
-    *zMul = farBackdrop ? 0.0f : (sDepthOffset ? 1.003f : 1.0f);
-    *zAdd = farBackdrop ? BACKDROP_Z : 0.0f;
+    // 2D over the scene goes at its layer among the frame's covers.
+    if (route != ROUTE_OP && !sDepthTest && !farBackdrop) {
+        *zMul = 0.0f;
+        *zAdd = overlay_z();
+    } else {
+        *zMul = farBackdrop ? 0.0f : (sDepthOffset ? 1.003f : 1.0f);
+        *zAdd = farBackdrop ? BACKDROP_Z : 0.0f;
+    }
 
     *record = NULL;
     sBlastRoute = route;
@@ -1739,6 +1779,7 @@ DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, fl
         compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : PVR_LIST_TR_POLY, hdr);
         ta_commit(hdr);
         sFarBackdrop = 0;
+        sOverlayDraw = 0;
         *record = (route == ROUTE_PT) ? sPtBuf[sPtCount] : sTrBuf[sTrCount];
         sRoute = ROUTE_OP;
     } else {

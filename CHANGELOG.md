@@ -100,10 +100,16 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   full-screen fills with FSAA. Its solid quarters are now a cover in the opaque
   list, nearer than the whole scene and writing depth, so the punch-through and
   translucent lists drawn after it stay under it; only the soft edge is
-  blended. A cover falls back to blending when 2D has already gone to the
-  translucent list that frame, which would show through it. With FSAA the
-  title beach's scene had 76-83 late frames, all in the iris-out at its end; it
-  now has none there.
+  blended. With FSAA the title beach's scene had 76-83 late frames, all in the
+  iris-out at its end; it now has none there.
+- **2D keeps its place among covers.** The 2D drawn after the scene (HUD,
+  text, the title screen's logo and menu) is drawn at a depth above the whole
+  scene, with a depth test: what the display list draws before a cover lies
+  under it and what it draws after lies over it. A cover used to fall back to
+  blending whenever 2D had gone to the translucent list first, which the title
+  screen always does, and the title screen keeps an open iris drawn around the
+  edges of the picture: with FSAA it lost 85-94 frames each time it came round
+  in a 5-minute attract run. Late frames over that run fell from 228 to 67.
 - **Fades to black are drawn into the frame.** A full-screen fade was a
   blended rect over every pixel, about 4.5 ms of PVR time a frame with FSAA.
   The fade announces itself while the display list is built, and the port
