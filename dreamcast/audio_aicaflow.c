@@ -177,17 +177,15 @@ alignas(32) static const unsigned char firmware[] = {
 #define DKR_SEQUENCE_COUNT 66
 
 /* Planned loads run with the game audio mutex held and no fallback load in
- * progress, so a busy driver lock is only a momentary preemption. The driver drops
- * a recycled instance's reference to its flow on a later afx_update(), so a
- * release that follows a recycle waits for that too. */
+ * progress, so a busy driver lock is only a momentary preemption. AICAflow's
+ * event thread drops an ended instance's reference to its flow as soon as the
+ * firmware has recycled it, so a release right after a stop waits for that too. */
 #define DKR_AFX_RETRY(call) ({ \
     int retry_result; \
     unsigned retry_count = 0; \
     while (((retry_result = (call)) == -AFX_BUSY || retry_result == -AFX_ASSET_REFERENCED) && \
-           ++retry_count < 250) { \
-        if (retry_result == -AFX_ASSET_REFERENCED) (void)afx_update(); \
+           ++retry_count < 250) \
         thd_sleep(1); \
-    } \
     retry_result; \
 })
 
@@ -341,19 +339,55 @@ static int dsp_room_upload(void) {
     return result;
 }
 
+/* A sound that ended: AICAflow has freed its instance. */
+static void sfx_ended(dkr_sfx_slot_t *slot, const afx_instance_status_t *status) {
+    void *owner = slot->owner;
+    if (status) {
+        benchmark_sound(slot->sound->id, "ended state/result/preempted", status->state, status->result, !owner);
+        benchmark_late("sound", slot->sound->id, status);
+    }
+    *slot = (dkr_sfx_slot_t){0};
+    sndp_aicaflow_complete(owner);
+}
+
+static void music_ended(const afx_instance_status_t *status) {
+    if (status) benchmark_late("sequence", sCurrentSequence, status);
+    sMusic = 0;
+    __atomic_store_n(&sCurrentSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
+}
+
+/* AICAflow reports each instance that ended from its event thread, once it has
+ * freed it. The sounds and the song belong to the game's audio, under its lock. */
+static void on_instance_end(afx_instance_t instance, const afx_instance_status_t *status, void *user) {
+    uint32_t i;
+    (void)user;
+    pc_audio_lock();
+    for (i = 0; i < DKR_SFX_SLOTS; ++i)
+        if (sSfxSlots[i].instance == instance) sfx_ended(&sSfxSlots[i], status);
+    if (sMusic && sMusic == instance) music_ended(status);
+    pc_audio_unlock();
+}
+
+/* Whether an instance has ended and been freed. A caller that holds the audio
+ * lock and waits for that cannot rely on the end callback, which needs it. */
+static int instance_gone(afx_instance_t instance) {
+    afx_instance_status_t status;
+    return afx_instance_status(instance, &status) == -AFX_STALE_GENERATION;
+}
+
 int dkr_afx_sfx_stop_all(void) {
     uint32_t i, attempt;
     for (attempt = 0; attempt < 100; ++attempt) {
         int active = 0;
-        if (afx_update()) { thd_sleep(1); continue; }
-        update_sfx();
         for (i = 0; i < DKR_SFX_SLOTS; ++i) {
-            if (sSfxSlots[i].instance) {
-                active = 1;
-                /* Activation may still be pending on the first attempt. */
-                int result = afx_instance_stop(sSfxSlots[i].instance);
-                (void)result;
+            if (!sSfxSlots[i].instance) continue;
+            if (instance_gone(sSfxSlots[i].instance)) {
+                sfx_ended(&sSfxSlots[i], NULL);
+                continue;
             }
+            active = 1;
+            /* Activation may still be pending on the first attempt. */
+            (void)afx_instance_stop(sSfxSlots[i].instance);
         }
         if (!active) return AFX_OK;
         thd_sleep(1);
@@ -615,6 +649,7 @@ int dkr_afx_init(void) {
     uint64_t init_started = timer_us_gettime64();
     result = afx_init(firmware, sizeof(firmware));
     benchmark_init(init_started);
+    if (!result) afx_set_end_callback(on_instance_end, NULL);
     /* Permanent assets load first and are never freed, so they stay contiguous
      * below the space the build plans for each level. */
     if (!result) result = sfx_bank_load(&sResidentSfx, DKR_RESIDENT_SFX_PATH,
@@ -1118,15 +1153,12 @@ static int music_retire(void) {
         return AFX_OK;
     for (unsigned attempt = 0; attempt < 200; ++attempt) {
         afx_instance_status_t status;
-        if (!afx_update() && !afx_instance_status(sMusic, &status)) {
-            if (status.state != AFX_DONE && status.state != AFX_ERROR) {
-                (void)afx_instance_stop(sMusic);
-            } else if (!afx_instance_recycle(sMusic)) {
-                sMusic = 0;
-                __atomic_store_n(&sCurrentSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
-                return AFX_OK;
-            }
+        int result = afx_instance_status(sMusic, &status);
+        if (result == -AFX_STALE_GENERATION) {
+            music_ended(NULL);
+            return AFX_OK;
         }
+        if (!result && status.state != AFX_DONE && status.state != AFX_ERROR) (void)afx_instance_stop(sMusic);
         thd_sleep(1);
     }
     return -AFX_BUSY;
@@ -1226,26 +1258,19 @@ static void apply_sfx_controls(dkr_sfx_slot_t *slot) {
     slot->dirty = 0;
 }
 
+/* Sends running sounds their controls. Sounds that end are reported by
+ * on_instance_end. */
 static void update_sfx(void) {
     uint32_t i;
     for (i = 0; i < DKR_SFX_SLOTS; ++i) {
         dkr_sfx_slot_t *slot = &sSfxSlots[i];
         afx_instance_status_t status;
-        void *owner;
         if (!slot->instance || afx_instance_status(slot->instance, &status)) continue;
         if (status.state == AFX_RUNNING || status.state == AFX_PARKED) {
             slot->initializing = 0;
             if (slot->stopping) (void)afx_instance_stop(slot->instance);
             else apply_sfx_controls(slot);
-            continue;
         }
-        if (status.state != AFX_DONE && status.state != AFX_ERROR) continue;
-        if (afx_instance_recycle(slot->instance)) continue;
-        benchmark_sound(slot->sound->id, "ended state/result/preempted", status.state, status.result, !slot->owner);
-        benchmark_late("sound", slot->sound->id, &status);
-        owner = slot->owner;
-        *slot = (dkr_sfx_slot_t){0};
-        sndp_aicaflow_complete(owner);
     }
 }
 
@@ -1256,7 +1281,7 @@ void dkr_afx_update(void) {
     uint64_t started = timer_us_gettime64();
 #endif
 
-    if (!sReady || afx_update() < 0) goto done;
+    if (!sReady) goto done;
     apply_room_control();
     update_sfx();
     sndp_aicaflow_retry_pending();
@@ -1274,11 +1299,7 @@ void dkr_afx_update(void) {
             }
             goto done;
         }
-        if (status.state != AFX_DONE && status.state != AFX_ERROR) goto done;
-        if (afx_instance_recycle(sMusic)) goto done;
-        benchmark_late("sequence", sCurrentSequence, &status);
-        sMusic = 0;
-        __atomic_store_n(&sCurrentSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
+        /* It ended: on_instance_end clears sMusic once AICAflow has freed it. */
         goto done;
     }
 
