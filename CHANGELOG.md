@@ -52,6 +52,8 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   `AUTO_EXIT_SECONDS`, `DEMO_LEVEL`, `SKIP_WATER`, `SKIP_PARTICLES`, `TEX_TRACE`; and a debug view
   (`DEBUG_VIEW=1`) that holds a frame and switches cutout modes from the
   controller.
+- The sampling profiler can sample any one map (`PROF_SAMPLE_MAP`), and
+  `GFX_PROFILE=4` counts only the samples of frames that were late.
 
 ### Changed
 

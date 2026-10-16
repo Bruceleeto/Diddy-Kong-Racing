@@ -3291,8 +3291,9 @@ extern void dc_audio_init(void);
 extern void dc_audio_start_thread(void);
 
 // Sampling profile (GFX_PROFILE=3): a timer interrupt notes where the program
-// is, a few thousand times a second, while a race level is loaded. Unlike the
-// timers above it costs next to nothing, so it shows where time really goes.
+// is, a few thousand times a second, while a race level (or PROF_SAMPLE_MAP)
+// is loaded. Unlike the timers above it costs next to nothing, so it shows
+// where time really goes.
 // The counts land in build/dc/prof_samples.bin when the run exits by itself;
 // one count per 32 bytes of code from the load address.
 #if DKR_GFX_PROFILE >= 3
@@ -3302,21 +3303,60 @@ extern s32 gMapId;
 static u16 sProfSamples[PROF_SAMPLE_BUCKETS];
 static u32 sProfSampleInfo[4]; // samples taken, samples outside the range, bucket bytes, base
 
-static void prof_sample_irq(irq_t code, irq_context_t *context, void *data) {
-    u32 bucket = (context->pc - PROF_SAMPLE_BASE) / 32u;
+static void prof_sample_count(u32 pc) {
+    u32 bucket = (pc - PROF_SAMPLE_BASE) / 32u;
 
-    (void) code;
-    (void) data;
-    timer_clear(TMU1);
-    if (gMapId != 18 && gMapId != 28) {
-        return;
-    }
     sProfSampleInfo[0]++;
     if (bucket >= PROF_SAMPLE_BUCKETS) {
         sProfSampleInfo[1]++;
     } else if (sProfSamples[bucket] != 0xFFFF) {
         sProfSamples[bucket]++;
     }
+}
+
+#if DKR_GFX_PROFILE >= 4
+// GFX_PROFILE=4: only the late frames. A frame's samples wait here and are
+// counted once the next frame start shows that it was late.
+#define PROF_FRAME_SAMPLES 512
+static u32 sProfFramePc[PROF_FRAME_SAMPLES];
+static u32 sProfFrameCount;
+
+static void prof_sample_frame_end(s32 late) {
+    int old = irq_disable();
+    u32 i;
+
+    if (late) {
+        for (i = 0; i < sProfFrameCount; i++) {
+            prof_sample_count(sProfFramePc[i]);
+        }
+    }
+    sProfFrameCount = 0;
+    irq_restore(old);
+}
+#else
+#define prof_sample_frame_end(late) ((void) (late))
+#endif
+
+static void prof_sample_irq(irq_t code, irq_context_t *context, void *data) {
+    (void) code;
+    (void) data;
+    timer_clear(TMU1);
+#if DKR_PROF_SAMPLE_MAP >= 0
+    if (gMapId != DKR_PROF_SAMPLE_MAP) {
+        return;
+    }
+#else
+    if (gMapId != 18 && gMapId != 28) {
+        return;
+    }
+#endif
+#if DKR_GFX_PROFILE >= 4
+    if (sProfFrameCount < PROF_FRAME_SAMPLES) {
+        sProfFramePc[sProfFrameCount++] = context->pc;
+    }
+#else
+    prof_sample_count(context->pc);
+#endif
 }
 
 static void prof_sample_start(void) {
@@ -3341,6 +3381,7 @@ static void prof_sample_write(void) {
 #else
 #define prof_sample_start() ((void) 0)
 #define prof_sample_write() ((void) 0)
+#define prof_sample_frame_end(late) ((void) (late))
 #endif
 
 // Debug view (DEBUG_VIEW=1): hold a frame and switch how cutout textures are
@@ -3450,12 +3491,15 @@ static void frame_walk(void *data) {
         u32 vbl = (u32) pvr_get_vbl_count();
         if (sSceneVbl != 0 && pc_scene_is_ready()) {
             u32 fields = vbl - sSceneVbl;
+            prof_sample_frame_end(fields > (u32) PC_LOGIC_UPDATE_RATE);
             sScene.frames++;
             if (fields > (u32) PC_LOGIC_UPDATE_RATE) {
                 sScene.lateFrames++;
                 sScene.lateFields += fields - (u32) PC_LOGIC_UPDATE_RATE;
             }
             if (fields > sScene.maxFields) sScene.maxFields = fields;
+        } else {
+            prof_sample_frame_end(0);
         }
         sSceneVbl = vbl;
     }

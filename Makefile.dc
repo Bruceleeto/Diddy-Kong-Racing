@@ -28,6 +28,9 @@ AICAFLOW_BENCHMARK ?= 0
 AICAFLOW_TRACE_SOUND ?= 0
 GFX_PROFILE ?= 0
 GFX_PROFILE_SKIP ?= 0
+# With GFX_PROFILE=3 (or 4, late frames only): the one map to sample, or -1 for
+# the attract races (18 and 28).
+PROF_SAMPLE_MAP ?= -1
 # Video fields per game frame: 2 locks to 30 fps, 1 aims for 60 and drops to 30 on a slow frame.
 FRAME_FIELDS ?= 2
 # 1 renders twice as wide and filters down (horizontal anti-aliasing).
