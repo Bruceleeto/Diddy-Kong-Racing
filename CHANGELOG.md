@@ -62,6 +62,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   the next scene loads; two runs now agree. The `fps:` line is only in profile
   builds. The scene report also lists the combiners that ran per vertex
   (`SCENE SLOWCC`) and how often batches were classified (`SCENE CC`).
+- The scene report gives the display-list walk's cache stalls a frame,
+  operand and instruction cache apart (the SH4's second performance counter),
+  texture lookups and scans a frame, and where the walk's stack is.
 
 ### Changed
 
@@ -97,6 +100,24 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.
+- **Display-list translation is 12-17% cheaper.** About half of it was the
+  CPU waiting on its caches, both direct-mapped (8 KB of code, 16 KB of
+  data). The handlers every batch runs now sit in `.sub0`, which KOS aligns to
+  the instruction cache and checks fits in it, with their cold paths split
+  out, and the walk's state in one data section aligned to the operand cache;
+  so they no longer evict each other, and an unrelated change no longer moves
+  them. The blast path projects each vertex once all the way to what the PVR
+  is sent, two vertices at a time, and writes vertices with registers-only
+  pointers, pre-decrement stores and (for the recorded lists) `movca.l`; it
+  prefetches the batch's vertices, triangles and the display list. Combiners
+  that mix shade are compiled per state rather than interpreted per vertex,
+  and a texture is looked up only when the texture state changes. In the
+  120-second attract run (each build also linked 384 bytes higher, to show
+  what is layout), display-list time and late frames went from 6.95-7.08 ms
+  and 27-29 to 5.66-5.78 ms and 8 in the title scene, 7.95-8.20 ms and 0-2 to
+  6.79-7.00 ms and 0-1 in race 18, and 10.94-11.57 ms and 9-10 to 9.80-9.94 ms
+  and 5 in race 28. HDMI captures match the old build's frames to within
+  rounding (at most 2 levels, in about 5% of pixels).
 
 ### Fixed
 
@@ -113,6 +134,8 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - Prefetching the display list four commands ahead, and keeping the blast
   path's clip-space corners only for batches that need the near-clipper: each
   made display-list time 0.15-0.3 ms a frame worse in every attract scene.
+  That was measured while the hot code still moved with every change, which
+  alone shifts display-list time by 2-6%; the display list is now prefetched.
 - Drawing blended cutouts twice (punch-through under blended): no better edges,
   up to 1 ms slower.
 - Queuing every batch as its own enDjinn renderer (all three lists recorded,

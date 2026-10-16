@@ -114,7 +114,7 @@ static struct {
     u32 pvrBytes, ptWords, trWords;
     u64 tBlast, tFallback, tVtx, tPoly, tRect, tMtx;
     u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
-} sProf;
+} sProf DKR_HOT; // touched by every batch in a profile build, so with the hot state
 #define PROF_ADD(field, n) (sProf.field += (n))
 
 // ---------------------------------------------------------------------------
@@ -137,7 +137,12 @@ static struct {
     u32 cullMatrixChanged; // frames where objects changed gViewProjMatrixF before the translucent level
     u32 falseCulls;        // culled batches with a vertex in view
     u32 levelVtx, levelVtxOtherMatrix; // level G_VTX loads, and those not drawn with the cull matrix
-} sScene;
+    // CPU cycles the display-list walk stood still on operand-cache and on
+    // instruction-cache misses, each counted on every other frame.
+    u64 walkStall[2];
+    u32 texLookups, texScans; // texture_lookup calls, and those that fell through to the linear scan
+} sScene DKR_HOT;
+static u32 sProfWalkSp; // where the walk's stack is, for the cache layout
 static const float (*sLevelCullMatrix)[4];
 
 // Vertices that ran the combiner per vertex (not passthrough or constant), by
@@ -147,8 +152,8 @@ static struct {
     u32 w0, w1, cyc, prim, env, verts;
 } sSlowCc[PROF_SLOW_CC];
 
-static void prof_slow_cc(u32 verts);
-static u32 sCcClassified, sCcProbed; // combiner_classify calls, and those that ran the probes
+static __attribute__((noinline)) void prof_slow_cc(u32 verts);
+static DKR_HOT u32 sCcClassified, sCcProbed; // combiner_classify calls, and those that ran the probes
 
 // What the display-list walk spends on racers (PC_PROF_CAT_RACERS), by
 // handler: the timers need GFX_PROFILE=2, the counts work at 1 too.
@@ -162,7 +167,7 @@ static struct { RACER_PROF_FIELDS(RACER_PROF_DECLARE) } sRacerProf, sRacerStart;
 #define RACER_PROF_SNAP(f) sRacerStart.f = sProf.f;
 #define RACER_PROF_ADD(f) sRacerProf.f += sProf.f - sRacerStart.f;
 #define RACER_PROF_PRINT(f) printf(" %s=%llu", #f, (unsigned long long) (sRacerProf.f / n));
-static s32 sCatCur;
+static DKR_HOT s32 sCatCur;
 static u64 sCatStart;
 static u32 sCatTrisStart;
 static u32 sSceneVbl; // vblank count at the previous frame's start; 0 after a load
@@ -227,6 +232,10 @@ void pc_scene_prof_report(void) {
             printf(" %s %lu us %lu tris", sCatNames[c], (unsigned long) (sScene.catNs[c] / n / 1000u),
                    (unsigned long) (sScene.catTris[c] / n));
         }
+        printf(" | walk stall data %lu us code %lu us | tex lookups %lu scans %lu",
+               (unsigned long) (sScene.walkStall[0] * 2u / n / 200u), (unsigned long) (sScene.walkStall[1] * 2u / n / 200u),
+               (unsigned long) (sScene.texLookups / n), (unsigned long) (sScene.texScans / n));
+        printf(" | walk stack %08lx", (unsigned long) sProfWalkSp);
         printf("\nSCENE CC classify %lu/frame, probed %lu/frame", (unsigned long) (sCcClassified / n),
                (unsigned long) (sCcProbed / n));
         sCcClassified = sCcProbed = 0;
@@ -260,7 +269,7 @@ void pc_scene_prof_report(void) {
 void pc_prof_add(int part, unsigned long long ns) {
     sProf.part[part] += ns;
 }
-static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
+static DKR_HOT s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
 // Time of one handler call. A fallback is inside tBlast as well. These read
 // the clock a few hundred times a frame, which costs a millisecond or two, so
 // they need GFX_PROFILE=2; the frame totals stay honest at 1 and 3.
@@ -294,8 +303,8 @@ static struct {
     u32 tris;
 } sProfBlend[PROF_BLEND_KINDS];
 
-static void prof_blend(u32 modeL, u32 cc0, u32 cc1, s32 texKind, s32 vtxAlphaFull, s32 outAlphaFull, s32 fog,
-                       s32 primA, s32 envA, s32 tris) {
+static __attribute__((noinline)) void prof_blend(u32 modeL, u32 cc0, u32 cc1, s32 texKind, s32 vtxAlphaFull,
+                                                 s32 outAlphaFull, s32 fog, s32 primA, s32 envA, s32 tris) {
     s32 i;
 
     for (i = 0; i < PROF_BLEND_KINDS; i++) {
@@ -650,22 +659,27 @@ typedef struct {
 // inside-out (outer surfaces gone, inner ones visible).
 #define GFX_FRONT_FACE_SIGN (-1.0f)
 
-static u32 sGfxFrameCount = 0;
+static DKR_HOT u32 sGfxFrameCount = 0;
 
-alignas(32) static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
-static s32 sCurMatrix = 0;
-static s32 sBillboard = FALSE;
+// Aligns the hot data section (DKR_HOT) to the operand cache's size, so its
+// lines land on the same cache sets whatever else grows or shrinks, and an A/B
+// of an unrelated change does not move them onto something else.
+static DKR_HOT __attribute__((used, aligned(16384))) u32 sHotDataAnchor;
+
+alignas(32) static DKR_HOT f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
+static DKR_HOT s32 sCurMatrix = 0;
+static DKR_HOT s32 sBillboard = FALSE;
 
 _Static_assert(sizeof(GfxTriVert) == 32, "GfxTriVert must be exactly one SH4 cache line");
 _Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields must fit one cache line");
 
 static GfxVertex sVerts[GFX_MAX_VERTS];
-static s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
+static DKR_HOT s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
 
-static f32 sVpScaleX = N64_SCREEN_W / 2.0f;
-static f32 sVpScaleY = N64_SCREEN_H / 2.0f;
-static f32 sVpTransX = N64_SCREEN_W / 2.0f;
-static f32 sVpTransY = N64_SCREEN_H / 2.0f;
+static DKR_HOT f32 sVpScaleX = N64_SCREEN_W / 2.0f;
+static DKR_HOT f32 sVpScaleY = N64_SCREEN_H / 2.0f;
+static DKR_HOT f32 sVpTransX = N64_SCREEN_W / 2.0f;
+static DKR_HOT f32 sVpTransY = N64_SCREEN_H / 2.0f;
 
 // ---------------------------------------------------------------------------
 // What gets clipped away, in screen pixels, x1/y1 exclusive.
@@ -696,41 +710,41 @@ static void apply_clip_rect(void) {
 }
 
 static GfxTriVert sTriVerts[GFX_MAX_TRI_VERTS];
-static s32 sTriVertCount = 0;
+static DKR_HOT s32 sTriVertCount = 0;
 
-static u32 sTimgAddr = 0;  // G_SETTIMG — wherever the DL last pointed
-static u32 sTexAddr = 0;   // the image a G_LOADBLOCK/G_LOADTILE actually loaded
-static s32 sTexSwapped = 0; // that load had dxt == 0 — see decode_texture()
-static u8 sTileFmt = 0;    // G_SETTILE — G_IM_FMT_*
-static u8 sTileSiz = 0;    //             G_IM_SIZ_*
-static u8 sTilePalette = 0;
-static u8 sTileCmS = 0; // the raw 2-bit clamp/mirror fields, not booleans
-static u8 sTileCmT = 0;
-static u16 sTileWidth = 0; // G_SETTILESIZE
-static u16 sTileHeight = 0;
-static u16 sTileUls = 0;   //               the tile's origin within the image
-static u16 sTileUlt = 0;
-static u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
+static DKR_HOT u32 sTimgAddr = 0;  // G_SETTIMG — wherever the DL last pointed
+static DKR_HOT u32 sTexAddr = 0;   // the image a G_LOADBLOCK/G_LOADTILE actually loaded
+static DKR_HOT s32 sTexSwapped = 0; // that load had dxt == 0 — see decode_texture()
+static DKR_HOT u8 sTileFmt = 0;    // G_SETTILE — G_IM_FMT_*
+static DKR_HOT u8 sTileSiz = 0;    //             G_IM_SIZ_*
+static DKR_HOT u8 sTilePalette = 0;
+static DKR_HOT u8 sTileCmS = 0; // the raw 2-bit clamp/mirror fields, not booleans
+static DKR_HOT u8 sTileCmT = 0;
+static DKR_HOT u16 sTileWidth = 0; // G_SETTILESIZE
+static DKR_HOT u16 sTileHeight = 0;
+static DKR_HOT u16 sTileUls = 0;   //               the tile's origin within the image
+static DKR_HOT u16 sTileUlt = 0;
+static DKR_HOT u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
 
 #define GFX_GEOMETRY_MODE_INIT (G_SHADE | G_SHADING_SMOOTH | G_ZBUFFER)
-static u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
+static DKR_HOT u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
 
-static u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
-static u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
-static u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
-static u32 sCombineW1 = 0;
-static u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
-static u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static DKR_HOT u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
+static DKR_HOT u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
+static DKR_HOT u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
+static DKR_HOT u32 sCombineW1 = 0;
+static DKR_HOT u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static DKR_HOT u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
-static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
+static DKR_HOT u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
 
 // Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
 // FogData system its fog-changer objects drive. gSPFogPosition packs a multiplier
 // and an offset into one G_MOVEWORD, and the RSP turns them into a per-vertex fade
 // factor; gDPSetFogColor is the colour that factor fades towards. 
-static u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
-static s16 sFogMul = 0;
-static s16 sFogOfs = 0;
+static DKR_HOT u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
+static DKR_HOT s16 sFogMul = 0;
+static DKR_HOT s16 sFogOfs = 0;
 
 #define GFX_MAX_TEXTURES 1024
 #define GFX_MAX_TEX_TEXELS (256 * 256)
@@ -747,14 +761,18 @@ typedef struct {
 } GfxTexture;
 
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
-static s32 sTexCacheCount = 0;
+static DKR_HOT s32 sTexCacheCount = 0;
 
 // Hash hint over the cache: hash(timg, tlut) -> sTexCache index + 1 (0 = no
 // hint). Purely an accelerator: every hint is verified against the full key
 // before use, and a wrong one (hash collision, entry moved by eviction or
 // invalidation) just means one linear scan that re-teaches the slot. So the
 // eviction paths never need to maintain it.
-#define GFX_TEX_HINTS 1024
+//
+// A race level holds some 950 textures, so the table is sized well above that:
+// at 1024 it ran nearly full, the probes overflowed, and textures kept
+// knocking each other's hints out.
+#define GFX_TEX_HINTS 4096
 static u16 sTexHint[GFX_TEX_HINTS];
 
 static u32 tex_hint_slot(u32 timg, u32 tlut) {
@@ -772,8 +790,12 @@ static void tex_hint_store(u32 slot, s32 index) {
         u32 at = (slot + probe) & (GFX_TEX_HINTS - 1);
         s32 hi = (s32) sTexHint[at] - 1;
 
+        // Stale: the entry it names has moved, or it would not look for itself
+        // here. An entry from a neighbouring home slot that probed into this one
+        // is not stale; overwriting it only sends that texture to the scan.
         if (hi < 0 || hi >= sTexCacheCount || hi == index ||
-            ((tex_hint_slot(sTexCache[hi].timg, sTexCache[hi].tlut) ^ slot) & (GFX_TEX_HINTS - 1)) != 0) {
+            ((at - tex_hint_slot(sTexCache[hi].timg, sTexCache[hi].tlut)) & (GFX_TEX_HINTS - 1)) >=
+                GFX_TEX_HINT_PROBES) {
             sTexHint[at] = (u16) (index + 1);
             return;
         }
@@ -784,7 +806,7 @@ static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
 
-static s32 sTexStateDirty;
+static DKR_HOT s32 sTexStateDirty;
 
 // ---------------------------------------------------------------------------
 // Prebuilt textures
@@ -1282,7 +1304,7 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
  * the RSP consumes, so the PC build sees the same rounding and the same +-32768
  * saturation the console does and the N64 ROM stays a usable oracle.
  */
-static void mtx_to_float(const Mtx *m, f32 out[4][4]) {
+static DKR_HOT_CODE void mtx_to_float(const Mtx *m, f32 out[4][4]) {
 #ifdef GBI_FLOAT_MTX
     // Float matrix ABI: mtxf_to_mtx()/guMtxF2L() stored the 16 floats raw, so
     // read them back as-is. No fixed unpack, no /65536, no bit-shuffle.
@@ -1558,10 +1580,14 @@ static void decode_texture(const u8 *src, u8 fmt, u8 siz, s32 width, s32 height,
  * The texture the current RDP state describes, decoded and uploaded once and
  * then kept. Returns 0 (untextured) if there is nothing sane to draw with.
  */
+static u32 texture_lookup_slow(const u8 *tlut, u32 slot);
+
 static u32 texture_lookup(void) {
     const u8 *tlut = (const u8 *) sTlutAddr;
-    s32 i;
 
+#if DKR_GFX_PROFILE
+    sScene.texLookups++;
+#endif
     if (sTexAddr == 0 || sTileWidth == 0 || sTileHeight == 0) {
         return 0;
     }
@@ -1598,7 +1624,21 @@ static u32 texture_lookup(void) {
                 }
             }
         }
+        return texture_lookup_slow(tlut, slot);
+    }
+}
 
+/**
+ * texture_lookup() past a hint miss: the scan, and failing that the upload.
+ * Rare once a scene is running, so kept out of the walk's code.
+ */
+static __attribute__((noinline, cold)) u32 texture_lookup_slow(const u8 *tlut, u32 slot) {
+    s32 i;
+
+    {
+#if DKR_GFX_PROFILE
+        sScene.texScans++;
+#endif
         for (i = 0; i < sTexCacheCount; i++) {
             GfxTexture *t = &sTexCache[i];
             if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
@@ -1711,10 +1751,10 @@ static u32 texture_lookup(void) {
 // tile or loads an image. Consecutive batches mostly share a texture, and the
 // lookup is not free. A new frame starts dirty so that each texture's first use
 // in a frame goes through the lookup, which is what stamps it as recently used.
-static s32 sTexStateDirty = TRUE;
-static u32 sTexCurrent;
+static DKR_HOT s32 sTexStateDirty = TRUE;
+static DKR_HOT u32 sTexCurrent;
 
-static u32 texture_current(void) {
+static DKR_HOT_CODE u32 texture_current(void) {
     if (sTexStateDirty) {
         sTexCurrent = texture_lookup();
         sTexStateDirty = FALSE;
@@ -1730,14 +1770,15 @@ static u32 texture_current(void) {
 static void combiner_eval(const f32 shade[4], u8 out[4], u8 sec[3]);
 static void combiner_eval_lit(const f32 shade[4], u8 lit[4]);
 static void combiner_classify(void);
+static void cc_prog_sync_current(void);
 static u8 clamp_u8(f32 v);
 
 // How the current batch's combiner collapses, per channel; see
 // combiner_classify(). sCcFast means every channel is either passthrough or a
 // constant, so project() can skip the mux entirely.
-static u8 sCcPass[4];  // 1 = this channel is the shade, unchanged
-static u8 sCcConst[4]; // otherwise, the constant it always produces
-static s32 sCcFast;
+static DKR_HOT u8 sCcPass[4];  // 1 = this channel is the shade, unchanged
+static DKR_HOT u8 sCcConst[4]; // otherwise, the constant it always produces
+static DKR_HOT s32 sCcFast;
 
 /**
  * The geometric half: perspective divide, viewport map and fog. Depends only on
@@ -1798,6 +1839,12 @@ static void project_into(GfxVertex *v) {
  * so it can change between the G_VTX that loads a vertex and the G_TRIN that
  * draws with it.
  */
+// The emulated path's combiner results for the loaded vertices, valid while
+// sLitStamp[i] == sLitBatch; handle_polygon starts a new batch.
+static u32 sLitColor[GFX_MAX_VERTS];
+static u32 sLitStamp[GFX_MAX_VERTS];
+static DKR_HOT u32 sLitBatch = 1;
+
 static void project(const GfxVertex *v, GfxTriVert *out) {
     if (VERTEX_PROJECTED(v)) {
         out->x = v->sx;
@@ -1826,20 +1873,35 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
         out->a = sCcPass[3] ? v->a : sCcConst[3];
     } else {
         // At least one channel mixes shade with something else; run the real mux.
-        // Only the lit half is wanted, see combiner_eval_lit.
-        f32 shade[4];
-        u8 lit[4];
+        // Only the lit half is wanted, see combiner_eval_lit. A loaded vertex
+        // is a corner of two or three triangles, so its result is kept for the
+        // batch; a vertex the near clip made is not one of them.
+        u32 at = (u32) ((const u8 *) v - (const u8 *) sVerts) / sizeof(GfxVertex);
+        union {
+            u8 c[4];
+            u32 word;
+        } lit;
 
-        shade[0] = v->r * (1.0f / 255.0f);
-        shade[1] = v->g * (1.0f / 255.0f);
-        shade[2] = v->b * (1.0f / 255.0f);
-        shade[3] = v->a * (1.0f / 255.0f);
-        combiner_eval_lit(shade, lit);
+        if (at < GFX_MAX_VERTS && sLitStamp[at] == sLitBatch) {
+            lit.word = sLitColor[at];
+        } else {
+            f32 shade[4];
 
-        out->r = lit[0];
-        out->g = lit[1];
-        out->b = lit[2];
-        out->a = lit[3];
+            shade[0] = v->r * (1.0f / 255.0f);
+            shade[1] = v->g * (1.0f / 255.0f);
+            shade[2] = v->b * (1.0f / 255.0f);
+            shade[3] = v->a * (1.0f / 255.0f);
+            combiner_eval_lit(shade, lit.c);
+            if (at < GFX_MAX_VERTS) {
+                sLitColor[at] = lit.word;
+                sLitStamp[at] = sLitBatch;
+            }
+        }
+
+        out->r = lit.c[0];
+        out->g = lit.c[1];
+        out->b = lit.c[2];
+        out->a = lit.c[3];
     }
 }
 
@@ -1944,13 +2006,13 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
 }
 
 
-static void apply_texture_filter(void) {
+static DKR_HOT_CODE void apply_texture_filter(void) {
     u32 filt = sOtherModeH & (3 << G_MDSFT_TEXTFILT);
 
     gfx_set_texture_filter(filt == G_TF_POINT);
 }
 
-static void apply_render_mode(void) {
+static DKR_HOT_CODE void apply_render_mode(void) {
     u32 alphaCompare = sOtherModeL & (3 << G_MDSFT_ALPHACOMPARE);
     s32 zEnabled = (sGeometryMode & G_ZBUFFER) != 0;
     f32 ref = 0.0f;
@@ -2028,6 +2090,10 @@ static void handle_polygon(u32 w0, u32 w1) {
     // Settle how this batch's combiner collapses before touching any vertex. The
     // mux, prim and env cannot change inside a batch, so once is enough.
     combiner_classify();
+    if (!sCcFast) {
+        cc_prog_sync_current(); // project() runs it per vertex
+        sLitBatch++;
+    }
     PROF_LAP(tPolyState);
 
     for (i = 0; i < count; i++) {
@@ -2090,8 +2156,9 @@ static void handle_polygon(u32 w0, u32 w1) {
 
 
 /** Render a blast batch through the emulated path, as the DL would have. */
-static void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
-                           const Triangle *tris, s32 numTris, s32 texEnabled) {
+static __attribute__((noinline)) void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2,
+                                                     s32 numVerts2, s32 matrix2, const Triangle *tris, s32 numTris,
+                                                     s32 texEnabled) {
     PROF_ADD(fallback, 1);
 #if DKR_GFX_PROFILE_SKIP == 3
     PROF_ADD(slowTris, numTris);
@@ -2114,29 +2181,63 @@ static void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *vert
 
 // N64-pixels -> framebuffer scale, from gfx_blast_begin. File-scope so the
 // cold clip path shares the hot loop's emit.
-static f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
+static DKR_HOT f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
 // Where a blended batch's vertices are recorded; NULL streams to the open list.
-static pvr_vertex_t *sBlastRecord;
+static DKR_HOT pvr_vertex_t *sBlastRecord;
 // Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
-static f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
+static DKR_HOT f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
+
+/**
+ * Write one finished PVR vertex to `vt`, which is a store queue or a slot in a
+ * recording. A recorded vertex is one whole 32-byte cache line, so `alloc`
+ * claims the line with movca.l instead of letting the first store miss read it
+ * in from memory, only for all eight words to be overwritten. movca.l stores r0
+ * to the line's first word, which is `flags` anyway.
+ *
+ * The words go out from the top down with pre-decrement stores: the FPU has no
+ * displacement store, so field by field the compiler spends an address add on
+ * each. The asm is said to write the whole vertex, which keeps it ordered with
+ * the flush, and there is no memory clobber to make the caller reload every
+ * global around each vertex.
+ */
+static inline void blast_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v,
+                             u32 argb) {
+    u8 *top = (u8 *) vt + 32;
+
+    if (alloc) {
+        __asm__ __volatile__("movca.l r0, @%1" : "=m"(*vt) : "r"(vt), "z"(flags));
+    }
+    __asm__ __volatile__("mov.l %[zero], @-%[p]\n\t"
+                         "mov.l %[argb], @-%[p]\n\t"
+                         "fmov.s %[v], @-%[p]\n\t"
+                         "fmov.s %[u], @-%[p]\n\t"
+                         "fmov.s %[z], @-%[p]\n\t"
+                         "fmov.s %[y], @-%[p]\n\t"
+                         "fmov.s %[x], @-%[p]\n\t"
+                         "mov.l %[flags], @-%[p]"
+                         : [p] "+r"(top), "+m"(*vt)
+                         : [zero] "r"(0), [argb] "r"(argb), [v] "f"(v), [u] "f"(u), [z] "f"(z), [y] "f"(y),
+                           [x] "f"(x), [flags] "r"(flags));
+}
+
+/** Send a store queue's vertex to the TA. The asm reads the vertex, which orders the stores before it. */
+static inline void blast_sq_flush(pvr_vertex_t *vt) {
+    __asm__ __volatile__("pref @%0" : : "r"(vt), "m"(*vt));
+}
 
 /** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
-    pvr_vertex_t *vt = sBlastRecord ? sBlastRecord : (pvr_vertex_t *) pvr_dr_target();
+    pvr_vertex_t *rec = sBlastRecord;
 
-    vt->flags = flags;
-    vt->x = x * sBlastSX;
-    vt->y = y * sBlastSY;
-    vt->z = (invw * sBlastZMul) + sBlastZAdd;
-    vt->u = u;
-    vt->v = v;
-    vt->argb = color;
-    vt->oargb = 0;
-    if (sBlastRecord) {
-        sBlastRecord++;
+    if (rec) {
+        blast_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        sBlastRecord = rec + 1;
     } else {
-        pvr_dr_commit(vt);
+        pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
+
+        blast_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        blast_sq_flush(vt);
     }
 }
 
@@ -2167,7 +2268,7 @@ static u32 blast_argb_lerp(u32 a, u32 b, f32 t) {
  * project the survivors and emit the fan. Only triangles that actually cross
  * the plane come here, so this is cold.
  */
-static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
+static __attribute__((noinline)) void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     BlastClipVert poly[4];
     f32 px[4], py[4], iw[4];
     s32 n = 0;
@@ -2220,8 +2321,28 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
+/** A blast triangle with a corner behind the near plane, to the clipper; out of line, off the hot loop. */
+static __attribute__((noinline)) void blast_clip_corners(const Triangle *t, const shz_vec4_t *cp, const u32 *argb,
+                                                         f32 uMul, f32 vMul) {
+    BlastClipVert cv[3];
+
+    cv[0].c = cp[t->vi0];
+    cv[0].u = t->uv0.u * uMul;
+    cv[0].v = t->uv0.v * vMul;
+    cv[0].argb = argb[t->vi0];
+    cv[1].c = cp[t->vi1];
+    cv[1].u = t->uv1.u * uMul;
+    cv[1].v = t->uv1.v * vMul;
+    cv[1].argb = argb[t->vi1];
+    cv[2].c = cp[t->vi2];
+    cv[2].u = t->uv2.u * uMul;
+    cv[2].v = t->uv2.v * vMul;
+    cv[2].argb = argb[t->vi2];
+    blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
+}
+
 #if DKR_GFX_PROFILE
-static void prof_slow_cc(u32 verts) {
+static __attribute__((noinline)) void prof_slow_cc(u32 verts) {
     u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
     u32 prim = (sPrimColor[0] << 24) | (sPrimColor[1] << 16) | (sPrimColor[2] << 8) | sPrimColor[3];
     u32 env = (sEnvColor[0] << 24) | (sEnvColor[1] << 16) | (sEnvColor[2] << 8) | sEnvColor[3];
@@ -2242,17 +2363,65 @@ static void prof_slow_cc(u32 verts) {
 }
 #endif
 
-static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+/**
+ * shz_xmtrx_transform_vec4 on fv4 rather than fv8, with w = 1: a second vector
+ * register, so two vertices can be in the transform at once.
+ */
+static inline shz_vec4_t blast_transform_fv4(f32 x, f32 y, f32 z) {
+    register f32 rx __asm__("fr4") = x;
+    register f32 ry __asm__("fr5") = y;
+    register f32 rz __asm__("fr6") = z;
+    register f32 rw __asm__("fr7") = 1.0f;
+
+    __asm__ __volatile__("ftrv xmtrx, fv4" : "+f"(rx), "+f"(ry), "+f"(rz), "+f"(rw));
+    return shz_vec4_init(rx, ry, rz, rw);
+}
+
+/**
+ * The combiner mixes shade with something else: run the real mux, once per
+ * vertex rather than once per corner. Out of line, so the loop that calls it
+ * stays small for the batches that never do.
+ */
+static __attribute__((noinline)) u32 blast_color_mux(const Vertex *v) {
+    f32 shade[4];
+    u8 lit[4];
+
+    shade[0] = v->r * (1.0f / 255.0f);
+    shade[1] = v->g * (1.0f / 255.0f);
+    shade[2] = v->b * (1.0f / 255.0f);
+    shade[3] = v->a * (1.0f / 255.0f);
+    combiner_eval_lit(shade, lit);
+    return ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
+}
+
+/**
+ * A vertex's colour in a blast batch: the shade bytes through the per-batch
+ * keep/constant masks when the combiner collapses (sCcFast), the real mux
+ * otherwise.
+ */
+static inline u32 blast_color(const Vertex *v, s32 ccFast, u32 keep, u32 konst) {
+    if (ccFast) {
+        return ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) | konst;
+    }
+    return blast_color_mux(v);
+}
+
+static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
                          const Triangle *tris, s32 numTris, s32 texEnabled) {
-    f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
+    // Per vertex, what the emit loop writes out: the framebuffer position, the
+    // depth and the colour. The clip-space position is kept for the triangles
+    // that cross the near plane.
+    f32 px[GFX_BLAST_MAX_VERTS], py[GFX_BLAST_MAX_VERTS], pz[GFX_BLAST_MAX_VERTS];
     u32 argb[GFX_BLAST_MAX_VERTS];
     shz_vec4_t cp[GFX_BLAST_MAX_VERTS];
     u32 behind = 0;
     u32 texture = 0;
+    u32 keep, konst;
     f32 uMul = 0.0f, vMul = 0.0f;
     f32 uS, vS;
     s32 i;
     s32 total = numVerts + numVerts2;
+    s32 ccFast;
 
     if (verts == NULL || tris == NULL || numTris <= 0 || numVerts <= 0) {
         return;
@@ -2262,6 +2431,11 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         printf("blast: oversized batch %dv/%dt\n", (int) numVerts, (int) numTris);
         return;
     }
+    // The batch's vertices and triangles are rarely in the cache. Start on the
+    // first lines now, so they arrive while the state work below runs; the
+    // vertex loop fetches the rest a line ahead.
+    __builtin_prefetch(verts);
+    __builtin_prefetch(tris);
 
     PROF_LAP_START();
     // The color must be per-batch trivial: shade byte or constant per channel.
@@ -2299,6 +2473,30 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         return;
     }
 
+    // Each channel is the vertex's own or a per-batch constant; settle which
+    // once, so a vertex costs a mask and an or.
+    ccFast = sCcFast;
+    if (!ccFast) {
+        cc_prog_sync_current();
+    }
+    keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
+           (sCcPass[2] ? 0x000000FFu : 0);
+    konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) | (u32) sCcConst[2]) &
+            ~keep;
+    argb[0] = blast_color(&verts[0], ccFast, keep, konst);
+
+    // Open the batch before transforming: the list and the depth mapping are
+    // folded into each vertex as it is projected. The first vertex's alpha is
+    // what decides the list. A triangle crossing the near plane can come back
+    // as two.
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord, (int) (argb[0] >> 24),
+                         &sBlastZMul, &sBlastZAdd)) {
+        // handle_polygon redoes this state, so falling back here is safe.
+        PROF_ADD(whyFull, numTris);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
+        return;
+    }
+
     PROF_ADD(blast, 1);
     PROF_ADD(verts, total);
 #if DKR_GFX_PROFILE
@@ -2309,20 +2507,23 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
     PROF_ADD(tris, numTris);
     PROF_LAP(tState);
 #if DKR_GFX_PROFILE_SKIP == 2
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
     return;
 #endif
 
-    // Transform + project every vertex. A vertex behind the near plane just marks
-    // its bit; the triangles touching it go through the in-path clipper below.
+    // Transform + project every vertex, all the way to what the PVR is sent. A
+    // vertex behind the near plane just marks its bit; the triangles touching
+    // it go through the in-path clipper below.
     {
-        // Each channel is the vertex's own or a per-batch constant; settle which
-        // once, so a vertex costs a mask and an or.
-        u32 keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) |
-                   (sCcPass[1] ? 0x0000FF00u : 0) | (sCcPass[2] ? 0x000000FFu : 0);
-        u32 konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) |
-                     (u32) sCcConst[2]) & ~keep;
-        f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
-        s32 ccFast = sCcFast;
+        // N64 viewport, then framebuffer scale, kept apart in that order so the
+        // result is the same float the emit used to compute per corner.
+        const f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
+        const f32 outSX = sBlastSX, outSY = sBlastSY, zMul = sBlastZMul, zAdd = sBlastZAdd;
+        const u8 *triEnd = (const u8 *) (tris + numTris);
+        const u8 *triPref = (const u8 *) tris + 32;
         s32 run;
 
         i = 0;
@@ -2334,36 +2535,66 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
                 continue;
             }
             shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[run ? matrix2 : sCurMatrix]);
-            for (; v < end; v++, i++) {
+            // Two vertices at a time, on two vector registers, so the second
+            // one's transform runs while the first is divided and mapped: one
+            // vertex alone is a single chain of dependent latencies. Every
+            // vertex is projected, even one behind the near plane; its numbers
+            // are garbage and nothing reads them, but the loop has no branch.
+            for (; v + 1 < end; v += 2, i += 2) {
+                shz_vec4_t c0, c1;
+                f32 inv0, inv1;
+
+                // The next vertex line, and one more line of the triangles
+                // until they are all on their way. Fetching a line that is
+                // already in the cache costs next to nothing.
+                __builtin_prefetch((const u8 *) v + 40);
+                if (triPref < triEnd) {
+                    __builtin_prefetch(triPref);
+                    triPref += 32;
+                }
+                c0 = shz_xmtrx_transform_vec4(shz_vec4_init(v[0].x, v[0].y, v[0].z, 1.0f));
+                c1 = blast_transform_fv4(v[1].x, v[1].y, v[1].z);
+                inv0 = shz_invf_fsrra(c0.w);
+                inv1 = shz_invf_fsrra(c1.w);
+                cp[i] = c0;
+                cp[i + 1] = c1;
+                behind |= ((u32) (c0.w < GFX_NEAR_W) << i) | ((u32) (c1.w < GFX_NEAR_W) << (i + 1));
+                px[i] = ((c0.x * inv0 * vpSX) + vpTX) * outSX;
+                py[i] = (vpTY - (c0.y * inv0 * vpSY)) * outSY;
+                pz[i] = (inv0 * zMul) + zAdd;
+                px[i + 1] = ((c1.x * inv1 * vpSX) + vpTX) * outSX;
+                py[i + 1] = (vpTY - (c1.y * inv1 * vpSY)) * outSY;
+                pz[i + 1] = (inv1 * zMul) + zAdd;
+            }
+            if (v < end) {
                 shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
-                f32 invW;
+                f32 invW = shz_invf_fsrra(c.w);
 
                 cp[i] = c;
-                if (ccFast) {
-                    argb[i] = ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) |
-                              konst;
-                } else {
-                    // The combiner mixes shade with something else: run the real
-                    // mux, once per vertex rather than once per corner.
-                    f32 shade[4];
-                    u8 lit[4];
-
-                    shade[0] = v->r * (1.0f / 255.0f);
-                    shade[1] = v->g * (1.0f / 255.0f);
-                    shade[2] = v->b * (1.0f / 255.0f);
-                    shade[3] = v->a * (1.0f / 255.0f);
-                    combiner_eval_lit(shade, lit);
-                    argb[i] = ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
-                }
-                if (c.w < GFX_NEAR_W) {
-                    behind |= 1u << i;
-                    continue;
-                }
-                invW = shz_invf_fsrra(c.w);
-                sx[i] = (c.x * invW * vpSX) + vpTX;
-                sy[i] = vpTY - (c.y * invW * vpSY);
-                iw[i] = invW;
+                behind |= (u32) (c.w < GFX_NEAR_W) << i;
+                px[i] = ((c.x * invW * vpSX) + vpTX) * outSX;
+                py[i] = (vpTY - (c.y * invW * vpSY)) * outSY;
+                pz[i] = (invW * zMul) + zAdd;
+                i++;
             }
+        }
+    }
+
+    // The colours in a pass of their own, so the transform loop has no branch
+    // on the combiner for the compiler to make two copies of it over.
+    if (ccFast) {
+        for (i = 0; i < numVerts; i++) {
+            argb[i] = blast_color(&verts[i], TRUE, keep, konst);
+        }
+        for (i = 0; i < numVerts2; i++) {
+            argb[numVerts + i] = blast_color(&verts2[i], TRUE, keep, konst);
+        }
+    } else {
+        for (i = 0; i < numVerts; i++) {
+            argb[i] = blast_color_mux(&verts[i]);
+        }
+        for (i = 0; i < numVerts2; i++) {
+            argb[numVerts + i] = blast_color_mux(&verts2[i]);
         }
     }
 
@@ -2381,66 +2612,82 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
                    (sGeometryMode & G_FOG) != 0, sPrimColor[3], sEnvColor[3], numTris);
     }
 #endif
-    // A triangle crossing the near plane can come back as two.
-    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord,
-                         (int) (argb[0] >> 24), &sBlastZMul, &sBlastZAdd)) {
-        // handle_polygon redoes this state, so falling back here is safe.
-        PROF_ADD(whyFull, numTris);
-        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
-        return;
-    }
     if (texture != 0) {
         uMul = shz_invf_fsrra(32.0f * (f32) sTileWidth) * uS;
         vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
     }
 
-    for (i = 0; i < numTris; i++) {
-        const Triangle *t = &tris[i];
-        s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
+    {
+        // The output position lives in locals for the whole loop: the store
+        // queue address alternates between the two queues, a recording just
+        // advances.
+        pvr_vertex_t *rec = sBlastRecord;
+        u32 sq = pvr_dr_addr;
 
-        if (i0 >= total || i1 >= total || i2 >= total) {
-            continue;
-        }
-        if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
-            BlastClipVert cv[3];
+        for (i = 0; i < numTris; i++) {
+            const Triangle *t = &tris[i];
+            s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
+            pvr_vertex_t *o0, *o1, *o2;
 
-            cv[0].c = cp[i0];
-            cv[0].u = t->uv0.u * uMul;
-            cv[0].v = t->uv0.v * vMul;
-            cv[0].argb = argb[i0];
-            cv[1].c = cp[i1];
-            cv[1].u = t->uv1.u * uMul;
-            cv[1].v = t->uv1.v * vMul;
-            cv[1].argb = argb[i1];
-            cv[2].c = cp[i2];
-            cv[2].u = t->uv2.u * uMul;
-            cv[2].v = t->uv2.v * vMul;
-            cv[2].argb = argb[i2];
-            PROF_ADD(clipped, 1);
-#if DKR_GFX_PROFILE_SKIP != 1
-            blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
-#endif
-            continue;
-        }
-        if (!(t->flags & BACKFACE_DRAW)) {
-            f32 area = ((sx[i1] - sx[i0]) * (sy[i2] - sy[i0])) -
-                       ((sx[i2] - sx[i0]) * (sy[i1] - sy[i0]));
-            if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
-                PROF_ADD(culled, 1);
+            if (i0 >= total || i1 >= total || i2 >= total) {
                 continue;
             }
-        }
-        PROF_ADD(sent, 1);
-        PROF_ADD(sentFrame, 1);
-#if DKR_GFX_PROFILE_SKIP == 1
-        continue;
+            if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
+                PROF_ADD(clipped, 1);
+#if DKR_GFX_PROFILE_SKIP != 1
+                // The cold clipper emits through the globals.
+                sBlastRecord = rec;
+                pvr_dr_addr = sq;
+                blast_clip_corners(t, cp, argb, uMul, vMul);
+                rec = sBlastRecord;
+                sq = pvr_dr_addr;
 #endif
-        blast_emit(sx[i0], sy[i0], iw[i0], t->uv0.u * uMul, t->uv0.v * vMul, argb[i0],
-                   PVR_CMD_VERTEX);
-        blast_emit(sx[i1], sy[i1], iw[i1], t->uv1.u * uMul, t->uv1.v * vMul, argb[i1],
-                   PVR_CMD_VERTEX);
-        blast_emit(sx[i2], sy[i2], iw[i2], t->uv2.u * uMul, t->uv2.v * vMul, argb[i2],
-                   PVR_CMD_VERTEX_EOL);
+                continue;
+            }
+            if (!(t->flags & BACKFACE_DRAW)) {
+                // In framebuffer pixels: the scale is positive, so the winding
+                // is the same as in N64 pixels.
+                f32 area = ((px[i1] - px[i0]) * (py[i2] - py[i0])) - ((px[i2] - px[i0]) * (py[i1] - py[i0]));
+                if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                    PROF_ADD(culled, 1);
+                    continue;
+                }
+            }
+            PROF_ADD(sent, 1);
+            PROF_ADD(sentFrame, 1);
+#if DKR_GFX_PROFILE_SKIP == 1
+            continue;
+#endif
+            if (rec) {
+                o0 = rec;
+                o1 = rec + 1;
+                o2 = rec + 2;
+                rec += 3;
+            } else {
+                o0 = (pvr_vertex_t *) (sq ^ 32);
+                o1 = (pvr_vertex_t *) sq;
+                o2 = (pvr_vertex_t *) (sq ^ 32);
+            }
+            blast_put(o0, rec != NULL, PVR_CMD_VERTEX, px[i0], py[i0], pz[i0], t->uv0.u * uMul, t->uv0.v * vMul,
+                      argb[i0]);
+            if (!rec) {
+                blast_sq_flush(o0);
+            }
+            blast_put(o1, rec != NULL, PVR_CMD_VERTEX, px[i1], py[i1], pz[i1], t->uv1.u * uMul, t->uv1.v * vMul,
+                      argb[i1]);
+            if (!rec) {
+                blast_sq_flush(o1);
+            }
+            blast_put(o2, rec != NULL, PVR_CMD_VERTEX_EOL, px[i2], py[i2], pz[i2], t->uv2.u * uMul, t->uv2.v * vMul,
+                      argb[i2]);
+            if (!rec) {
+                blast_sq_flush(o2);
+                // Three flips from sq leave it where the third vertex went.
+                sq ^= 32;
+            }
+        }
+        pvr_dr_addr = sq;
+        sBlastRecord = rec;
     }
     if (sBlastRecord) {
         gfx_blast_end(sBlastRecord);
@@ -2551,103 +2798,173 @@ static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
 // black (Diddy's plane went dark).
 // ---------------------------------------------------------------------------
 
+// The combiner is compiled per state, not interpreted per vertex. Every input a
+// slot can name is one of a handful of values: a shade channel, a channel of
+// the first cycle's result, or a constant of the batch (0, 1, a PRIM or ENV
+// channel, the texel). All of them sit in one array, sCcSrc, and each slot of
+// each cycle becomes a pointer into it, so a channel costs four loads, a
+// subtract and a multiply-add: (a - b) * c + d, clamped, the same arithmetic in
+// the same order as the RDP formula always was here.
+enum {
+    CC_SRC_SHADE = 0, // 4: the vertex's shade, RGBA
+    CC_SRC_COMB = 4,  // 4: what the first cycle produced
+    CC_SRC_ZERO = 8,
+    CC_SRC_ONE = 9,
+    CC_SRC_TEXEL = 10, // 1 (white) for the modulate half, 0 for the additive half (combiner_eval)
+    CC_SRC_PRIM = 11,  // 4
+    CC_SRC_ENV = 15,   // 4
+    CC_SRC_COUNT = 19
+};
+static DKR_HOT f32 sCcSrc[CC_SRC_COUNT];
+// [cycle][R, G, B, A][a, b, c, d slot]: where in sCcSrc each slot reads.
+static DKR_HOT const f32 *sCcProg[2][4][4];
+static DKR_HOT s32 sCcProgCycles;   // 1 or 2
+// The state the program was compiled from, as combiner_classify keys it.
+static DKR_HOT u32 sCcProgW0, sCcProgW1, sCcProgCyc, sCcProgPrim, sCcProgEnv;
+static DKR_HOT s32 sCcProgValid;
+
 /**
- * A colour input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
+ * An RGB input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
  * encode 0..7 and treat anything from 8 up as zero; the 3-bit d slot puts 1 at 6
  * and zero at 7. Slot 7 of a 4-bit slot is NOISE/K4, neither of which DKR uses,
- * so it lands in the zero default.
+ * so it lands in the zero default. `comb` is where COMBINED reads: the shade in
+ * the first cycle, the first cycle's result in the second.
  */
-static f32 sCcTexel = 1.0f; // the value TEXEL0/TEXEL1 take for this evaluation
-
-static void cc_rgb_in(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
-    s32 i;
-
+static u8 cc_src_rgb(u32 mux, s32 ch, u8 comb) {
     switch (mux) {
         case G_CCMUX_COMBINED:
-            for (i = 0; i < 3; i++) {
-                out[i] = comb[i];
-            }
-            return;
+            return (u8) (comb + ch);
         case G_CCMUX_TEXEL0:
         case G_CCMUX_TEXEL1: // no TEXEL1 yet; it follows TEXEL0
-            out[0] = out[1] = out[2] = sCcTexel;
-            return;
+            return CC_SRC_TEXEL;
         case G_CCMUX_1:
-            out[0] = out[1] = out[2] = 1.0f;
-            return;
+            return CC_SRC_ONE;
         case G_CCMUX_PRIMITIVE:
-            for (i = 0; i < 3; i++) {
-                out[i] = sPrimColor[i] / 255.0f;
-            }
-            return;
+            return (u8) (CC_SRC_PRIM + ch);
         case G_CCMUX_SHADE:
-            for (i = 0; i < 3; i++) {
-                out[i] = shade[i];
-            }
-            return;
+            return (u8) (CC_SRC_SHADE + ch);
         case G_CCMUX_ENVIRONMENT:
-            for (i = 0; i < 3; i++) {
-                out[i] = sEnvColor[i] / 255.0f;
-            }
-            return;
+            return (u8) (CC_SRC_ENV + ch);
         default:
-            out[0] = out[1] = out[2] = 0.0f;
-            return;
+            return CC_SRC_ZERO;
     }
 }
 
 /**
- * A colour input from the 5-bit multiplier (c) slot, which also reaches the alpha
+ * An RGB input from the 5-bit multiplier (c) slot, which also reaches the alpha
  * registers: the source of ENV_ALPHA and SHADE_ALPHA, both used by DKR's lighting.
  */
-static void cc_rgb_mul(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
-    f32 scalar;
-
+static u8 cc_src_mul(u32 mux, s32 ch, u8 comb) {
     switch (mux) {
         case G_CCMUX_COMBINED_ALPHA:
-            scalar = comb[3];
-            break;
+            return (u8) (comb + 3);
         case G_CCMUX_TEXEL0_ALPHA:
         case G_CCMUX_TEXEL1_ALPHA:
-            scalar = sCcTexel;
-            break;
+            return CC_SRC_TEXEL;
         case G_CCMUX_PRIMITIVE_ALPHA:
-            scalar = sPrimColor[3] / 255.0f;
-            break;
+            return CC_SRC_PRIM + 3;
         case G_CCMUX_SHADE_ALPHA:
-            scalar = shade[3];
-            break;
+            return CC_SRC_SHADE + 3;
         case G_CCMUX_ENV_ALPHA:
-            scalar = sEnvColor[3] / 255.0f;
-            break;
+            return CC_SRC_ENV + 3;
         default:
             // Everything below 7 is a plain colour input; LOD_FRAC and K5 are not
-            // used by DKR and fall through cc_rgb_in()'s zero default.
-            cc_rgb_in(mux, shade, comb, out);
-            return;
+            // used by DKR and fall through to cc_src_rgb()'s zero default.
+            return cc_src_rgb(mux, ch, comb);
     }
-    out[0] = out[1] = out[2] = scalar;
 }
 
 /** Every alpha slot is 3 bits and they all share one encoding. */
-static f32 cc_alpha_in(u32 mux, const f32 shade[4], const f32 comb[4]) {
+static u8 cc_src_alpha(u32 mux, u8 comb) {
     switch (mux) {
         case G_ACMUX_COMBINED:
-            return comb[3];
+            return (u8) (comb + 3);
         case G_ACMUX_TEXEL0:
         case G_ACMUX_TEXEL1:
-            return sCcTexel;
+            return CC_SRC_TEXEL;
         case G_ACMUX_1:
-            return 1.0f;
+            return CC_SRC_ONE;
         case G_ACMUX_PRIMITIVE:
-            return sPrimColor[3] / 255.0f;
+            return CC_SRC_PRIM + 3;
         case G_ACMUX_SHADE:
-            return shade[3];
+            return CC_SRC_SHADE + 3;
         case G_ACMUX_ENVIRONMENT:
-            return sEnvColor[3] / 255.0f;
+            return CC_SRC_ENV + 3;
         default:
-            return 0.0f; // G_ACMUX_0
+            return CC_SRC_ZERO; // G_ACMUX_0
     }
+}
+
+/** One cycle's slots, (a - b) * c + d, colour and alpha on their own muxes. */
+static void cc_compile_cycle(const f32 *prog[4][4], u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA,
+                             u8 comb) {
+    s32 ch;
+
+    for (ch = 0; ch < 3; ch++) {
+        prog[ch][0] = &sCcSrc[cc_src_rgb(a, ch, comb)];
+        prog[ch][1] = &sCcSrc[cc_src_rgb(b, ch, comb)];
+        prog[ch][2] = &sCcSrc[cc_src_mul(c, ch, comb)];
+        prog[ch][3] = &sCcSrc[cc_src_rgb(d, ch, comb)];
+    }
+    prog[3][0] = &sCcSrc[cc_src_alpha(aA, comb)];
+    prog[3][1] = &sCcSrc[cc_src_alpha(bA, comb)];
+    prog[3][2] = &sCcSrc[cc_src_alpha(cA, comb)];
+    prog[3][3] = &sCcSrc[cc_src_alpha(dA, comb)];
+}
+
+/**
+ * Make the compiled combiner match the current state. Cheap when it already
+ * does; run once per batch or rectangle, never per vertex.
+ */
+static void cc_prog_sync(u32 cyc, u32 prim, u32 env) {
+    s32 i;
+
+    if (sCcProgValid && sCombineW0 == sCcProgW0 && sCombineW1 == sCcProgW1 && cyc == sCcProgCyc &&
+        prim == sCcProgPrim && env == sCcProgEnv) {
+        return;
+    }
+    sCcProgW0 = sCombineW0;
+    sCcProgW1 = sCombineW1;
+    sCcProgCyc = cyc;
+    sCcProgPrim = prim;
+    sCcProgEnv = env;
+    sCcProgValid = TRUE;
+
+    sCcSrc[CC_SRC_ZERO] = 0.0f;
+    sCcSrc[CC_SRC_ONE] = 1.0f;
+    sCcSrc[CC_SRC_TEXEL] = 1.0f;
+    for (i = 0; i < 4; i++) {
+        sCcSrc[CC_SRC_PRIM + i] = sPrimColor[i] / 255.0f;
+        sCcSrc[CC_SRC_ENV + i] = sEnvColor[i] / 255.0f;
+    }
+
+    // Both cycles, if othermode says so: the directional-lighting materials are
+    // two-cycle and the second cycle is where the environment blend lives. The
+    // first cycle's COMBINED is the shade.
+    cc_compile_cycle(sCcProg[0], (sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F,
+                     (sCombineW1 >> 15) & 0x7, (sCombineW0 >> 12) & 0x7, (sCombineW1 >> 12) & 0x7,
+                     (sCombineW0 >> 9) & 0x7, (sCombineW1 >> 9) & 0x7, CC_SRC_SHADE);
+    sCcProgCycles = 1;
+    if (cyc == G_CYC_2CYCLE) {
+        cc_compile_cycle(sCcProg[1], (sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F,
+                         (sCombineW1 >> 6) & 0x7, (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7,
+                         (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, CC_SRC_COMB);
+        sCcProgCycles = 2;
+    }
+}
+
+/** The current state's (cycle type, PRIM, ENV) as the combiner keys them. */
+#define CC_KEY_CYC() (sOtherModeH & (3 << G_MDSFT_CYCLETYPE))
+#define CC_KEY_RGBA(c) (((u32) (c)[0] << 24) | ((u32) (c)[1] << 16) | ((u32) (c)[2] << 8) | (u32) (c)[3])
+
+/**
+ * Compile the combiner for the current state if it is not already. Only the
+ * batches that run it per vertex call this: most batches collapse to selects
+ * (combiner_classify) and their state changes, prim and env colours that differ
+ * per object, would otherwise recompile it batch after batch.
+ */
+static void cc_prog_sync_current(void) {
+    cc_prog_sync(CC_KEY_CYC(), CC_KEY_RGBA(sPrimColor), CC_KEY_RGBA(sEnvColor));
 }
 
 static f32 cc_clamp(f32 v) {
@@ -2664,46 +2981,32 @@ static u8 clamp_u8(f32 v) {
     return (u8) (cc_clamp(v) * 255.0f);
 }
 
-/** One cycle of (a - b) * c + d, colour and alpha on their own muxes. */
-static void cc_cycle(u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA, const f32 shade[4], const f32 in[4],
-                     f32 out[4]) {
-    f32 va[3], vb[3], vc[3], vd[3];
-    s32 i;
-
-    cc_rgb_in(a, shade, in, va);
-    cc_rgb_in(b, shade, in, vb);
-    cc_rgb_mul(c, shade, in, vc);
-    cc_rgb_in(d, shade, in, vd);
-
-    for (i = 0; i < 3; i++) {
-        out[i] = cc_clamp(((va[i] - vb[i]) * vc[i]) + vd[i]);
-    }
-    out[3] = cc_clamp(((cc_alpha_in(aA, shade, in) - cc_alpha_in(bA, shade, in)) * cc_alpha_in(cA, shade, in)) +
-                      cc_alpha_in(dA, shade, in));
-}
-
 /**
- * Run the combiner for one shade value. Both cycles, if othermode says so — the
- * directional-lighting materials are two-cycle and the second cycle is where the
- * environment blend lives, so stopping after cycle 0 (as we used to) throws away
- * the half that matters.
+ * Run the compiled combiner on one shade value, with the texel at `texel`
+ * (1 = white, 0 = black). The result is left in sCcSrc[CC_SRC_COMB..+3].
  */
-static void combiner_run(const f32 shade[4], f32 out[4]) {
-    f32 cycle0[4];
-    s32 i;
+static inline void cc_prog_run(const f32 shade[4], f32 texel) {
+    f32 *src = sCcSrc;
+    s32 cycle;
 
-    cc_cycle((sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F, (sCombineW1 >> 15) & 0x7,
-             (sCombineW0 >> 12) & 0x7, (sCombineW1 >> 12) & 0x7, (sCombineW0 >> 9) & 0x7, (sCombineW1 >> 9) & 0x7,
-             shade, shade, cycle0);
+    src[CC_SRC_SHADE + 0] = shade[0];
+    src[CC_SRC_SHADE + 1] = shade[1];
+    src[CC_SRC_SHADE + 2] = shade[2];
+    src[CC_SRC_SHADE + 3] = shade[3];
+    src[CC_SRC_TEXEL] = texel;
+    for (cycle = 0; cycle < sCcProgCycles; cycle++) {
+        const f32 *const (*prog)[4] = sCcProg[cycle];
+        f32 out[4];
+        s32 ch;
 
-    if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) {
-        cc_cycle((sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F, (sCombineW1 >> 6) & 0x7,
-                 (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7, (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, shade,
-                 cycle0, out);
-    } else {
-        for (i = 0; i < 4; i++) {
-            out[i] = cycle0[i];
+        for (ch = 0; ch < 4; ch++) {
+            out[ch] = cc_clamp(((*prog[ch][0] - *prog[ch][1]) * *prog[ch][2]) + *prog[ch][3]);
         }
+        // Written after all four channels: the second cycle reads the first's.
+        src[CC_SRC_COMB + 0] = out[0];
+        src[CC_SRC_COMB + 1] = out[1];
+        src[CC_SRC_COMB + 2] = out[2];
+        src[CC_SRC_COMB + 3] = out[3];
     }
 }
 
@@ -2728,39 +3031,34 @@ static void combiner_run(const f32 shade[4], f32 out[4]) {
  * TEXEL0 * PRIM form DKR's 2D uses everywhere.
  */
 static void combiner_eval(const f32 shade[4], u8 lit[4], u8 unlit[3]) {
-    f32 on[4];  // texel = white
-    f32 off[4]; // texel = black
     s32 i;
 
-    sCcTexel = 1.0f;
-    combiner_run(shade, on);
-    sCcTexel = 0.0f;
-    combiner_run(shade, off);
-    sCcTexel = 1.0f;
-
-    for (i = 0; i < 3; i++) {
-        lit[i] = clamp_u8(on[i]);
-        unlit[i] = clamp_u8(off[i]);
+    cc_prog_sync_current();
+    cc_prog_run(shade, 1.0f);
+    for (i = 0; i < 4; i++) {
+        lit[i] = clamp_u8(sCcSrc[CC_SRC_COMB + i]);
     }
-    lit[3] = clamp_u8(on[3]);
+    cc_prog_run(shade, 0.0f);
+    for (i = 0; i < 3; i++) {
+        unlit[i] = clamp_u8(sCcSrc[CC_SRC_COMB + i]);
+    }
 }
 
 /**
  * Just the lit half. The 3D path (project) only ever consumes `lit` — the
  * texel=0 run that combiner_eval also does is thrown away there, so the second
- * combiner_run was pure waste on every 3D vertex in the frame. The 2D path still
- * needs both halves and keeps using combiner_eval.
+ * run was pure waste on every 3D vertex in the frame. The 2D path still needs
+ * both halves and keeps using combiner_eval.
+ *
+ * Per vertex, so it trusts the program to be current: every caller has run
+ * cc_prog_sync_current() for the batch.
  */
 static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
-    f32 on[4];
-    s32 i;
-
-    sCcTexel = 1.0f;
-    combiner_run(shade, on);
-
-    for (i = 0; i < 4; i++) {
-        lit[i] = clamp_u8(on[i]);
-    }
+    cc_prog_run(shade, 1.0f);
+    lit[0] = clamp_u8(sCcSrc[CC_SRC_COMB + 0]);
+    lit[1] = clamp_u8(sCcSrc[CC_SRC_COMB + 1]);
+    lit[2] = clamp_u8(sCcSrc[CC_SRC_COMB + 2]);
+    lit[3] = clamp_u8(sCcSrc[CC_SRC_COMB + 3]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2787,9 +3085,9 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
 // misclassified; it fails both tests and takes the slow path.
 // ---------------------------------------------------------------------------
 // The state the classification is valid for. Any change and it is recomputed.
-static u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
-static s32 sCcSigValid = FALSE;
-static u32 sCcCacheAt;
+static DKR_HOT u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
+static DKR_HOT s32 sCcSigValid = FALSE;
+static DKR_HOT u32 sCcCacheAt;
 
 // Materials alternate within a frame, so remember more than the last result.
 #define GFX_CC_CACHE 128
@@ -2806,9 +3104,9 @@ static void combiner_classify(void) {
     static const u8 probeA[4] = { 13, 71, 149, 233 };
     static const u8 probeB[4] = { 200, 5, 96, 44 };
     static const u8 probeC[4] = { 0, 255, 255, 0 };
-    u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
-    u32 prim = (sPrimColor[0] << 24) | (sPrimColor[1] << 16) | (sPrimColor[2] << 8) | sPrimColor[3];
-    u32 env = (sEnvColor[0] << 24) | (sEnvColor[1] << 16) | (sEnvColor[2] << 8) | sEnvColor[3];
+    u32 cyc = CC_KEY_CYC();
+    u32 prim = CC_KEY_RGBA(sPrimColor);
+    u32 env = CC_KEY_RGBA(sEnvColor);
     f32 shade[4];
     u8 a[4], b[4], c[4];
     s32 i;
@@ -2845,6 +3143,7 @@ static void combiner_classify(void) {
 #if DKR_GFX_PROFILE
     sCcProbed++;
 #endif
+    cc_prog_sync(cyc, prim, env);
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
@@ -2957,7 +3256,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
  * menu image. `w2`/`w3` are the two G_RDPHALF words that follow the opcode and
  * carry the texture coordinates.
  */
-static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
+static __attribute__((noinline)) void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
     PROF_ADD(rects, 1);
     // Screen coordinates are 10.2 fixed point, texture coordinates S10.5, and
     // the per-pixel texture steps S5.10.
@@ -3002,7 +3301,7 @@ static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
 /**
  * G_FILLRECT — the letterbox bars, dialogue-box backgrounds and screen fades.
  */
-static void handle_fillrect(u32 w0, u32 w1) {
+static __attribute__((noinline)) void handle_fillrect(u32 w0, u32 w1) {
     f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
     f32 y0 = (w1 & 0xFFF) / 4.0f;
     f32 x1 = ((w0 >> 12) & 0xFFF) / 4.0f;
@@ -3031,23 +3330,101 @@ static void handle_fillrect(u32 w0, u32 w1) {
     draw_2d_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.0f, color, unlit, 0);
 }
 
+/** The port's own tags, which ride in G_NOOP: a few a frame, so out of the hot code. */
+static __attribute__((noinline)) void handle_tag(u32 w1) {
+    if (w1 == PC_SCRAWL_TAG) {
+        pc_scrawl_draw();
+    } else if (w1 == PC_SWIRL_TAG) {
+        pc_swirl_draw();
+    } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
+        gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
+    }
+#if DKR_GFX_PROFILE
+    if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
+        scene_category((s32) (w1 & 0xFF));
+    }
+#endif
+}
+
+/** gSPViewport: the viewport map, and the rectangle it confines drawing to. */
+static __attribute__((noinline, cold)) void set_viewport(const Vp *vp) {
+    f32 halfW, halfH;
+
+    sVpScaleX = vp->vp.vscale[0] / 4.0f;
+    sVpScaleY = vp->vp.vscale[1] / 4.0f;
+    sVpTransX = vp->vp.vtrans[0] / 4.0f;
+    sVpTransY = vp->vp.vtrans[1] / 4.0f;
+
+    // The rectangle NDC +-1 maps onto. The scale carries a sign (y is commonly
+    // negative, since screen y runs the other way from clip y), so take it off
+    // before using it as a half-size.
+    halfW = (sVpScaleX < 0.0f) ? -sVpScaleX : sVpScaleX;
+    halfH = (sVpScaleY < 0.0f) ? -sVpScaleY : sVpScaleY;
+    sVpClipX0 = sVpTransX - halfW;
+    sVpClipX1 = sVpTransX + halfW;
+    sVpClipY0 = sVpTransY - halfH;
+    sVpClipY1 = sVpTransY + halfH;
+    apply_clip_rect();
+}
+
+#if DKR_GFX_PROFILE
+/** Profile only: level vertex loads, and those not drawn with the cull matrix. */
+static __attribute__((noinline)) void prof_level_vtx(void) {
+    if ((sCatCur == PC_PROF_CAT_LEVEL || sCatCur == PC_PROF_CAT_LEVEL_TR) && sLevelCullMatrix != NULL) {
+        sScene.levelVtx++;
+        if (memcmp(sMatrices[sCurMatrix], sLevelCullMatrix, sizeof(sMatrices[0])) != 0) {
+            sScene.levelVtxOtherMatrix++;
+        }
+    }
+}
+
+/** Profile only: why an unfused G_TRIN's vertices were not drawn by the blast path. */
+static __attribute__((noinline)) void prof_trin_why(u32 w0) {
+    u32 n = (((w0 >> 16) & 0xFF) >> 4) + 1;
+
+    if (sProfVtxWhy == 1) {
+        sProf.whyAppend += n;
+    } else if (sProfVtxWhy == 2) {
+        sProf.whyBillboard += n;
+    } else if (sProfVtxWhy == 3) {
+        sProf.whyShared += n;
+    } else {
+        sProf.whyLoose += n;
+    }
+}
+#endif
+
 /**
  * Interpret one display list. A `count` above zero means "at most this many
  * commands" — the task's own display list is bounded by its length rather than
  * a G_ENDDL, and G_DMADL likewise DMAs a fixed-size block. Zero means "run
  * until G_ENDDL", which is how nested G_DL lists terminate.
  */
-static void run_dl(const Gfx *dl, s32 count, s32 depth) {
+static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
     s32 i;
 
     if (dl == NULL || depth > GFX_MAX_DEPTH) {
         return;
     }
+    // One bound for both kinds of list, rather than testing count == 0 in the
+    // loop: -O3 unswitches on that test, which is a second copy of the whole
+    // interpreter for the instruction cache to hold.
+    if (count == 0) {
+        count = 0x7FFFFFFF;
+    }
 
-    for (i = 0; count == 0 || i < count; i++) {
-        u32 w0 = dl[i].words.w0;
-        u32 w1 = dl[i].words.w1;
-        u32 cmd = (w0 >> 24) & 0xFF;
+    for (i = 0; i < count; i++) {
+        u32 w0, w1, cmd;
+
+        // The game builds the frame's list in memory far larger than the
+        // cache, so each new line of it would be a miss. On entering a line,
+        // start on the one after next.
+        if (!((u32) &dl[i] & 31)) {
+            __builtin_prefetch(&dl[i + 8]);
+        }
+        w0 = dl[i].words.w0;
+        w1 = dl[i].words.w1;
+        cmd = (w0 >> 24) & 0xFF;
 
         // The immediate-mode opcodes are negative ints in gbi.h (G_ENDDL is
         // G_IMMFIRST-7 = -72), so every case has to be masked to the byte the
@@ -3083,35 +3460,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // 320x240 default, which looks right full-screen and falls apart
                 // the moment the game asks for a smaller one.
                 if (((w0 >> 16) & 0xFF) == G_MV_VIEWPORT && w1 != 0) {
-                    const Vp *vp = (const Vp *) w1;
-                    f32 halfW, halfH;
-
-                    sVpScaleX = vp->vp.vscale[0] / 4.0f;
-                    sVpScaleY = vp->vp.vscale[1] / 4.0f;
-                    sVpTransX = vp->vp.vtrans[0] / 4.0f;
-                    sVpTransY = vp->vp.vtrans[1] / 4.0f;
-
-                    // The rectangle NDC +-1 maps onto. The scale carries a sign
-                    // (y is commonly negative, since screen y runs the other way
-                    // from clip y), so take it off before using it as a half-size.
-                    halfW = (sVpScaleX < 0.0f) ? -sVpScaleX : sVpScaleX;
-                    halfH = (sVpScaleY < 0.0f) ? -sVpScaleY : sVpScaleY;
-                    sVpClipX0 = sVpTransX - halfW;
-                    sVpClipX1 = sVpTransX + halfW;
-                    sVpClipY0 = sVpTransY - halfH;
-                    sVpClipY1 = sVpTransY + halfH;
-                    apply_clip_rect();
+                    set_viewport((const Vp *) w1);
                 }
                 break;
             }
             case G_VTX: {
 #if DKR_GFX_PROFILE
-                if ((sCatCur == PC_PROF_CAT_LEVEL || sCatCur == PC_PROF_CAT_LEVEL_TR) && sLevelCullMatrix != NULL) {
-                    sScene.levelVtx++;
-                    if (memcmp(sMatrices[sCurMatrix], sLevelCullMatrix, sizeof(sMatrices[0])) != 0) {
-                        sScene.levelVtxOtherMatrix++;
-                    }
-                }
+                prof_level_vtx();
 #endif
                 // Peephole: a G_VTX immediately followed by the one G_TRIN that
                 // consumes it is the common object/model batch shape, and the
@@ -3137,7 +3492,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 u32 params = (w0 >> 16) & 0xFF;
 
                 if (!(params & G_VTX_APPEND) && !sBillboard) {
-#define DL_HAS(k) (count == 0 || i + (k) < count)
+#define DL_HAS(k) (i + (k) < count)
 #define DL_OP(k) ((dl[i + (k)].words.w0 >> 24) & 0xFF)
 #define DL_SELECT(k) (DL_OP(k) == (u8) G_MOVEWORD && (dl[i + (k)].words.w0 & 0xFF) == G_MW_MVPMATRIX)
 #define DL_LAST_TRIN(k) (DL_OP(k) == G_TRIN && !(DL_HAS((k) + 1) && DL_OP((k) + 1) == G_TRIN))
@@ -3189,13 +3544,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             }
             case G_TRIN:
 #if DKR_GFX_PROFILE
-                {
-                    u32 n = (((w0 >> 16) & 0xFF) >> 4) + 1;
-                    if (sProfVtxWhy == 1) sProf.whyAppend += n;
-                    else if (sProfVtxWhy == 2) sProf.whyBillboard += n;
-                    else if (sProfVtxWhy == 3) sProf.whyShared += n;
-                    else sProf.whyLoose += n;
-                }
+                prof_trin_why(w0);
 #endif
                 PROF_TIME(tPoly, handle_polygon(w0, w1));
                 break;
@@ -3206,18 +3555,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 }
                 break;
             case (u8) G_NOOP:
-                if (w1 == PC_SCRAWL_TAG) {
-                    pc_scrawl_draw();
-                } else if (w1 == PC_SWIRL_TAG) {
-                    pc_swirl_draw();
-                } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
-                    gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
-                }
-#if DKR_GFX_PROFILE
-                if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
-                    scene_category((s32) (w1 & 0xFF));
-                }
-#endif
+                handle_tag(w1);
                 break;
             case G_DMADL:
                 run_dl((const Gfx *) w1, (w0 >> 16) & 0xFF, depth + 1);
@@ -3227,17 +3565,31 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 break;
             case (u8) G_SETTILE: {
                 // Only the tile the triangles actually render with matters.
+                //
+                // Every material loads its texture afresh, mostly the one the
+                // batch before drew with. The texture commands therefore only
+                // dirty the texture when what texture_lookup keys on changes;
+                // a new frame starts dirty all the same.
                 s32 tile = (w1 >> 24) & 0x7;
                 if (tile == G_TX_RENDERTILE) {
-                    sTileFmt = (w0 >> 21) & 0x7;
-                    sTileSiz = (w0 >> 19) & 0x3;
-                    sTilePalette = (w1 >> 20) & 0xF;
+                    u8 fmt = (w0 >> 21) & 0x7;
+                    u8 siz = (w0 >> 19) & 0x3;
+                    u8 palette = (w1 >> 20) & 0xF;
                     // cmt/cms are 2-bit fields (bit 0 mirror, bit 1 clamp), not
                     // flags. Reading only the low bit picked up mirror and
                     // dropped clamp entirely, so every clamped texture wrapped.
-                    sTileCmT = (w1 >> 18) & 0x3;
-                    sTileCmS = (w1 >> 8) & 0x3;
-                    sTexStateDirty = TRUE;
+                    u8 cmT = (w1 >> 18) & 0x3;
+                    u8 cmS = (w1 >> 8) & 0x3;
+
+                    if (fmt != sTileFmt || siz != sTileSiz || palette != sTilePalette || cmT != sTileCmT ||
+                        cmS != sTileCmS) {
+                        sTileFmt = fmt;
+                        sTileSiz = siz;
+                        sTilePalette = palette;
+                        sTileCmT = cmT;
+                        sTileCmS = cmS;
+                        sTexStateDirty = TRUE;
+                    }
                 }
                 break;
             }
@@ -3249,9 +3601,14 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     u32 ult = w0 & 0xFFF;
                     u32 lrs = (w1 >> 12) & 0xFFF;
                     u32 lrt = w1 & 0xFFF;
-                    sTileWidth = ((lrs - uls) >> 2) + 1;
-                    sTileHeight = ((lrt - ult) >> 2) + 1;
-                    sTexStateDirty = TRUE;
+                    u16 width = ((lrs - uls) >> 2) + 1;
+                    u16 height = ((lrt - ult) >> 2) + 1;
+
+                    if (width != sTileWidth || height != sTileHeight) {
+                        sTileWidth = width;
+                        sTileHeight = height;
+                        sTexStateDirty = TRUE;
+                    }
                     sTileUls = uls;
                     sTileUlt = ult;
                 }
@@ -3261,28 +3618,35 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // Latch the image being loaded: gDPLoadTLUT_pal16 issues its own
                 // G_SETTIMG for the palette afterwards, which would otherwise
                 // overwrite the texture address before the triangles draw.
-                sTexAddr = sTimgAddr;
                 // dxt is the low 12 bits. Zero means the RDP applied no odd-row
                 // swizzle on the way in, i.e. the asset is already swizzled.
-                sTexSwapped = ((w1 & 0xFFF) == 0);
-                sTexStateDirty = TRUE;
+                if (sTexAddr != sTimgAddr || sTexSwapped != ((w1 & 0xFFF) == 0)) {
+                    sTexAddr = sTimgAddr;
+                    sTexSwapped = ((w1 & 0xFFF) == 0);
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_LOADTILE:
-                sTexAddr = sTimgAddr;
-                sTexSwapped = FALSE; // a tile load is row-by-row, never swizzled
-                sTexStateDirty = TRUE;
+                // A tile load is row-by-row, never swizzled.
+                if (sTexAddr != sTimgAddr || sTexSwapped) {
+                    sTexAddr = sTimgAddr;
+                    sTexSwapped = FALSE;
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_LOADTLUT:
                 // The palette is whatever G_SETTIMG last pointed at.
-                sTlutAddr = sTimgAddr;
-                sTexStateDirty = TRUE;
+                if (sTlutAddr != sTimgAddr) {
+                    sTlutAddr = sTimgAddr;
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_TEXRECT:
             case (u8) G_TEXRECTFLIP: {
                 // A texture rectangle is three display-list words: the opcode,
                 // then G_RDPHALF_1 and G_RDPHALF_2 carrying the texture
                 // coordinates. Skip past them so they are not run as commands.
-                if (count != 0 && i + 2 >= count) {
+                if (i + 2 >= count) {
                     return; // truncated — the halves are not there to read
                 }
                 PROF_TIME(tRect, handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1,
@@ -3573,6 +3937,7 @@ typedef struct {
 } FrameDl;
 #if DKR_GFX_PROFILE
 static u64 sProfT1, sProfT2; // the walk's start and end, for prof_frame
+static s32 sProfStallKind;   // which stall the counter counts this frame: 0 data, 1 code
 #endif
 
 /** One frame's display-list walk, inside the opaque list. */
@@ -3603,6 +3968,16 @@ static void frame_walk(void *data) {
     sCatCur = PC_PROF_CAT_OTHER;
     sCatStart = sProfT1;
     sCatTrisStart = sProf.tris;
+    {
+        // The second performance counter (the first is KOS's clock) counts the
+        // cycles the pipeline waits on cache misses, during the walk only:
+        // operand-cache and instruction-cache misses take turns, a frame each.
+        sProfWalkSp = (u32) __builtin_frame_address(0);
+        // Starting it clears it.
+        sProfStallKind ^= 1;
+        perf_cntr_start(PRFC1, sProfStallKind ? PMCR_PIPELINE_FREEZE_BY_ICACHE_MISS_MODE :
+                                                PMCR_PIPELINE_FREEZE_BY_DCACHE_MISS_MODE, PMCR_COUNT_CPU_CYCLES);
+    }
 #endif
 
     sCurMatrix = 0;
@@ -3638,6 +4013,7 @@ static void frame_walk(void *data) {
 #endif
 #if DKR_GFX_PROFILE
     sProfT2 = pc_uptime_ns();
+    sScene.walkStall[sProfStallKind] += perf_cntr_count(PRFC1);
     {
         int pt, tr;
         gfx_recorded_words(&pt, &tr);
