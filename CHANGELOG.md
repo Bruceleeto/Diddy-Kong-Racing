@@ -246,20 +246,7 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   The band is a small texture the PVR lays across the strips in the same
   pass, with the lit colour added as the offset colour, so it costs no more
   geometry. The eye comes from the matrix the swirl is drawn with.
-- **A soft halo behind the swirl.** `make_swirl.py` fills the swirl's
-  outline and blurs it (two Gaussians, a close and a wide one) into a
-  128x128 texture; the port lays it on a square in the swirl's own plane,
-  so it turns with it, just behind it, and adds it to the sky in the swirl's
-  colour taken halfway towards a warm white: a glow round the edges and
-  between the arms. With the glint it costs the SH4 under half a millisecond in a
-  frame with the swirl, and the boot screen still holds 60.
-- **The halo no longer shows as a flat sheet.** A second square stands across
-  the first, through the swirl's vertical axis, with the swirl's outline seen
-  from the side, blurred the same way. Each is weighted by the cosine squared
-  of its angle to the eye, so they cross-fade, neither is seen edge on, and
-  together they never light the sky more than one would. `HALO_CROSS=0` keeps
-  the single halo, which then fades out over its last degrees before edge on
-  (82 to 88 degrees from square on).
+- **A warm halo glows behind the swirl.**
 - **A chime as the swirl appears, from the builder's own copy.** Given the
   recording, the boot screen plays it once each time it shows the swirl. The
   repository holds no sound: like the ROM, the chime is read at build time from
