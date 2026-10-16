@@ -179,6 +179,21 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   projects each distinct vertex once and streams 184 triangle strips into the
   opaque list, instead of the game drawing 1828 triangles through 115 N64
   batches, which had cut the boot screen to 40 fps. It holds 60.
+- **A glint crosses the swirl.** Each time the swirl turns square on to the
+  camera, once it has faded in, a narrow band of warm light sweeps across its
+  face, leaning, like light catching lacquer: it lies where the eye is, as
+  the reflection of a light by the camera would, stretched so it takes the
+  turn from 40 degrees one side to 40 the other, and is brightest square on.
+  The band is a small texture the PVR lays across the strips in the same
+  pass, with the lit colour added as the offset colour, so it costs no more
+  geometry. The eye comes from the matrix the swirl is drawn with.
+- **A soft halo behind the swirl.** `make_swirl.py` fills the swirl's
+  outline and blurs it (two Gaussians, a close and a wide one) into a
+  128x128 texture; the port lays it on a square in the swirl's own plane,
+  so it turns with it, just behind it, and adds it to the sky in the swirl's
+  colour taken a little towards white: a glow round the edges and between
+  the arms. With the glint it costs the SH4 under half a millisecond in a
+  frame with the swirl, and the boot screen still holds 60.
 - **"Nintendon't".** On the title screen's beach, "n't" is scratched into the
   sand right after the Nintendo logo, at its letter size, as if drawn with a
   finger. It is the game's one bump-mapped surface: `dreamcast/scrawl/make_scrawl.py`
