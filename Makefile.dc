@@ -116,6 +116,9 @@ cdi:
 	rm -rf cdrom/build/dc/aicaflow
 	mkdir -p cdrom/build/dc/aicaflow/music_raw cdrom/build/dc/aicaflow/jingle_controls
 	cp $(BUILD)/aicaflow/core.afb $(BUILD)/aicaflow/vehicle.afb $(JINGLE_BANK) cdrom/build/dc/aicaflow/
+	# The swirl's chime, when the build has one (SWIRL_CHIME_LEFT).
+	if [ -f $(CHIME_DIR)/chime.afb ]; then mkdir -p cdrom/build/dc/aicaflow/chime && \
+		cp $(CHIME_DIR)/chime.afb $(CHIME_DIR)/chime.afx cdrom/build/dc/aicaflow/chime/; fi
 	cp $(TEXTURE_PACK) cdrom/build/dc/
 	cp $(MODEL_SCENES) $(SONG_SCENES) cdrom/build/dc/
 	rm -rf cdrom/build/dc/texscenes cdrom/build/dc/assetscenes
@@ -172,6 +175,30 @@ $(SWIRL_MODEL): dreamcast/swirl/make_swirl.py dreamcast/swirl/dreamcast_logo_ora
 	@mkdir -p $(dir $@)
 	$(PYTHON) dreamcast/swirl/make_swirl.py $@
 $(BUILD)/dreamcast/swirl.o: $(SWIRL_MODEL)
+# The chime when the swirl appears (dreamcast/swirl/make_chime.py). It is a
+# recording the repository does not hold: like the ROM, it is read from where
+# the builder keeps it, a 44.1 kHz 16-bit WAV with the chime in one channel:
+#   SWIRL_CHIME_LEFT   the take played alone, or first and on the left
+#   SWIRL_CHIME_RIGHT  the take played second, on the right (ringring only)
+#   SWIRL_CHIME_MODE   centred (default): the left take alone, in the middle;
+#                      ringring: the left take, then the right one 0.15 s later
+# Unset or missing, there is no chime and the boot screen plays none. Quote
+# names with spaces: make SWIRL_CHIME_LEFT="$$HOME/Ring Left Channel.wav".
+# It is loaded with the boot screen (CHIME_LEVEL) and charged to it in the
+# AICA RAM budget.
+SWIRL_CHIME_LEFT ?=
+SWIRL_CHIME_RIGHT ?=
+SWIRL_CHIME_MODE ?= centred
+CHIME_LEVEL := 21
+CHIME_DIR := $(BUILD)/aicaflow/chime
+CHIME_STAMP := $(CHIME_DIR)/chime.stamp
+AICAFLOW_PROFILER := $(AICAFORGE_BIN)/afx_profile
+# Asked every build; the script rewrites the stamp only when the chime changes.
+.PHONY: force-chime
+force-chime:
+$(CHIME_STAMP): force-chime dreamcast/swirl/make_chime.py $(AICAFLOW_AUTHOR) $(AICAFLOW_PROFILER)
+	$(PYTHON) dreamcast/swirl/make_chime.py $(CHIME_DIR) $(SWIRL_CHIME_MODE) \
+		"$(SWIRL_CHIME_LEFT)" "$(SWIRL_CHIME_RIGHT)" $(AICAFLOW_AUTHOR) $(AICAFLOW_PROFILER)
 # "n't" after the title beach's Nintendo logo (dreamcast/scrawl.c embeds both).
 SCRAWL_GRID := $(BUILD)/scrawl_grid.h
 SCRAWL_TEXTURE := $(BUILD)/scrawl.dt
@@ -224,7 +251,7 @@ $(AICAFLOW_ROOT)/driver/sh4/libaicaflow_host.a: \
 $(AICAFORGE_ROOT)/Makefile:
 	$(MAKE) -C $(AICAFLOW_ROOT) authoring-dependencies
 
-$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR): \
+$(AICAFLOW_N64_AUTHOR) $(AICAFLOW_BANK_AUTHOR) $(AICAFLOW_AUTHOR) $(AICAFLOW_PROFILER): \
 	$(wildcard $(AICAFORGE_ROOT)/src/*.[ch] $(AICAFLOW_ROOT)/driver/format/include/aicaflow/*.h) \
 	$(AICAFLOW_ROOT)/driver/format/src/codec.c $(AICAFORGE_ROOT)/Makefile
 	$(MAKE) -C $(AICAFORGE_ROOT) BUILD="$(abspath $(AICAFORGE_BIN))" all
@@ -249,11 +276,12 @@ $(JINGLE_BANK): $(MUSIC_JINGLES:%=$(MUSIC_RAW_DIR)/sequence_%.afx) $(AICAFLOW_BA
 	$(AICAFLOW_BANK_AUTHOR) --merge $@ $(JINGLE_CONTROLS) $(filter %.afx,$^)
 
 # Fails the build when a scene's audio cannot fit in AICA RAM.
-$(MUSIC_MANIFEST): $(JINGLE_BANK) $(MUSIC_RAW_AFX) $(SFX_MANIFEST) \
+$(MUSIC_MANIFEST): $(JINGLE_BANK) $(MUSIC_RAW_AFX) $(SFX_MANIFEST) $(CHIME_STAMP) \
 	dreamcast/build_aicaflow_budget.py dreamcast/build_aicaflow_sfx.py \
 	$(AICAFLOW_ROOT)/firmware/aicaflow.drv
 	$(PYTHON) dreamcast/build_aicaflow_budget.py $(BUILD)/aicaflow $(AICAFLOW_ROOT)/firmware/aicaflow.drv \
-		--sequences $(MUSIC_SEQUENCES) --jingles $(MUSIC_JINGLES)
+		--sequences $(MUSIC_SEQUENCES) --jingles $(MUSIC_JINGLES) \
+		--chime $(CHIME_LEVEL) $(CHIME_DIR)
 
 $(MUSIC_VISUALS): $(MUSIC_BANK) dreamcast/build_aicaflow_music_visuals.py $(AICAFLOW_AUTHOR)
 	$(PYTHON) dreamcast/build_aicaflow_music_visuals.py . $(AICAFLOW_AUTHOR) $(dir $@)
