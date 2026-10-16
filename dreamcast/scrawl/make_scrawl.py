@@ -31,8 +31,8 @@ LOGO_W, LOGO_H = 128, 32   # texels; level UVs are in 1/32 texel
 GAP = 3                    # texels between the logo's frame and the "n"
 WIDTH = 64                 # texels the scrawl covers, at the logo's scale
 TEX = 256                  # normal map resolution (square); mipmapped by pvrtex
-GRID_U, GRID_V = 7, 4      # vertices along and across
-LIFT = 0.4                 # world units above the sand
+GRID_U, GRID_V = 13, 7     # vertices along and across, close enough to follow the sand
+LIFT = 1.0                 # world units above the sand
 
 
 def level_model(assets):
