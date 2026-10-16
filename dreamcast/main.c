@@ -15,6 +15,7 @@ extern u64 pc_uptime_ns(void);
 #include "prof.h"
 #include "scene_gate.h"
 #include "scrawl.h"
+#include "swirl.h"
 
 #define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
 #ifndef DKR_TEX_TRACE
@@ -1287,6 +1288,25 @@ int pc_project_world(const f32 world[3], f32 out[3]) {
     out[1] = v.sy;
     out[2] = v.sw;
     return 1;
+}
+
+/**
+ * For dreamcast/swirl.c: count model points, x y z at a stride of `stride`
+ * floats, through the current matrix, as G_VTX would place them: N64 screen
+ * pixels and w, into out. Not clipped: they must be in front of the near plane.
+ */
+void pc_project_points(const f32 *xyz, int stride, int count, f32 (*out)[3]) {
+    int i;
+
+    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
+    for (i = 0; i < count; i++, xyz += stride) {
+        shz_vec4_t clip = shz_xmtrx_transform_vec4(shz_vec4_init(xyz[0], xyz[1], xyz[2], 1.0f));
+        f32 invW = shz_invf_fsrra(clip.w);
+
+        out[i][0] = clip.x * invW * sVpScaleX + sVpTransX;
+        out[i][1] = sVpTransY - clip.y * invW * sVpScaleY;
+        out[i][2] = clip.w;
+    }
 }
 
 static void handle_vertex(u32 w0, u32 w1) {
@@ -3090,6 +3110,8 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             case (u8) G_NOOP:
                 if (w1 == PC_SCRAWL_TAG) {
                     pc_scrawl_draw();
+                } else if (w1 == PC_SWIRL_TAG) {
+                    pc_swirl_draw();
                 }
 #if DKR_GFX_PROFILE
                 if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {

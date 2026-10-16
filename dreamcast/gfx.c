@@ -1349,6 +1349,37 @@ int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int coun
     return 1;
 }
 
+/**
+ * Streams a native polygon into the opaque list, which is open while the
+ * display list is walked (dreamcast/swirl.c). Every batch sends its own header,
+ * so the next one restores the list's state.
+ */
+int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count) {
+    int i;
+
+    if (!sInScene) {
+        return 0;
+    }
+    if (hdr) {
+        shz_sq_memcpy32_1(pvr_ta_sq_addr, hdr);
+    }
+    for (i = 0; i < count; i++) {
+        // Store-queue memory is write-only: nothing is read back from v.
+        pvr_vertex_t *v = (pvr_vertex_t *) pvr_dr_target(sDrState);
+
+        v->flags = verts[i].flags;
+        v->x = verts[i].x * sScaleX;
+        v->y = verts[i].y * sScaleY;
+        v->z = verts[i].z;
+        v->u = verts[i].u;
+        v->v = verts[i].v;
+        v->argb = verts[i].argb;
+        v->oargb = verts[i].oargb;
+        pvr_dr_commit(v);
+    }
+    return 1;
+}
+
 void gfx_recorded_words(int *pt, int *tr) {
     *pt = sPtCount;
     *tr = sTrCount;

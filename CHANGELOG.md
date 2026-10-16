@@ -151,6 +151,16 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   embedded in the program; the port serves it when the boot screen loads the
   N64 logo model, so `assets.bin` is unchanged. It is orange, and blue on a
   European console, as the flash ROM's region says.
+- **The swirl is lit and drawn natively.** Its faces are flat and its edge is
+  rounded by a narrow bevel. Every frame each of its 1370 distinct vertices is
+  lit on the SH4 with sh4zam from the rendering equation: Lambert diffuse and
+  Cook-Torrance specular (GGX, Smith-Schlick, Schlick's Fresnel) for a
+  lacquer, a warm key and a cool rim light that keep to the camera, the sky's
+  irradiance, and the sky reflected, staying put as the swirl turns; then ACES
+  tone mapped. The game's model is only a stand-in: the display-list walk
+  projects each distinct vertex once and streams 184 triangle strips into the
+  opaque list, instead of the game drawing 1828 triangles through 115 N64
+  batches, which had cut the boot screen to 40 fps. It holds 60.
 - **"Nintendon't".** On the title screen's beach, "n't" is scratched into the
   sand right after the Nintendo logo, at its letter size, as if drawn with a
   finger. It is the game's one bump-mapped surface: `dreamcast/scrawl/make_scrawl.py`
@@ -158,8 +168,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   writes its normal map, which pvrtex makes a 256x256 mipmapped PVR bump
   texture, and a grid of vertices that follows the sand. The level draw marks
   the spot after the logo's batch; the display-list walk draws it there in two
-  passes, darkening the walls that face away from the light and lightening
-  those that face it, so the sand around it stays exactly as it was.
+  passes, darkening the walls that face away from the light (to no less than
+  60%) and lightening those that face it, so the sand around it stays exactly
+  as it was.
 
 ## Scenes
 

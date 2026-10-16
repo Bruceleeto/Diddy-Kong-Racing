@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 """Make the Dreamcast swirl that replaces the N64 logo on the boot screen.
 
-usage: make_swirl.py OUT.model|OUT.gltf [PREVIEW.png]
+usage: make_swirl.py OUT.model
+       make_swirl.py OUT.gltf [PREVIEW.png]
 
 The outline is the orange path of dreamcast_logo_orange.svg (Wikimedia Commons,
 "Dreamcast logo (orange).svg", public domain; the swirl itself is a Sega
 trademark). It is flattened, simplified, triangulated and extruded into a slab
-the size of the N64 logo model (about 96 units across), facing +Z with +Y up,
-coloured through its vertex colours: the logo's orange on the faces, darker on
-the edge. OUT.model is a DKR object model, uncompressed, written directly
-(dkr_assets_tool's own glTF import crashes on it); the port embeds it and
-serves it in place of the N64 logo model (dreamcast/swirl.c). OUT.gltf is the
-same mesh for viewing.
+the size of the N64 logo model (about 96 units across), facing +Z with +Y up.
+
+The faces are flat; a narrow bevel at each face and the side between them
+share their normals, so the edge is rounded (two smoothing groups). The port
+lights every vertex itself as the swirl spins (dreamcast/swirl.c), from the
+surface written next to the model.
+
+OUT.model is a DKR object model, uncompressed, written directly; the port
+embeds it and serves it in place of the N64 logo model (dreamcast/swirl.c).
+It is only a stand-in: the port lights and draws the swirl itself, as
+triangle strips, from OUT.surface (OUT.model with that suffix),
+little-endian: three u32 counts (distinct vertices, strips, strip indices);
+each distinct vertex (by position and normal) as its position and unit
+normal, six floats; each strip's length, a u16; and the strips' indices of
+distinct vertices, u16s. OUT.gltf is the same mesh for viewing.
 """
 import base64
 import json
@@ -26,6 +36,7 @@ SVG = HERE / "dreamcast_logo_orange.svg"
 SWIRL_FILL = "#ED8432"
 SIZE = 112.0         # model units across the larger side; the N64 logo is 96, but solid
 DEPTH = 14.0         # model units front to back
+BEVEL = 1.5          # model units the edge is rounded off at each cap (the band is ~7.6 wide)
 FLATNESS = 0.2       # SVG units: how far the outline may stray from the curves
 FACE_RGB = (0xED, 0x84, 0x32)
 EDGE_RGB = (0xB0, 0x5A, 0x18)
@@ -176,7 +187,30 @@ def triangulate(poly):
     return triangles
 
 
+def inset(poly, d):
+    """The counter-clockwise outline moved inwards by d, each corner along its
+    mitre, no further than 2d (the swirl's tips are sharp)."""
+    out = []
+    n = len(poly)
+    for k in range(n):
+        (px, py), (x, y), (nx, ny) = poly[k - 1], poly[k], poly[(k + 1) % n]
+        normals = []
+        for dx, dy in ((x - px, y - py), (nx - x, ny - y)):
+            length = math.hypot(dx, dy) or 1
+            normals.append((-dy / length, dx / length))   # left of the edge: inside
+        mx, my = normals[0][0] + normals[1][0], normals[0][1] + normals[1][1]
+        length = math.hypot(mx, my) or 1
+        mx, my = mx / length, my / length
+        cos = mx * normals[0][0] + my * normals[0][1]
+        reach = min(d / max(cos, 1e-6), 2 * d)
+        out.append((x + mx * reach, y + my * reach))
+    return out
+
+
 def build_mesh():
+    """The outline, the vertices, their colours, and the triangles in two
+    smoothing groups: the flat caps, and the bevels and side that round the
+    edge."""
     polygons = outlines(swirl_path())
     poly = max(polygons, key=lambda p: abs(area(p)))
     poly = simplify(poly, FLATNESS)
@@ -188,30 +222,76 @@ def build_mesh():
     poly = [((x - cx) * scale, -(y - cy) * scale) for x, y in poly]
     if area(poly) < 0:
         poly.reverse()
-    caps = triangulate(poly)
+    inner = inset(poly, BEVEL)
+    caps = triangulate(inner)
     half = DEPTH / 2
-    positions, colours, indices = [], [], []
+    positions, colours = [], []
+    faces, edge = [], []
     n = len(poly)
-    # Front (+Z) and back cap.
+    # Front (+Z) and back cap, the outline inset by the bevel.
     for z in (half, -half):
-        for x, y in poly:
+        for x, y in inner:
             positions.append((x, y, z))
             colours.append(FACE_RGB)
     for a, b, c in caps:
-        indices += [a, b, c]                 # front, counter-clockwise from +Z
-        indices += [n + a, n + c, n + b]     # back, reversed
-    # Edge: a ring of vertices at each face, shared by neighbouring quads, in
-    # the darker colour.
+        faces += [a, b, c]                   # front, counter-clockwise from +Z
+        faces += [n + a, n + c, n + b]       # back, reversed
+    # Edge: rings at the caps, where the bevel starts and ends and at the back,
+    # shared by neighbouring quads, in the darker colour.
     base = 2 * n
-    for z in (half, -half):
-        for x, y in poly:
+    rings = ((inner, half), (poly, half - BEVEL), (poly, BEVEL - half), (inner, -half))
+    for outline, z in rings:
+        for x, y in outline:
             positions.append((x, y, z))
             colours.append(EDGE_RGB)
-    for k in range(n):
-        f0, f1 = base + k, base + (k + 1) % n
-        b0, b1 = f0 + n, f1 + n
-        indices += [f0, b0, b1, f0, b1, f1]
-    return poly, positions, colours, indices
+    for r in range(len(rings) - 1):
+        for k in range(n):
+            f0, f1 = base + r * n + k, base + r * n + (k + 1) % n
+            b0, b1 = f0 + n, f1 + n
+            edge += [f0, b0, b1, f0, b1, f1]
+    # The edge's rings, as strips: between each ring and the next, all round.
+    strips = []
+    for r in range(len(rings) - 1):
+        strip = []
+        for k in range(n + 1):
+            strip += [base + r * n + k % n, base + (r + 1) * n + k % n]
+        strips.append(strip)
+    strips += stripify(faces)
+    return poly, positions, colours, [faces, edge], strips
+
+
+def stripify(indices):
+    """Triangles as strips, greedily: each grows across the edge it ends on
+    for as long as an unused triangle shares it. Drawn without culling, so the
+    strips' alternating winding doesn't matter."""
+    tris = [tuple(indices[k:k + 3]) for k in range(0, len(indices), 3)]
+    by_edge = {}
+    for t, tri in enumerate(tris):
+        for e in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
+            by_edge.setdefault(frozenset(e), []).append(t)
+    used = [False] * len(tris)
+
+    def grow(strip):
+        taken = []
+        while True:
+            edge = frozenset(strip[-2:])
+            nxt = next((u for u in by_edge.get(edge, ()) if not used[u] and u not in taken), None)
+            if nxt is None:
+                return strip, taken
+            taken.append(nxt)
+            strip.append(next(v for v in tris[nxt] if v not in edge))
+
+    strips = []
+    for t, tri in enumerate(tris):
+        if used[t]:
+            continue
+        used[t] = True
+        # Whichever way round the first triangle goes furthest.
+        strip, taken = max((grow(list(tri[k:] + tri[:k])) for k in range(3)), key=lambda st: len(st[1]))
+        for u in taken:
+            used[u] = True
+        strips.append(strip)
+    return strips
 
 
 def write_gltf(path, positions, colours, indices):
@@ -260,74 +340,87 @@ def preview(path, poly, caps_tris):
 
 # DKR object model (include/structs.h ObjectModel, Vertex, Triangle,
 # TriangleBatchInfo), big-endian, in the order the game's own models use:
-# header, batches, triangles, vertices, then a per-vertex animation slot map,
-# unused here but present as in every model the game loads.
+# header, batches, triangles, vertices, then a per-vertex animation slot map.
+# The port draws the swirl itself, so the game's model is a stand-in: one
+# degenerate triangle, and the swirl's radius for the game's visibility test.
 HEADER_BYTES = 0x58
-BATCH_VERTICES = 24       # as the largest batches in the game's models
-BATCH_TRIANGLES = 16      # one G_TRIN draws at most 16 (include/f3ddkr.h)
-TRI_DRAW_BACKFACE = 0x40
 BATCH_VERTEX_COLOURS = 0xFF
 RENDER_FLAGS = 0x3        # as the N64 logo's batches
 
 
-def batches(positions, colours, indices):
-    """Triangles grouped into batches of at most BATCH_VERTICES vertices and
-    BATCH_TRIANGLES triangles each."""
-    out, current, local = [], [], {}
-    for k in range(0, len(indices), 3):
-        tri = indices[k:k + 3]
-        new = [v for v in dict.fromkeys(tri) if v not in local]
-        if len(local) + len(new) > BATCH_VERTICES or len(current) == BATCH_TRIANGLES:
-            out.append((list(local), current))
-            current, local = [], {}
-            new = list(dict.fromkeys(tri))
-        for v in new:
-            local[v] = len(local)
-        current.append(tuple(local[v] for v in tri))
-    if current:
-        out.append((list(local), current))
-    return out
+def vertex_normals(positions, groups):
+    """A unit normal per vertex: the area-weighted face normals of its smoothing
+    group at its position as rounded in the model. The faces are those before
+    rounding, which leaves some slivers of the caps flat or flipped."""
+    at = [tuple(round(c) for c in p) for p in positions]
+    sums = {}
+    owner = {}
+    for group, indices in enumerate(groups):
+        for k in range(0, len(indices), 3):
+            a, b, c = (positions[v] for v in indices[k:k + 3])
+            u = [b[i] - a[i] for i in range(3)]
+            w = [c[i] - a[i] for i in range(3)]
+            n = (u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0])
+            for v in indices[k:k + 3]:
+                key = (at[v], group)
+                owner[v] = key
+                acc = sums.setdefault(key, [0.0, 0.0, 0.0])
+                for i in range(3):
+                    acc[i] += n[i]
+    normals = {}
+    for v, key in owner.items():
+        x, y, z = sums[key]
+        length = math.sqrt(x * x + y * y + z * z) or 1
+        normals[v] = (x / length, y / length, z / length)
+    return normals
 
 
-def write_object_model(path, positions, colours, indices):
-    groups = batches(positions, colours, indices)
-    n_verts = sum(len(v) for v, _ in groups)
-    n_tris = sum(len(t) for _, t in groups)
+def write_object_model(path, positions, groups, strips):
+    """The stand-in model at path, and the surface the port draws next to it."""
+    n_verts, n_tris = 3, 1
     batches_at = HEADER_BYTES
-    tris_at = batches_at + 12 * (len(groups) + 1)
+    tris_at = batches_at + 12 * 2
     verts_at = tris_at + 16 * n_tris
     anim_at = (verts_at + 10 * n_verts + 15) & ~15
     end = (anim_at + 2 * n_verts + 15) & ~15
     model = bytearray(end)
     radius = max(math.sqrt(x * x + y * y + z * z) for x, y, z in positions)
     struct.pack_into(">IIIIII", model, 0x00, 0, verts_at, tris_at, 0, 0, anim_at)
-    struct.pack_into(">hhIhhhhh", model, 0x18, 0, 0, anim_at, 0, 0, n_verts, n_tris, len(groups))
+    struct.pack_into(">hhIhhhhh", model, 0x18, 0, 0, anim_at, 0, 0, n_verts, n_tris, 1)
     struct.pack_into(">hIhhI", model, 0x2A, -1, end, 0, 0, 0)
     struct.pack_into(">IfIIhhI", model, 0x38, batches_at, radius, 0, 0, 0, 0, anim_at)
-    vo = to = 0
-    for b, (verts, tris) in enumerate(groups):
-        struct.pack_into(">BbhhBBI", model, batches_at + 12 * b, 0xFF, 0, vo, to, BATCH_VERTEX_COLOURS, 0, RENDER_FLAGS)
-        for v in verts:
-            x, y, z = positions[v]
-            r, g, bl = colours[v]
-            struct.pack_into(">hhhBBBB", model, verts_at + 10 * vo, round(x), round(y), round(z), r, g, bl, 255)
-            vo += 1
-        for a, c, d in tris:
-            struct.pack_into(">BBBB", model, tris_at + 16 * to, TRI_DRAW_BACKFACE, a, c, d)
-            to += 1
-    struct.pack_into(">BbhhBBI", model, batches_at + 12 * len(groups), 0xFF, 0, vo, to, BATCH_VERTEX_COLOURS, 0, 0)
+    struct.pack_into(">BbhhBBI", model, batches_at, 0xFF, 0, 0, 0, BATCH_VERTEX_COLOURS, 0, RENDER_FLAGS)
+    struct.pack_into(">BbhhBBI", model, batches_at + 12, 0xFF, 0, n_verts, n_tris, BATCH_VERTEX_COLOURS, 0, 0)
+    struct.pack_into(">BBBB", model, tris_at, 0, 0, 1, 2)
+    for v in range(n_verts):
+        struct.pack_into(">hhhBBBB", model, verts_at + 10 * v, 0, 0, 0, 255, 255, 255, 255)
     Path(path).write_bytes(bytes(model))
-    return len(groups), n_verts, n_tris, len(model)
+
+    # The surface: distinct vertices by position (as rounded) and normal.
+    normals = vertex_normals(positions, groups)
+    distinct = {}
+
+    def point(v):
+        x, y, z = positions[v]
+        return distinct.setdefault(((round(x), round(y), round(z)), normals[v]), len(distinct))
+
+    strips = [[point(v) for v in strip] for strip in strips]
+    flat = [i for strip in strips for i in strip]
+    surface = struct.pack("<3I", len(distinct), len(strips), len(flat))
+    surface += b"".join(struct.pack("<6f", *p, *n) for p, n in distinct)
+    surface += struct.pack(f"<{len(strips)}H", *(len(strip) for strip in strips))
+    surface += struct.pack(f"<{len(flat)}H", *flat)
+    Path(path).with_suffix(".surface").write_bytes(surface)
+    return len(distinct), len(strips), len(flat), sum(len(t) - 2 for t in strips)
 
 
 def main():
-    poly, positions, colours, indices = build_mesh()
+    poly, positions, colours, groups, strips = build_mesh()
     if sys.argv[1].endswith(".model"):
-        groups, verts, tris, size = write_object_model(sys.argv[1], positions, colours, indices)
-        print(f"{sys.argv[1]}: {groups} batches, {verts} vertices, {tris} triangles, {size} bytes")
-        if len(sys.argv) > 2:
-            preview(sys.argv[2], poly, triangulate(poly))
+        points, count, verts, tris = write_object_model(sys.argv[1], positions, groups, strips)
+        print(f"{sys.argv[1]}: {points} distinct vertices, {count} strips of {verts} vertices, {tris} triangles")
         return
+    indices = groups[0] + groups[1]
     write_gltf(sys.argv[1], positions, colours, indices)
     print(f"{sys.argv[1]}: {len(poly)} outline points, {len(positions)} vertices, {len(indices) // 3} triangles")
     if len(sys.argv) > 2:
