@@ -27,6 +27,9 @@
 #include "weather.h"
 #include "pc_swap.h"
 #include "../dreamcast/prof.h"
+#ifdef TARGET_DC
+#include "../dreamcast/scrawl.h"
+#endif
 
 // Maximum size for a level model is 522.5 KiB
 #define LEVEL_MODEL_MAX_SIZE 0x82A00
@@ -2136,6 +2139,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vertices), numberVertices, 0);
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }
+#ifdef TARGET_DC
+        pc_scrawl_after_batch(segmentId, i, &gTrackDL); // "Nintendon't" (dreamcast/scrawl.c)
+#endif
     }
 }
 

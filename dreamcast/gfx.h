@@ -84,6 +84,11 @@ void gfx_blast_end(void *recordEnd);
 // lists (32 bytes each; a triangle is three). For the frame profile.
 void gfx_recorded_words(int *pt, int *tr);
 
+// A native polygon in the translucent list, at this point of the display list
+// (dreamcast/scrawl.c). Vertex x/y are N64 pixels. 0 if the recording is full.
+#include <dc/pvr.h>
+int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
+
 // Whether the surface blends with what is behind it (RDP FORCE_BL). One that
 // does not is opaque whatever its alpha says, and goes to the opaque list.
 void gfx_set_blend(int enable);

@@ -14,6 +14,7 @@
 extern u64 pc_uptime_ns(void);
 #include "prof.h"
 #include "scene_gate.h"
+#include "scrawl.h"
 
 #define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
 #ifndef DKR_TEX_TRACE
@@ -1267,6 +1268,25 @@ static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
     dst->a = v->a;
 
     project_into(dst);
+}
+
+/**
+ * For dreamcast/scrawl.c: a world point through the current matrix, as G_VTX
+ * would place it: N64 screen pixels and w. 0 if it is behind the near plane.
+ */
+int pc_project_world(const f32 world[3], f32 out[3]) {
+    GfxVertex v;
+    Vertex in = { (s16) world[0], (s16) world[1], (s16) world[2], 255, 255, 255, 255 };
+
+    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
+    load_vertex(&v, &in, NULL);
+    if (!VERTEX_PROJECTED(&v)) {
+        return 0;
+    }
+    out[0] = v.sx;
+    out[1] = v.sy;
+    out[2] = v.sw;
+    return 1;
 }
 
 static void handle_vertex(u32 w0, u32 w1) {
@@ -3068,6 +3088,9 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 }
                 break;
             case (u8) G_NOOP:
+                if (w1 == PC_SCRAWL_TAG) {
+                    pc_scrawl_draw();
+                }
 #if DKR_GFX_PROFILE
                 if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
                     scene_category((s32) (w1 & 0xFF));

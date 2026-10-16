@@ -1325,6 +1325,30 @@ int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, 
     return 1;
 }
 
+/**
+ * Appends a polygon header (when hdr is not NULL) and vertices to the
+ * translucent recording, in display-list order. Vertex x/y arrive in N64
+ * pixels and are scaled to the framebuffer here. 0 if there is no room.
+ */
+int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count) {
+    int i;
+
+    if (!sInScene || sTrCount + count + (hdr ? 1 : 0) > TR_MAX_WORDS) {
+        return 0;
+    }
+    if (hdr) {
+        memcpy(sTrBuf[sTrCount++], hdr, sizeof(*hdr));
+    }
+    for (i = 0; i < count; i++) {
+        pvr_vertex_t *v = (pvr_vertex_t *) sTrBuf[sTrCount++];
+
+        *v = verts[i];
+        v->x *= sScaleX;
+        v->y *= sScaleY;
+    }
+    return 1;
+}
+
 void gfx_recorded_words(int *pt, int *tr) {
     *pt = sPtCount;
     *tr = sTrCount;

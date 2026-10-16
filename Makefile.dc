@@ -169,6 +169,17 @@ $(SWIRL_MODEL): dreamcast/swirl/make_swirl.py dreamcast/swirl/dreamcast_logo_ora
 	@mkdir -p $(dir $@)
 	$(PYTHON) dreamcast/swirl/make_swirl.py $@
 $(BUILD)/dreamcast/swirl.o: $(SWIRL_MODEL)
+# "n't" after the title beach's Nintendo logo (dreamcast/scrawl.c embeds both).
+SCRAWL_GRID := $(BUILD)/scrawl_grid.h
+SCRAWL_TEXTURE := $(BUILD)/scrawl.dt
+# One run writes both; the normal map is the target, the grid comes with it.
+$(BUILD)/scrawl_normals.png: dreamcast/scrawl/make_scrawl.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) dreamcast/scrawl/make_scrawl.py assets/.vanilla/us.v77 $@ $(SCRAWL_GRID)
+$(SCRAWL_GRID): $(BUILD)/scrawl_normals.png
+$(SCRAWL_TEXTURE): $(BUILD)/scrawl_normals.png
+	$(PVRTEX) -i $< -o $@ -f NORMAL --normal-style REGULAR --mipmap
+$(BUILD)/dreamcast/scrawl.o: $(SCRAWL_GRID) $(SCRAWL_TEXTURE)
 # Each scene's pack of asset data (build/dc/assetscenes/LEVEL.dsp), read by the
 # scene gate in one pass: what the level needs, and dreamcast/assets.scenes.
 ASSET_SCENES_STAMP := $(BUILD)/assetscenes/.stamp
