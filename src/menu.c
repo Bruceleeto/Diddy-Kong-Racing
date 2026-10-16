@@ -3354,6 +3354,27 @@ void func_80083098(f32 updateRateF) {
  * Load the title textures and reset player allocation.
  * Set the current level and demo.
  */
+#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+/**
+ * DEMO_RACES_ONLY: the demo after the one at `index`, wrapping round, passing
+ * over the title sequence, so after its first showing only the races play.
+ */
+static s32 title_demo_after(s32 index) {
+    s32 tries;
+
+    for (tries = 0; tries < 64; tries++) {
+        index += DEMO_INDEX_SIZE;
+        if (sTitleScreenDemoIds[index] == -1) {
+            index = 0;
+        }
+        if (sTitleScreenDemoIds[index + DEMO_LEVEL_ID] != ASSET_LEVEL_TITLESCREENSEQUENCE) {
+            break;
+        }
+    }
+    return index;
+}
+#endif
+
 void menu_prefetch_next_title_demo_music(void) {
     s8 *demo;
     u32 *offsets;
@@ -3362,9 +3383,14 @@ void menu_prefetch_next_title_demo_music(void) {
     s32 count;
 
     if (!sTitleScreenDemoIds) return;
+#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+    index = title_demo_after(gTitleDemoIndex);
+    demo = &sTitleScreenDemoIds[index];
+#else
     index = gTitleDemoIndex + DEMO_INDEX_SIZE;
     demo = &sTitleScreenDemoIds[index];
     if (demo[0] == -1) demo = sTitleScreenDemoIds;
+#endif
     if (demo[DEMO_LEVEL_ID] < 0) return;
     offsets = asset_table_load(ASSET_LEVEL_HEADERS_TABLE);
     if (!offsets) return;
@@ -3541,12 +3567,17 @@ s32 menu_title_screen_loop(s32 updateRate) {
     }
     if (gMenuDelay == 0 && (func_800214C4() || sp28)) {
         if (gTitleDemoTimer) {} // Fakematch
+#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+        gTitleDemoIndex = title_demo_after(gTitleDemoIndex);
+        demo = &sTitleScreenDemoIds[gTitleDemoIndex];
+#else
         gTitleDemoIndex += DEMO_INDEX_SIZE;
         demo = &sTitleScreenDemoIds[gTitleDemoIndex];
         if (demo[0] == -1) {
             gTitleDemoIndex = 0;
             demo = &sTitleScreenDemoIds[gTitleDemoIndex];
         }
+#endif
         if (gTitleRevealTimer == 0) {
             gTitleRevealTimer = 1;
         }

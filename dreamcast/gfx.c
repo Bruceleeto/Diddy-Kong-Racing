@@ -1,6 +1,10 @@
 
 #include "gfx.h"
 
+#ifndef DKR_SHOW_FPS
+#define DKR_SHOW_FPS 1
+#endif
+
 #include <kos.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2012,7 +2016,7 @@ static void frame_tr(void *data) {
 static void frame_pt(void *data) {
     (void) data;
     replay_words(sPtBuf, sPtCount);
-    if (sFpsFont) {
+    if (DKR_SHOW_FPS && sFpsFont) {
         fps_draw();
     }
 }

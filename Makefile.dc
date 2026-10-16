@@ -31,6 +31,10 @@ GFX_PROFILE_SKIP ?= 0
 # With GFX_PROFILE=3 (or 4, late frames only): the one map to sample, or -1 for
 # the attract races (18 and 28).
 PROF_SAMPLE_MAP ?= -1
+# 0 hides the frame rate in the corner (for recordings).
+SHOW_FPS ?= 1
+# 1: the attract loop shows the title sequence once, then only the demo races, in a loop.
+DEMO_RACES_ONLY ?= 0
 # With GFX_PROFILE: 1 adds what each list fills, by category (SCENE FILL lines).
 FILL_PROF ?= 0
 # With GFX_PROFILE, measurement only: leave part of the frame out, to see what
