@@ -24,8 +24,12 @@
 // matrix once, then the strips streamed into the opaque list (translucent
 // while the logo fades). The boot screen's camera never brings it to the
 // near plane, so it isn't clipped. The game's model is only a stand-in.
+//
+// A glint, a narrow band of light, sweeps across the face once each time it
+// turns square on to the camera (after it has faded in).
 #include <dc/flashrom.h>
 #include <dc/pvr.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sh4zam/shz_sh4zam.h>
 
@@ -80,16 +84,46 @@ static const float sSkyZenith[3] = { 0.3f, 0.5f, 1.0f };
 static const float sSkyHorizon[3] = { 0.95f, 1.0f, 1.05f };
 static const float sSkyNadir[3] = { 0.35f, 0.45f, 0.6f };
 
+// The glint: a narrow band of light that crosses the face as the swirl turns
+// through square on to the camera, as the reflection of a light by the camera
+// would, only slower. The band is a texture across the face, its texels a
+// profile across the band; the PVR adds the lit colour (the offset colour)
+// to the texel times the glint's colour.
+#define GLINT_TEXELS 64          // across the band texture
+#define GLINT_SPAN 40.0f         // model units the band texture spans
+#define GLINT_CORE 0.12f         // half widths of the core and the light around
+#define GLINT_SKIRT 0.45f        //   it, in the texture's width
+#define GLINT_SKIRT_LEVEL 0.22f  // how bright the light around the core is
+#define GLINT_WINDOW 0.84f       // tan 40 degrees: the band crosses while the eye is this close to square on
+#define GLINT_REACH 76.0f        // model units out where it starts and ends, off the edge
+#define GLINT_LEAN_X 0.94f       // the direction it crosses in (cos and sin of -20 degrees),
+#define GLINT_LEAN_Y (-0.34f)    //   so the band leans to the right
+#define GLINT_WARMUP 45          // frames shown before the first one: not while it fades in
+#define GLINT_PEAK 0.55f         // its brightness, at the core when square on
+#ifndef GLINT_TIMES
+#define GLINT_TIMES 1000         // how many times it glints while shown (once a turn)
+#endif
+static const float sGlintColour[3] = { 1.0f, 0.96f, 0.88f }; // the key light's warm white
+
+
 static const ObjectModel *sSwirl; // as loaded, to know it when it is drawn
 static float sAlbedo[3];
 static u8 sTone[SWIRL_TONE_STEPS];
 static u32 sArgb[SWIRL_MAX_POINTS];  // this frame's light, per distinct vertex
 static u8 sOpacity;
-static pvr_poly_hdr_t sHeader[2] __attribute__((aligned(32))); // opaque, translucent
+// By opacity (opaque, translucent), then without and with the glint.
+static pvr_poly_hdr_t sHeader[2][2] __attribute__((aligned(32)));
 static pvr_vertex_t sStrip[SWIRL_MAX_STRIP] __attribute__((aligned(32)));
 static float sScreen[SWIRL_MAX_POINTS][3];
+static pvr_ptr_t sGlintTexture;
+static int sDraws;          // frames drawn since the model was loaded
+static int sGlintArmed;     // 1 once away from square on after fading in, -1 while one is under way
+static int sGlints;         // glints since the model was loaded
+static u32 sGlintArgb;      // this frame's glint colour, 0 for none
+static float sGlintU[3];    // this frame's texture u: [0] + [1] x + [2] y
 
 extern void pc_project_points(const f32 *xyz, int stride, int count, f32 (*out)[3]);
+extern const f32 *pc_current_matrix(void);
 
 static inline const SwirlCounts *counts(void) {
     return (const SwirlCounts *) sSwirlSurface;
@@ -115,20 +149,77 @@ static void tone_init(void) {
     }
 }
 
+/** A grey RGB565 texel. */
+static inline u16 grey565(float v) {
+    int g = (int) (shz_clampf(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+
+    return (u16) (((g * 31 + 127) / 255) << 11 | ((g * 63 + 127) / 255) << 5 | (g * 31 + 127) / 255);
+}
+
+/** w x h grey texels, a function of x, into video memory. */
+static pvr_ptr_t texture(int w, int h, float (*f)(float)) {
+    u16 *texels = malloc(w * h * sizeof(u16));
+    pvr_ptr_t out = NULL;
+
+    if (texels != NULL) {
+        for (int i = 0; i < w * h; i++) {
+            texels[i] = grey565(f((i % w + 0.5f) / w - 0.5f));
+        }
+        out = pvr_mem_malloc(w * h * sizeof(u16));
+        if (out != NULL) {
+            pvr_txr_load(texels, out, w * h * sizeof(u16));
+        }
+        free(texels);
+    }
+    return out;
+}
+
+/** The glint across its band, x from -1/2 to 1/2: a narrow core in softer light. */
+static float glint_profile(float x) {
+    float core = 1.0f - (x / GLINT_CORE) * (x / GLINT_CORE);
+    float skirt = 1.0f - (x / GLINT_SKIRT) * (x / GLINT_SKIRT);
+
+    core = core > 0.0f ? core * core * core : 0.0f;
+    skirt = skirt > 0.0f ? skirt * skirt * skirt : 0.0f;
+    return core * (1.0f - GLINT_SKIRT_LEVEL) + skirt * GLINT_SKIRT_LEVEL;
+}
+
+static inline u32 argb(float r, float g, float b) {
+    return 0xFF000000u | (u32) (shz_clampf(r, 0.0f, 1.0f) * 255.0f) << 16 |
+           (u32) (shz_clampf(g, 0.0f, 1.0f) * 255.0f) << 8 | (u32) (shz_clampf(b, 0.0f, 1.0f) * 255.0f);
+}
+
 static void headers_init(void) {
     pvr_poly_cxt_t cxt;
 
-    pvr_poly_cxt_col(&cxt, PVR_LIST_OP_POLY);
-    cxt.gen.shading = PVR_SHADE_GOURAUD;
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
-    pvr_poly_compile(&sHeader[0], &cxt);
-    pvr_poly_cxt_col(&cxt, PVR_LIST_TR_POLY);
-    cxt.gen.shading = PVR_SHADE_GOURAUD;
-    cxt.gen.culling = PVR_CULLING_NONE;
-    cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
-    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
-    pvr_poly_compile(&sHeader[1], &cxt);
+    // Once: it stays in video memory.
+    if (sGlintTexture == NULL) {
+        sGlintTexture = texture(GLINT_TEXELS, 8, glint_profile);
+    }
+    for (int tr = 0; tr < 2; tr++) {
+        for (int glint = 0; glint < 2; glint++) {
+            if (glint) {
+                pvr_poly_cxt_txr(&cxt, tr ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY,
+                                 PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED, GLINT_TEXELS, 8, sGlintTexture,
+                                 PVR_FILTER_BILINEAR);
+                cxt.gen.specular = PVR_SPECULAR_ENABLE; // the lit colour, added
+                cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
+                cxt.txr.uv_clamp = PVR_UVCLAMP_UV;      // dark either side of the band
+            } else {
+                pvr_poly_cxt_col(&cxt, tr ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY);
+            }
+            cxt.gen.shading = PVR_SHADE_GOURAUD;
+            cxt.gen.culling = PVR_CULLING_NONE;
+            cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
+            if (tr) {
+                cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+            }
+            pvr_poly_compile(&sHeader[tr][glint], &cxt);
+        }
+    }
+    sDraws = 0;
+    sGlints = 0;
+    sGlintArmed = 0;
 }
 
 /**
@@ -294,16 +385,68 @@ int pc_swirl_render(Object *obj, ObjectModel *model, Gfx **dl, s32 opacity) {
     return 1;
 }
 
+/**
+ * The eye in the model's space, from the matrix it is drawn with: the point
+ * that clip x, y and w all take to 0.
+ */
+static shz_vec3_t model_eye(void) {
+    const f32 *m = pc_current_matrix(); // column-major: row r is m[r], m[4 + r], m[8 + r]
+    shz_vec3_t rx = shz_vec3_init(m[0], m[4], m[8]);
+    shz_vec3_t ry = shz_vec3_init(m[1], m[5], m[9]);
+    shz_vec3_t rw = shz_vec3_init(m[3], m[7], m[11]);
+    shz_vec3_t cx = shz_vec3_cross(ry, rw), cy = shz_vec3_cross(rw, rx), cw = shz_vec3_cross(rx, ry);
+
+    // Cramer's rule for rx.e = -m[12], ry.e = -m[13], rw.e = -m[15].
+    return shz_vec3_scale(shz_vec3_add(shz_vec3_add(shz_vec3_scale(cx, m[12]), shz_vec3_scale(cy, m[13])),
+                                       shz_vec3_scale(cw, m[15])),
+                          -shz_invf(shz_vec3_dot(rx, cx)));
+}
+
+/**
+ * This frame's glint, from where the eye is: while it is within the window
+ * either side of square on to the face, the band lies across the face where
+ * the eye is, as the reflection of a light by the camera would, but stretched
+ * so it takes the whole window to cross, and is brightest square on. Once a
+ * turn, after the swirl has faded in and been away from square on.
+ */
+static void glint_update(shz_vec3_t eye) {
+    float t, g;
+
+    sGlintArgb = 0;
+    if (eye.z <= 0.0f || shz_fabsf(eye.x) >= GLINT_WINDOW * eye.z) {
+        if (sGlintArmed < 0) {
+            sGlints++; // one just ended
+        }
+        sGlintArmed = sDraws > GLINT_WARMUP && sGlints < GLINT_TIMES;
+        return;
+    }
+    if (!sGlintArmed) {
+        return;
+    }
+    sGlintArmed = -1; // under way
+    t = eye.x * shz_invf(GLINT_WINDOW * eye.z); // -1 to 1 across the window
+    g = GLINT_PEAK * (1.0f - t * t);
+    sGlintArgb = argb(sGlintColour[0] * g, sGlintColour[1] * g, sGlintColour[2] * g) & 0x00FFFFFFu;
+    // u = 1/2 + (lean . (x, y) - REACH t) / SPAN
+    sGlintU[0] = 0.5f - GLINT_REACH * t / GLINT_SPAN;
+    sGlintU[1] = GLINT_LEAN_X / GLINT_SPAN;
+    sGlintU[2] = GLINT_LEAN_Y / GLINT_SPAN;
+}
+
 void pc_swirl_draw(void) {
     const SwirlCounts *n = counts();
+    const SwirlPoint *pts = points();
     const u16 *lengths = strip_lengths();
     const u16 *index = strip_indices();
     int translucent = sOpacity < 255;
-    const pvr_poly_hdr_t *hdr = &sHeader[translucent];
+    const pvr_poly_hdr_t *hdr;
     u32 alpha = (u32) sOpacity << 24;
     u32 s;
 
-    pc_project_points(&points()->px, sizeof(SwirlPoint) / sizeof(float), n->points, sScreen);
+    sDraws++;
+    glint_update(model_eye());
+    hdr = &sHeader[translucent][sGlintArgb != 0];
+    pc_project_points(&pts->px, sizeof(SwirlPoint) / sizeof(float), n->points, sScreen);
     for (s = 0; s < n->strips; s++) {
         int len = lengths[s];
         int ok;
@@ -320,10 +463,19 @@ void pc_swirl_draw(void) {
             v->x = p[0];
             v->y = p[1];
             v->z = shz_invf_fsrra(p[2]);
-            v->u = 0.0f;
-            v->v = 0.0f;
-            v->argb = (sArgb[index[j]] & 0x00FFFFFFu) | alpha;
-            v->oargb = 0;
+            v->v = 0.5f;
+            if (sGlintArgb) {
+                // The glint's colour times the band, plus the light as the offset.
+                const SwirlPoint *pt = &pts[index[j]];
+
+                v->u = sGlintU[0] + sGlintU[1] * pt->px + sGlintU[2] * pt->py;
+                v->argb = sGlintArgb | alpha;
+                v->oargb = sArgb[index[j]];
+            } else {
+                v->u = 0.0f;
+                v->argb = (sArgb[index[j]] & 0x00FFFFFFu) | alpha;
+                v->oargb = 0;
+            }
         }
         index += len;
         ok = translucent ? gfx_tr_native(hdr, sStrip, len) : gfx_op_native(hdr, sStrip, len);
