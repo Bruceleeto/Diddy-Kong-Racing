@@ -175,9 +175,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   sand right after the Nintendo logo, at its letter size, as if drawn with a
   finger. It is the game's one bump-mapped surface: `dreamcast/scrawl/make_scrawl.py`
   finds the logo on the level model, draws the strokes as a height field and
-  writes its normal map, which pvrtex makes a 512x512 mipmapped, VQ-compressed
-  PVR bump texture (87 KB) over just the letters, and a grid of vertices that
-  follows the sand. The level draw marks
+  writes its normal map, which pvrtex makes a 512x512 VQ-compressed PVR bump
+  texture (66 KB) over just the letters, without mipmaps so it stays sharp at
+  the beach's low angle, and a grid of vertices that follows the sand. The level draw marks
   the spot after the logo's batch; the display-list walk draws it there in two
   passes, darkening the walls that face away from the light (to no less than
   60%) and lightening those that face it, so the sand around it stays exactly
