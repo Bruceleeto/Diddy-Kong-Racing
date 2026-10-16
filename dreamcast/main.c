@@ -140,6 +140,7 @@ static struct {
     // CPU cycles the display-list walk stood still on operand-cache and on
     // instruction-cache misses, each counted on every other frame.
     u64 walkStall[2];
+    u32 texLookups, texScans; // texture_lookup calls, and those that fell through to the linear scan
 } sScene;
 static u32 sProfWalkSp; // where the walk's stack is, for the cache layout
 static const float (*sLevelCullMatrix)[4];
@@ -231,8 +232,9 @@ void pc_scene_prof_report(void) {
             printf(" %s %lu us %lu tris", sCatNames[c], (unsigned long) (sScene.catNs[c] / n / 1000u),
                    (unsigned long) (sScene.catTris[c] / n));
         }
-        printf(" | walk stall data %lu us code %lu us", (unsigned long) (sScene.walkStall[0] * 2u / n / 200u),
-               (unsigned long) (sScene.walkStall[1] * 2u / n / 200u));
+        printf(" | walk stall data %lu us code %lu us | tex lookups %lu scans %lu",
+               (unsigned long) (sScene.walkStall[0] * 2u / n / 200u), (unsigned long) (sScene.walkStall[1] * 2u / n / 200u),
+               (unsigned long) (sScene.texLookups / n), (unsigned long) (sScene.texScans / n));
         printf(" | walk stack %08lx", (unsigned long) sProfWalkSp);
         printf("\nSCENE CC classify %lu/frame, probed %lu/frame", (unsigned long) (sCcClassified / n),
                (unsigned long) (sCcProbed / n));
@@ -761,7 +763,11 @@ static s32 sTexCacheCount = 0;
 // before use, and a wrong one (hash collision, entry moved by eviction or
 // invalidation) just means one linear scan that re-teaches the slot. So the
 // eviction paths never need to maintain it.
-#define GFX_TEX_HINTS 1024
+//
+// A race level holds some 950 textures, so the table is sized well above that:
+// at 1024 it ran nearly full, the probes overflowed, and textures kept
+// knocking each other's hints out.
+#define GFX_TEX_HINTS 4096
 static u16 sTexHint[GFX_TEX_HINTS];
 
 static u32 tex_hint_slot(u32 timg, u32 tlut) {
@@ -779,8 +785,12 @@ static void tex_hint_store(u32 slot, s32 index) {
         u32 at = (slot + probe) & (GFX_TEX_HINTS - 1);
         s32 hi = (s32) sTexHint[at] - 1;
 
+        // Stale: the entry it names has moved, or it would not look for itself
+        // here. An entry from a neighbouring home slot that probed into this one
+        // is not stale; overwriting it only sends that texture to the scan.
         if (hi < 0 || hi >= sTexCacheCount || hi == index ||
-            ((tex_hint_slot(sTexCache[hi].timg, sTexCache[hi].tlut) ^ slot) & (GFX_TEX_HINTS - 1)) != 0) {
+            ((at - tex_hint_slot(sTexCache[hi].timg, sTexCache[hi].tlut)) & (GFX_TEX_HINTS - 1)) >=
+                GFX_TEX_HINT_PROBES) {
             sTexHint[at] = (u16) (index + 1);
             return;
         }
@@ -1565,10 +1575,14 @@ static void decode_texture(const u8 *src, u8 fmt, u8 siz, s32 width, s32 height,
  * The texture the current RDP state describes, decoded and uploaded once and
  * then kept. Returns 0 (untextured) if there is nothing sane to draw with.
  */
+static u32 texture_lookup_slow(const u8 *tlut, u32 slot);
+
 static u32 texture_lookup(void) {
     const u8 *tlut = (const u8 *) sTlutAddr;
-    s32 i;
 
+#if DKR_GFX_PROFILE
+    sScene.texLookups++;
+#endif
     if (sTexAddr == 0 || sTileWidth == 0 || sTileHeight == 0) {
         return 0;
     }
@@ -1605,7 +1619,21 @@ static u32 texture_lookup(void) {
                 }
             }
         }
+        return texture_lookup_slow(tlut, slot);
+    }
+}
 
+/**
+ * texture_lookup() past a hint miss: the scan, and failing that the upload.
+ * Rare once a scene is running, so kept out of the walk's code.
+ */
+static __attribute__((noinline, cold)) u32 texture_lookup_slow(const u8 *tlut, u32 slot) {
+    s32 i;
+
+    {
+#if DKR_GFX_PROFILE
+        sScene.texScans++;
+#endif
         for (i = 0; i < sTexCacheCount; i++) {
             GfxTexture *t = &sTexCache[i];
             if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
@@ -3316,17 +3344,31 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 break;
             case (u8) G_SETTILE: {
                 // Only the tile the triangles actually render with matters.
+                //
+                // Every material loads its texture afresh, mostly the one the
+                // batch before drew with. The texture commands therefore only
+                // dirty the texture when what texture_lookup keys on changes;
+                // a new frame starts dirty all the same.
                 s32 tile = (w1 >> 24) & 0x7;
                 if (tile == G_TX_RENDERTILE) {
-                    sTileFmt = (w0 >> 21) & 0x7;
-                    sTileSiz = (w0 >> 19) & 0x3;
-                    sTilePalette = (w1 >> 20) & 0xF;
+                    u8 fmt = (w0 >> 21) & 0x7;
+                    u8 siz = (w0 >> 19) & 0x3;
+                    u8 palette = (w1 >> 20) & 0xF;
                     // cmt/cms are 2-bit fields (bit 0 mirror, bit 1 clamp), not
                     // flags. Reading only the low bit picked up mirror and
                     // dropped clamp entirely, so every clamped texture wrapped.
-                    sTileCmT = (w1 >> 18) & 0x3;
-                    sTileCmS = (w1 >> 8) & 0x3;
-                    sTexStateDirty = TRUE;
+                    u8 cmT = (w1 >> 18) & 0x3;
+                    u8 cmS = (w1 >> 8) & 0x3;
+
+                    if (fmt != sTileFmt || siz != sTileSiz || palette != sTilePalette || cmT != sTileCmT ||
+                        cmS != sTileCmS) {
+                        sTileFmt = fmt;
+                        sTileSiz = siz;
+                        sTilePalette = palette;
+                        sTileCmT = cmT;
+                        sTileCmS = cmS;
+                        sTexStateDirty = TRUE;
+                    }
                 }
                 break;
             }
@@ -3338,9 +3380,14 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     u32 ult = w0 & 0xFFF;
                     u32 lrs = (w1 >> 12) & 0xFFF;
                     u32 lrt = w1 & 0xFFF;
-                    sTileWidth = ((lrs - uls) >> 2) + 1;
-                    sTileHeight = ((lrt - ult) >> 2) + 1;
-                    sTexStateDirty = TRUE;
+                    u16 width = ((lrs - uls) >> 2) + 1;
+                    u16 height = ((lrt - ult) >> 2) + 1;
+
+                    if (width != sTileWidth || height != sTileHeight) {
+                        sTileWidth = width;
+                        sTileHeight = height;
+                        sTexStateDirty = TRUE;
+                    }
                     sTileUls = uls;
                     sTileUlt = ult;
                 }
@@ -3350,21 +3397,28 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // Latch the image being loaded: gDPLoadTLUT_pal16 issues its own
                 // G_SETTIMG for the palette afterwards, which would otherwise
                 // overwrite the texture address before the triangles draw.
-                sTexAddr = sTimgAddr;
                 // dxt is the low 12 bits. Zero means the RDP applied no odd-row
                 // swizzle on the way in, i.e. the asset is already swizzled.
-                sTexSwapped = ((w1 & 0xFFF) == 0);
-                sTexStateDirty = TRUE;
+                if (sTexAddr != sTimgAddr || sTexSwapped != ((w1 & 0xFFF) == 0)) {
+                    sTexAddr = sTimgAddr;
+                    sTexSwapped = ((w1 & 0xFFF) == 0);
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_LOADTILE:
-                sTexAddr = sTimgAddr;
-                sTexSwapped = FALSE; // a tile load is row-by-row, never swizzled
-                sTexStateDirty = TRUE;
+                // A tile load is row-by-row, never swizzled.
+                if (sTexAddr != sTimgAddr || sTexSwapped) {
+                    sTexAddr = sTimgAddr;
+                    sTexSwapped = FALSE;
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_LOADTLUT:
                 // The palette is whatever G_SETTIMG last pointed at.
-                sTlutAddr = sTimgAddr;
-                sTexStateDirty = TRUE;
+                if (sTlutAddr != sTimgAddr) {
+                    sTlutAddr = sTimgAddr;
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_TEXRECT:
             case (u8) G_TEXRECTFLIP: {
