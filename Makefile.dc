@@ -166,7 +166,8 @@ $(SONG_SCENES): dreamcast/songs.scenes
 	@mkdir -p $(dir $@)
 	cp $< $@
 $(TARGET): $(SONG_SCENES)
-# The Dreamcast swirl that replaces the N64 logo model (dreamcast/swirl.c embeds it).
+# The Dreamcast swirl that replaces the N64 logo model, with its surface and
+# halo beside it (dreamcast/swirl.c embeds them).
 SWIRL_MODEL := $(BUILD)/swirl.model
 $(SWIRL_MODEL): dreamcast/swirl/make_swirl.py dreamcast/swirl/dreamcast_logo_orange.svg
 	@mkdir -p $(dir $@)

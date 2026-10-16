@@ -25,8 +25,9 @@
 // while the logo fades). The boot screen's camera never brings it to the
 // near plane, so it isn't clipped. The game's model is only a stand-in.
 //
-// A glint, a narrow band of light, sweeps across the face once each time it
-// turns square on to the camera (after it has faded in).
+// Two touches: a glint, a narrow band of light that sweeps across the face
+// once each time it turns square on to the camera (after it has faded in),
+// and a soft halo behind it in its colour.
 #include <dc/flashrom.h>
 #include <dc/pvr.h>
 #include <stdlib.h>
@@ -48,6 +49,9 @@ alignas(32) static const unsigned char sSwirlModel[] = {
 };
 alignas(32) static const unsigned char sSwirlSurface[] = {
 #embed "../build/dc/swirl.surface"
+};
+alignas(32) static const unsigned char sSwirlGlow[] = {
+#embed "../build/dc/swirl.glow"
 };
 
 // The surface's layout (make_swirl.py).
@@ -105,6 +109,25 @@ static const float sSkyNadir[3] = { 0.35f, 0.45f, 0.6f };
 #endif
 static const float sGlintColour[3] = { 1.0f, 0.96f, 0.88f }; // the key light's warm white
 
+// Behind the swirl, the soft halo: its silhouette, blurred (make_swirl.py),
+// on a square in its own plane through the middle, so it turns with it,
+// added to the sky behind it in the translucent list. The settings in #ifndef
+// (here and for the glint) can be given at build time to try variations.
+#define HALO_PUSH 0.95f     // 1/w times this: always behind the swirl's body
+#ifndef HALO_STRENGTH
+#define HALO_STRENGTH 0.45f
+#endif
+#ifndef HALO_TOWARDS
+#define HALO_TOWARDS 1.0f, 1.0f, 1.0f // the colour the halo is taken a little towards from the albedo
+#endif
+#ifndef HALO_WHITE
+#define HALO_WHITE 0.3f     // how far towards it
+#endif
+#ifndef HALO_BREATHE
+#define HALO_BREATHE 0.0f   // how far its strength ebbs and comes back, slowly (0: steady)
+#endif
+#define HALO_BREATH 240     // frames a breath takes
+static const float sHaloTowards[3] = { HALO_TOWARDS };
 
 static const ObjectModel *sSwirl; // as loaded, to know it when it is drawn
 static float sAlbedo[3];
@@ -113,9 +136,11 @@ static u32 sArgb[SWIRL_MAX_POINTS];  // this frame's light, per distinct vertex
 static u8 sOpacity;
 // By opacity (opaque, translucent), then without and with the glint.
 static pvr_poly_hdr_t sHeader[2][2] __attribute__((aligned(32)));
+static pvr_poly_hdr_t sHaloHeader __attribute__((aligned(32)));
 static pvr_vertex_t sStrip[SWIRL_MAX_STRIP] __attribute__((aligned(32)));
 static float sScreen[SWIRL_MAX_POINTS][3];
-static pvr_ptr_t sGlintTexture;
+static pvr_ptr_t sGlintTexture, sHaloTexture;
+static u32 sHaloArgb;       // the halo's colour at full opacity
 static int sDraws;          // frames drawn since the model was loaded
 static int sGlintArmed;     // 1 once away from square on after fading in, -1 while one is under way
 static int sGlints;         // glints since the model was loaded
@@ -156,14 +181,14 @@ static inline u16 grey565(float v) {
     return (u16) (((g * 31 + 127) / 255) << 11 | ((g * 63 + 127) / 255) << 5 | (g * 31 + 127) / 255);
 }
 
-/** w x h grey texels, a function of x, into video memory. */
-static pvr_ptr_t texture(int w, int h, float (*f)(float)) {
+/** w x h grey texels, from rows of bytes or a function of x, into video memory. */
+static pvr_ptr_t texture(int w, int h, const u8 *bytes, float (*f)(float)) {
     u16 *texels = malloc(w * h * sizeof(u16));
     pvr_ptr_t out = NULL;
 
     if (texels != NULL) {
         for (int i = 0; i < w * h; i++) {
-            texels[i] = grey565(f((i % w + 0.5f) / w - 0.5f));
+            texels[i] = grey565(bytes != NULL ? bytes[i] / 255.0f : f((i % w + 0.5f) / w - 0.5f));
         }
         out = pvr_mem_malloc(w * h * sizeof(u16));
         if (out != NULL) {
@@ -190,11 +215,16 @@ static inline u32 argb(float r, float g, float b) {
 }
 
 static void headers_init(void) {
+    const u32 *glow = (const u32 *) sSwirlGlow;
+    const int size = glow[0];
     pvr_poly_cxt_t cxt;
 
-    // Once: it stays in video memory.
+    // Once: they stay in video memory.
     if (sGlintTexture == NULL) {
-        sGlintTexture = texture(GLINT_TEXELS, 8, glint_profile);
+        sGlintTexture = texture(GLINT_TEXELS, 8, NULL, glint_profile);
+    }
+    if (sHaloTexture == NULL) {
+        sHaloTexture = texture(size, size, sSwirlGlow + 8, NULL);
     }
     for (int tr = 0; tr < 2; tr++) {
         for (int glint = 0; glint < 2; glint++) {
@@ -217,6 +247,21 @@ static void headers_init(void) {
             pvr_poly_compile(&sHeader[tr][glint], &cxt);
         }
     }
+    pvr_poly_cxt_txr(&cxt, PVR_LIST_TR_POLY, PVR_TXRFMT_RGB565 | PVR_TXRFMT_NONTWIDDLED, size, size,
+                     sHaloTexture, PVR_FILTER_BILINEAR);
+    cxt.gen.culling = PVR_CULLING_NONE;
+    cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
+    cxt.txr.env = PVR_TXRENV_MODULATE;
+    cxt.txr.uv_clamp = PVR_UVCLAMP_UV;
+    cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+    cxt.blend.src = PVR_BLEND_ONE; // sky + glow
+    cxt.blend.dst = PVR_BLEND_ONE;
+    pvr_poly_compile(&sHaloHeader, &cxt);
+    // The albedo a little towards white, as sRGB.
+    sHaloArgb = argb(HALO_STRENGTH * shz_sqrtf(sAlbedo[0] + (sHaloTowards[0] - sAlbedo[0]) * HALO_WHITE),
+                     HALO_STRENGTH * shz_sqrtf(sAlbedo[1] + (sHaloTowards[1] - sAlbedo[1]) * HALO_WHITE),
+                     HALO_STRENGTH * shz_sqrtf(sAlbedo[2] + (sHaloTowards[2] - sAlbedo[2]) * HALO_WHITE));
     sDraws = 0;
     sGlints = 0;
     sGlintArmed = 0;
@@ -433,6 +478,52 @@ static void glint_update(shz_vec3_t eye) {
     sGlintU[2] = GLINT_LEAN_Y / GLINT_SPAN;
 }
 
+/** The halo: a square of the blurred silhouette in the swirl's plane, behind it. */
+static void halo_draw(void) {
+    const float e = ((const float *) sSwirlGlow)[1];
+    float corner[4][3], screen[4][3];
+    pvr_vertex_t quad[4] __attribute__((aligned(32)));
+    u32 colour = sHaloArgb, level = sOpacity;
+
+    if (sHaloTexture == NULL) {
+        return;
+    }
+    if (HALO_BREATHE != 0.0f) {
+        // Slowly, from its full strength down and back: 1 - BREATHE (1 - cos) / 2.
+        float c = shz_cosf((float) (sDraws % HALO_BREATH) * (2.0f * SHZ_F_PI / HALO_BREATH));
+
+        level = (u32) (sOpacity * (1.0f - HALO_BREATHE * 0.5f * (1.0f - c)));
+    }
+    if (level < 255) {
+        u32 r = (colour >> 16 & 0xFF) * level / 255, g = (colour >> 8 & 0xFF) * level / 255,
+            b = (colour & 0xFF) * level / 255;
+        colour = 0xFF000000u | r << 16 | g << 8 | b;
+    }
+    for (int i = 0; i < 4; i++) {
+        // Top left, top right, bottom left, bottom right.
+        corner[i][0] = i & 1 ? e : -e;
+        corner[i][1] = i & 2 ? -e : e;
+        corner[i][2] = 0.0f;
+    }
+    pc_project_points(corner[0], 3, 4, screen);
+    for (int i = 0; i < 4; i++) {
+        pvr_vertex_t *v = &quad[i];
+
+        if (screen[i][2] <= 0.0f) {
+            return;
+        }
+        v->flags = i < 3 ? PVR_CMD_VERTEX : PVR_CMD_VERTEX_EOL;
+        v->x = screen[i][0];
+        v->y = screen[i][1];
+        v->z = HALO_PUSH * shz_invf(screen[i][2]);
+        v->u = i & 1 ? 1.0f : 0.0f;
+        v->v = i & 2 ? 1.0f : 0.0f;
+        v->argb = colour;
+        v->oargb = 0;
+    }
+    gfx_tr_native(&sHaloHeader, quad, 4);
+}
+
 void pc_swirl_draw(void) {
     const SwirlCounts *n = counts();
     const SwirlPoint *pts = points();
@@ -445,6 +536,7 @@ void pc_swirl_draw(void) {
 
     sDraws++;
     glint_update(model_eye());
+    halo_draw();
     hdr = &sHeader[translucent][sGlintArgb != 0];
     pc_project_points(&pts->px, sizeof(SwirlPoint) / sizeof(float), n->points, sScreen);
     for (s = 0; s < n->strips; s++) {

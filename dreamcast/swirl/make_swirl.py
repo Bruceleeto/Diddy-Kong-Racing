@@ -21,7 +21,8 @@ triangle strips, from OUT.surface (OUT.model with that suffix),
 little-endian: three u32 counts (distinct vertices, strips, strip indices);
 each distinct vertex (by position and normal) as its position and unit
 normal, six floats; each strip's length, a u16; and the strips' indices of
-distinct vertices, u16s. OUT.gltf is the same mesh for viewing.
+distinct vertices, u16s. Next to them, OUT.glow: the swirl's silhouette,
+filled and blurred, for the soft halo drawn behind it (see write_glow). OUT.gltf is the same mesh for viewing.
 """
 import base64
 import json
@@ -414,10 +415,71 @@ def write_object_model(path, positions, groups, strips):
     return len(distinct), len(strips), len(flat), sum(len(t) - 2 for t in strips)
 
 
+# The soft halo behind the swirl (dreamcast/swirl.c): its outline, filled and
+# blurred, over a square of GLOW_EXTENT model units either side of the centre,
+# GLOW_SIZE texels across. The blur is two Gaussians, a close one and a wide one.
+GLOW_SIZE = 128
+GLOW_EXTENT = 96.0
+GLOW_SUBSAMPLES = 4                       # per texel, each way, for the coverage
+HALO_BLUR = ((5.0, 0.6), (14.0, 0.4))     # (sigma in model units, weight)
+
+
+def coverage(poly):
+    """How much of each texel the outline covers, rows from +Y down."""
+    n, sub = GLOW_SIZE, GLOW_SUBSAMPLES
+    texel = 2 * GLOW_EXTENT / n
+    edges = [(poly[k], poly[(k + 1) % len(poly)]) for k in range(len(poly))]
+    grid = [[0.0] * n for _ in range(n)]
+    for row in range(n * sub):
+        y = GLOW_EXTENT - (row + 0.5) * texel / sub
+        # Where the outline crosses this line; inside between odd and even.
+        xs = sorted(ax + (y - ay) * (bx - ax) / (by - ay)
+                    for (ax, ay), (bx, by) in edges if (ay <= y) != (by <= y))
+        out = grid[row // sub]
+        for a, b in zip(xs[0::2], xs[1::2]):
+            first = max(0, math.ceil((a + GLOW_EXTENT) / texel * sub - 0.5))
+            last = min(n * sub - 1, math.floor((b + GLOW_EXTENT) / texel * sub - 0.5))
+            for col in range(first, last + 1):
+                out[col // sub] += 1.0 / (sub * sub)
+    return grid
+
+
+def blurred(grid, blur):
+    """grid blurred by a weighted sum of Gaussians, each separable."""
+    n = len(grid)
+    texel = 2 * GLOW_EXTENT / n
+    out = [[0.0] * n for _ in range(n)]
+    for sigma, weight in blur:
+        s = sigma / texel
+        r = int(math.ceil(3 * s))
+        kernel = [math.exp(-0.5 * (k / s) ** 2) for k in range(-r, r + 1)]
+        total = sum(kernel)
+        kernel = [k / total for k in kernel]
+        rows = [[sum(kernel[k + r] * line[x + k] for k in range(-r, r + 1) if 0 <= x + k < n)
+                 for x in range(n)] for line in grid]
+        for x in range(n):
+            for y in range(n):
+                out[y][x] += weight * sum(kernel[k + r] * rows[y + k][x]
+                                          for k in range(-r, r + 1) if 0 <= y + k < n)
+    return out
+
+
+def write_glow(path, poly):
+    """OUT.glow, little-endian: the size in texels (u32) and the extent
+    (float); then the halo's coverage, a byte per texel, rows from +Y down,
+    columns from -X, scaled to peak at 255 (the port sets how strong it is)."""
+    soft = blurred(coverage(poly), HALO_BLUR)
+    peak = max(max(line) for line in soft)
+    blob = struct.pack("<If", GLOW_SIZE, GLOW_EXTENT)
+    blob += bytes(min(255, round(255 * v / peak)) for line in soft for v in line)
+    Path(path).write_bytes(blob)
+
+
 def main():
     poly, positions, colours, groups, strips = build_mesh()
     if sys.argv[1].endswith(".model"):
         points, count, verts, tris = write_object_model(sys.argv[1], positions, groups, strips)
+        write_glow(Path(sys.argv[1]).with_suffix(".glow"), poly)
         print(f"{sys.argv[1]}: {points} distinct vertices, {count} strips of {verts} vertices, {tris} triangles")
         return
     indices = groups[0] + groups[1]
