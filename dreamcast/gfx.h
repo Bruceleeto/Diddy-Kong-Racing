@@ -95,6 +95,16 @@ int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int coun
 // drawn in the opaque list; see gfx.c. The display list sets it (PC_COVER_*).
 void gfx_set_cover(int enable);
 
+// Fill profile (FILL_PROF=1, see gfx.c): the display list's category, one
+// vertex as it goes out in framebuffer pixels, the start of each frame's
+// walk, and the per-scene report.
+void gfx_prof_set_category(int cat);
+void gfx_prof_fill_vert(float x, float y, int eol);
+void gfx_fill_frame(int counted);
+void gfx_fill_frame_done(unsigned int renderUs);
+void gfx_fill_report(void);
+void gfx_prof_set_skip(int code);
+
 // Whether the surface blends with what is behind it (RDP FORCE_BL). One that
 // does not is opaque whatever its alpha says, and goes to the opaque list.
 void gfx_set_blend(int enable);

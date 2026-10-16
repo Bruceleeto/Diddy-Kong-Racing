@@ -137,7 +137,42 @@ static struct {
     u32 cullMatrixChanged; // frames where objects changed gViewProjMatrixF before the translucent level
     u32 falseCulls;        // culled batches with a vertex in view
     u32 levelVtx, levelVtxOtherMatrix; // level G_VTX loads, and those not drawn with the cull matrix
+    // PVR render time of each frame shown: sum, longest, and how many took
+    // longer than one field (a frame the PVR alone makes late at 60 fps).
+    u64 pvrNs, pvrMaxNs;
+    u32 pvrFrames, pvrOver;
+    s32 map; // gMapId while the scene ran
+#if DKR_PROF_SKIP == 999
+    // PVR render time by what was left out (see sSkipCodes).
+    u64 skipNs[32];
+    u32 skipFrames[32], skipOver[32];
+#endif
 } sScene;
+
+#if DKR_PROF_SKIP == 999
+// PROF_SKIP=999: every other block of frames leaves one part of the frame out
+// (the PROF_SKIP codes in dreamcast/gfx.c), the blocks between leave nothing
+// out, so one run measures what each part costs the PVR on the same content.
+// The first frames of a block are not counted: the render time read at a
+// frame's end is that of a frame or two before.
+#define SKIP_BLOCK 10
+#define SKIP_SETTLE 3
+static const s16 sSkipCodes[] = { 0,   1,   2,   100, 101, 102, 103, 104, 105, 107, 108,
+                                  200, 201, 202, 203, 205, 207, 208, 300, 301, 302, 303, 304, 305,
+                                  400, 401, 402, 407 };
+#define SKIP_CODES ((s32) (sizeof(sSkipCodes) / sizeof(sSkipCodes[0])))
+static u32 sSkipFrame;
+static s32 sSkipIdx, sSkipPhase;
+
+static void prof_skip_next_frame(void) {
+    u32 block = sSkipFrame / SKIP_BLOCK;
+
+    sSkipPhase = (s32) (sSkipFrame % SKIP_BLOCK);
+    sSkipIdx = (block & 1) ? 1 + (s32) ((block >> 1) % (u32) (SKIP_CODES - 1)) : 0;
+    sSkipFrame++;
+    gfx_prof_set_skip(sSkipCodes[sSkipIdx]);
+}
+#endif
 static const float (*sLevelCullMatrix)[4];
 
 // Vertices that ran the combiner per vertex (not passthrough or constant), by
@@ -181,6 +216,7 @@ static void scene_category(s32 cat) {
     sScene.catNs[sCatCur] += now - sCatStart;
     sScene.catTris[sCatCur] += sProf.tris - sCatTrisStart;
     sCatCur = (cat >= 0 && cat < PC_PROF_CAT_COUNT) ? cat : PC_PROF_CAT_OTHER;
+    gfx_prof_set_category(sCatCur);
     sCatStart = now;
     sCatTrisStart = sProf.tris;
 }
@@ -243,6 +279,23 @@ void pc_scene_prof_report(void) {
                "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
                (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
                (unsigned long) sScene.levelVtx);
+        if (sScene.pvrFrames > 0) {
+            printf("SCENE PVR map %ld render avg %lu us max %lu us, %lu of %lu frames over 16.7 ms\n",
+                   (long) sScene.map, (unsigned long) (sScene.pvrNs / sScene.pvrFrames / 1000u),
+                   (unsigned long) (sScene.pvrMaxNs / 1000u), (unsigned long) sScene.pvrOver,
+                   (unsigned long) sScene.pvrFrames);
+        }
+        gfx_fill_report();
+#if DKR_PROF_SKIP == 999
+        for (c = 0; c < SKIP_CODES; c++) {
+            if (sScene.skipFrames[c] > 0) {
+                printf("SCENE SKIP %d: %lu frames, render avg %lu us, %lu over 16.7 ms\n", (int) sSkipCodes[c],
+                       (unsigned long) sScene.skipFrames[c],
+                       (unsigned long) (sScene.skipNs[c] / sScene.skipFrames[c] / 1000u),
+                       (unsigned long) sScene.skipOver[c]);
+            }
+        }
+#endif
         {
             extern void pc_asset_play_report(void);
             pc_asset_play_report();
@@ -391,6 +444,20 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         pvr_stats_t stats;
         if (!pvr_get_stats(&stats)) {
             sProf.pvrRender += stats.rnd_last_time;
+            gfx_fill_frame_done((unsigned int) (stats.rnd_last_time / 1000u));
+            if (pc_scene_is_ready() && sSceneVbl != 0) {
+                sScene.pvrNs += stats.rnd_last_time;
+                sScene.pvrFrames++;
+                if (stats.rnd_last_time > sScene.pvrMaxNs) sScene.pvrMaxNs = stats.rnd_last_time;
+                if (stats.rnd_last_time > 16683000u) sScene.pvrOver++;
+#if DKR_PROF_SKIP == 999
+                if (sSkipPhase >= SKIP_SETTLE) {
+                    sScene.skipNs[sSkipIdx] += stats.rnd_last_time;
+                    sScene.skipFrames[sSkipIdx]++;
+                    sScene.skipOver[sSkipIdx] += stats.rnd_last_time > 16683000u;
+                }
+#endif
+            }
             sProf.pvrRegister += stats.reg_last_time;
             if (stats.vtx_buffer_used > sProf.pvrBytes) sProf.pvrBytes = (u32) stats.vtx_buffer_used;
         }
@@ -2125,6 +2192,9 @@ static f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
     pvr_vertex_t *vt = sBlastRecord ? sBlastRecord : (pvr_vertex_t *) pvr_dr_target();
 
+#if DKR_FILL_PROF
+    gfx_prof_fill_vert(x * sBlastSX, y * sBlastSY, flags == PVR_CMD_VERTEX_EOL);
+#endif
     vt->flags = flags;
     vt->x = x * sBlastSX;
     vt->y = y * sBlastSY;
@@ -3590,6 +3660,10 @@ static void frame_walk(void *data) {
             u32 fields = vbl - sSceneVbl;
             prof_sample_frame_end(fields > (u32) PC_LOGIC_UPDATE_RATE);
             sScene.frames++;
+            {
+                extern s32 gMapId;
+                sScene.map = gMapId;
+            }
             if (fields > (u32) PC_LOGIC_UPDATE_RATE) {
                 sScene.lateFrames++;
                 sScene.lateFields += fields - (u32) PC_LOGIC_UPDATE_RATE;
@@ -3601,6 +3675,11 @@ static void frame_walk(void *data) {
         sSceneVbl = vbl;
     }
     sCatCur = PC_PROF_CAT_OTHER;
+    gfx_prof_set_category(sCatCur);
+#if DKR_PROF_SKIP == 999
+    prof_skip_next_frame();
+#endif
+    gfx_fill_frame(sSceneVbl != 0 && pc_scene_is_ready());
     sCatStart = sProfT1;
     sCatTrisStart = sProf.tris;
 #endif

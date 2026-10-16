@@ -54,6 +54,13 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   controller.
 - The sampling profiler can sample any one map (`PROF_SAMPLE_MAP`), and
   `GFX_PROFILE=4` counts only the samples of frames that were late.
+- The scene report gives the PVR's render time per scene (`SCENE PVR`: map,
+  average, longest, frames over one field). `FILL_PROF=1` adds what each list
+  fills, by display-list category and translucent class, in screens of area
+  and tiles, the surfaces that fill most, and one `FF` line per frame for
+  fitting render time to fill. `PROF_SKIP` leaves part of the frame out
+  (a list, a category, a translucent class); `PROF_SKIP=999` cycles through
+  them every ten frames to measure them all in one run.
 - **The profile no longer makes the frames it measures late.** Its lines, the
   game's debug messages and the `fps:` line went out with printf as they came,
   each a round trip to the host over dcload, and a `GFX LONG FRAME` line made
