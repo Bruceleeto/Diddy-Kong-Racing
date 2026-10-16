@@ -12,6 +12,7 @@ extern void dkr_afx_scene_hold(int held);
 extern void pc_texture_load_report(unsigned int sceneMs);
 extern void pc_texture_scene_load(int level);
 extern void pc_model_scene_release(void);
+extern int pc_textures_release_held(void);
 extern void pc_model_scene_load(int level);
 extern void pc_song_scene_load(int level);
 extern void pc_asset_scene_load(int level);
@@ -34,7 +35,9 @@ void pc_scene_loading(int level) {
     sAwaitingStep = sAwaitingFrame = 0;
     sLoadStarted = timer_ms_gettime64();
     sSceneLevel = level;
-    // The previous scene's held models go first, so the new level has the room.
+    // The previous scene's held models, sprites and textures go first, so the
+    // new level has the room.
+    pc_textures_release_held();
     pc_model_scene_release();
     // The scene's pack of asset data, in one read, before the level loads.
     pc_asset_scene_load(level);

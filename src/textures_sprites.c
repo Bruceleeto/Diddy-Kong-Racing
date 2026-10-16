@@ -10,6 +10,10 @@
 
 #define MAX_NUM_TEXTURES 700
 #define MAX_NUM_SPRITES 100
+#ifdef TARGET_DC
+int pc_textures_release_held(void);
+extern int pc_scene_is_ready(void);
+#endif
 #define TEX_PALLETE_COUNT 20
 #define MAX_SPRITE_ASSET_SIZE 512
 #define MAX_TEX_PALETTE_SIZE 640
@@ -544,6 +548,11 @@ TextureHeader *load_texture(s32 id) {
     // If compressed, decompress it.
     if (!gTempTextureHeader->header.isCompressed) {
         tex = (TextureHeader *) mempool_alloc(numberOfTextures * TEXTURE_GFX_SIZE + assetSize, gTexColourTag);
+#ifdef TARGET_DC
+        if (tex == NULL && pc_textures_release_held()) {
+            tex = (TextureHeader *) mempool_alloc(numberOfTextures * TEXTURE_GFX_SIZE + assetSize, gTexColourTag);
+        }
+#endif
         if (tex == NULL) {
             stubbed_printf("TEXLOAD FAIL(u) id=%d n=%d size=%d tag=%d\n", id, numberOfTextures,
                            numberOfTextures * TEXTURE_GFX_SIZE + assetSize, gTexColourTag);
@@ -557,6 +566,12 @@ TextureHeader *load_texture(s32 id) {
         // Allocate enough memory for the decompressed texture
         uncompressedSize = byteswap32((u8 *) &gTempTextureHeader->uncompressedSize) + sizeof(TextureHeader);
         tex = (TextureHeader *) mempool_alloc(numberOfTextures * TEXTURE_GFX_SIZE + uncompressedSize, gTexColourTag);
+#ifdef TARGET_DC
+        if (tex == NULL && pc_textures_release_held()) {
+            tex = (TextureHeader *) mempool_alloc(numberOfTextures * TEXTURE_GFX_SIZE + uncompressedSize,
+                                                  gTexColourTag);
+        }
+#endif
         if (tex == NULL) {
             stubbed_printf("TEXLOAD FAIL(c) id=%d n=%d size=%d tag=%d\n", id, numberOfTextures,
                            numberOfTextures * TEXTURE_GFX_SIZE + uncompressedSize, gTexColourTag);
@@ -675,6 +690,64 @@ void tex_free(TextureHeader *tex) {
         stubbed_printf("TEX Error: Tryed to deallocate non-existent texture!!\n");
     }
 }
+
+#ifdef TARGET_DC
+// Particles and sprites come and go all through a scene, and each time the last
+// of a kind went, its textures were freed, to be loaded and decompressed again
+// at the next spawn: a frame's worth of CPU when a big scene spawns many. While
+// a scene plays (the scene gate is open), one its last user lets go of stays
+// loaded with no users, and is found again in the cache; the next scene's load
+// frees what is left (pc_textures_release_held).
+
+/** tex_free for textures that come and go during a scene (particles). */
+void tex_free_held(TextureHeader *tex) {
+    if (tex != NULL && tex->numberOfInstances <= 1 && pc_scene_is_ready()) {
+        tex->numberOfInstances = 0;
+        return;
+    }
+    tex_free(tex);
+}
+
+/**
+ * Frees the sprites and textures held with no users. When the next scene
+ * loads, or when an allocation needs the room. Returns whether it freed any.
+ * Straight away, not through mempool_free's queue: nothing draws with them,
+ * and at a scene change the level's own frees already fill that queue.
+ */
+int pc_textures_release_held(void) {
+    s32 freed = FALSE;
+    s32 i, frame;
+
+    for (i = 0; i < gSpriteCacheCount; i++) {
+        Sprite *sprite = (Sprite *) gSpriteCache[ASSETCACHE_PTR(i)];
+
+        if (gSpriteCache[ASSETCACHE_ID(i)] != -1 && sprite->numberOfInstances <= 0) {
+            for (frame = 0; frame < sprite->numberOfTextures; frame++) {
+                TextureHeader *tex = sprite->textures[frame];
+
+                if (tex != NULL && tex->numberOfInstances > 0) {
+                    tex->numberOfInstances--;
+                }
+            }
+            mempool_free_addr((u8 *) sprite);
+            gSpriteCache[ASSETCACHE_ID(i)] = -1;
+            gSpriteCache[ASSETCACHE_PTR(i)] = -1;
+            freed = TRUE;
+        }
+    }
+    for (i = 0; i < gNumberOfLoadedTextures; i++) {
+        TextureHeader *tex = (TextureHeader *) gTextureCache[ASSETCACHE_PTR(i)];
+
+        if (gTextureCache[ASSETCACHE_ID(i)] != -1 && tex->numberOfInstances <= 0) {
+            mempool_free_addr((u8 *) tex);
+            gTextureCache[ASSETCACHE_ID(i)] = -1;
+            gTextureCache[ASSETCACHE_PTR(i)] = -1;
+            freed = TRUE;
+        }
+    }
+    return freed;
+}
+#endif
 
 /**
  * Set the colour tag that determines which memory pool textures will be loaded into.
@@ -1038,6 +1111,16 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
         }
     }
 
+#ifdef TARGET_DC
+    // Held sprites take slots: free them before the cache grows past its end.
+    if (cacheNum == -1 && gSpriteCacheCount >= MAX_NUM_SPRITES && pc_textures_release_held()) {
+        for (i = 0; i < gSpriteCacheCount; i++) {
+            if (gSpriteCache[ASSETCACHE_ID(i)] == -1) {
+                cacheNum = i;
+            }
+        }
+    }
+#endif
     if (cacheNum == -1) {
         cacheFull = TRUE;
         stubbed_printf("SRPBUF overflow!!\n");
@@ -1073,6 +1156,11 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
     allocSize += (s32) align16((u8 *) 0x10);
     allocSize += (s32) align16((u8 *) (spriteAsset->numberOfFrames * 4));
     sprite = (Sprite *) mempool_alloc(allocSize, COLOUR_TAG_MAGENTA);
+#ifdef TARGET_DC
+    if (sprite == NULL && pc_textures_release_held()) {
+        sprite = (Sprite *) mempool_alloc(allocSize, COLOUR_TAG_MAGENTA);
+    }
+#endif
     if (sprite == NULL) {
         if (cacheFull) {
             gSpriteCacheCount--;
@@ -1376,6 +1464,12 @@ void sprite_free(Sprite *sprite) {
 
     if (sprite != NULL) {
         sprite->numberOfInstances--;
+#ifdef TARGET_DC
+        if (sprite->numberOfInstances <= 0 && pc_scene_is_ready()) {
+            sprite->numberOfInstances = 0; // held, textures and all, until the scene ends
+            return;
+        }
+#endif
         if (sprite->numberOfInstances <= 0) {
             for (i = 0; i < gSpriteCacheCount; i++) {
                 if (sprite == (Sprite *) gSpriteCache[ASSETCACHE_PTR(i)]) {

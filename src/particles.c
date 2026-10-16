@@ -1,4 +1,11 @@
 #include "particles.h"
+
+#ifdef TARGET_DC
+// Held for the rest of the scene rather than freed (src/textures_sprites.c).
+#define PARTICLE_TEX_FREE tex_free_held
+#else
+#define PARTICLE_TEX_FREE tex_free
+#endif
 #include "asset_loading.h"
 #include "camera.h"
 #include "libc/math.h"
@@ -1969,7 +1976,7 @@ void particle_deallocate(Particle *particle) {
             if (gNumTriangleParticles > 0) {
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumTriangleParticles--;
                 particle->kind = PARTICLE_KIND_NONE;
@@ -1979,7 +1986,7 @@ void particle_deallocate(Particle *particle) {
             if (gNumRectangleParticles > 0) {
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumRectangleParticles--;
                 particle->kind = PARTICLE_KIND_NONE;
@@ -1989,7 +1996,7 @@ void particle_deallocate(Particle *particle) {
             if (gNumLineParticles > 0) {
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumLineParticles--;
                 particle->kind = PARTICLE_KIND_NONE;
@@ -2000,7 +2007,7 @@ void particle_deallocate(Particle *particle) {
                 delete_point_particle_from_sequence((PointParticle *) particle);
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumPointParticles--;
                 particle->kind = PARTICLE_KIND_NONE;

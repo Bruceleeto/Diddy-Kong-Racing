@@ -209,6 +209,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   scene's first logic step, which spawns its objects, counts as part of the
   load. In the attract demos no texture, model or sound is now read while a
   scene runs.
+- **Sprites and particle textures stay loaded for the scene.** Each time the
+  last particle or sprite of a kind went, the game freed its textures, and the
+  next spawn loaded and unpacked them again: in late frames of the title
+  scene, a quarter of the CPU time was spent in gzip, the memory pool and
+  `load_texture`. One whose last user lets go while the scene plays is now held
+  with no users and found again in the cache; the next scene's load frees what
+  is left, as does an allocation that needs the room. In the 120-second attract
+  run late frames fell from 46 to 37, and no frame is more than one field late
+  (the title scene had frames four fields long).
 
 ## Build
 
