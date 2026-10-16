@@ -969,6 +969,25 @@ static void compile_header(void) {
     compile_header_for(PVR_LIST_OP_POLY, &sHdr);
 }
 
+int gDcFadeOn;
+unsigned char gDcFadeLut[256];
+
+void gfx_set_fade(int keep) {
+    int c;
+
+    if (keep >= 255) {
+        gDcFadeOn = 0;
+        return;
+    }
+    if (keep < 0) {
+        keep = 0;
+    }
+    for (c = 0; c < 256; c++) {
+        gDcFadeLut[c] = (unsigned char) ((c * keep + 127) / 255);
+    }
+    gDcFadeOn = 1;
+}
+
 static inline unsigned int pack_argb(unsigned char a, unsigned char r, unsigned char g, unsigned char b) {
     return ((unsigned int) a << 24) | ((unsigned int) r << 16) | ((unsigned int) g << 8) | (unsigned int) b;
 }
@@ -1010,10 +1029,10 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
         if (dr < 0) dr = 0;
         if (dg < 0) dg = 0;
         if (db < 0) db = 0;
-        v->argb = pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db);
-        v->oargb = ((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b;
+        v->argb = gfx_fade_argb(pack_argb(sBlendColor[3], (unsigned char) dr, (unsigned char) dg, (unsigned char) db));
+        v->oargb = gfx_fade_argb(((unsigned int) s->r << 16) | ((unsigned int) s->g << 8) | (unsigned int) s->b);
     } else {
-        v->argb = pack_argb(s->a, s->r, s->g, s->b);
+        v->argb = gfx_fade_argb(pack_argb(s->a, s->r, s->g, s->b));
         v->oargb = 0;
     }
     ta_commit(v);
@@ -1770,6 +1789,8 @@ int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int coun
         *v = verts[i];
         v->x *= sScaleX;
         v->y *= sScaleY;
+        v->argb = gfx_fade_argb(v->argb);
+        v->oargb = gfx_fade_argb(v->oargb);
 #if DKR_FILL_PROF
         gfx_prof_fill_vert(v->x, v->y, verts[i].flags == PVR_CMD_VERTEX_EOL);
 #endif
@@ -1805,8 +1826,8 @@ int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int coun
         v->z = verts[i].z;
         v->u = verts[i].u;
         v->v = verts[i].v;
-        v->argb = verts[i].argb;
-        v->oargb = verts[i].oargb;
+        v->argb = gfx_fade_argb(verts[i].argb);
+        v->oargb = gfx_fade_argb(verts[i].oargb);
         pvr_dr_commit(v);
     }
     return 1;

@@ -101,6 +101,16 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   translucent list that frame, which would show through it. With FSAA the
   title beach's scene had 76-83 late frames, all in the iris-out at its end; it
   now has none there.
+- **Fades to black are drawn into the frame.** A full-screen fade was a
+  blended rect over every pixel, about 4.5 ms of PVR time a frame with FSAA.
+  The fade announces itself while the display list is built, and the port
+  draws everything before it with its colours scaled by what the fade leaves
+  of them, which is what blending black over them does, and leaves the rect
+  out. Each attract race opens with a 22-frame fade-in; with FSAA every one of
+  those frames was late. Frames the PVR alone made late fell from 35 to 14 in
+  race 18 and from 21 to 1 in race 28, and late frames in race 18 from 35 to
+  12-14 (two runs each, 120 s attract benchmark). The logo, swirl and title
+  scenes render about 1 ms faster on average. Fades to white still blend.
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.

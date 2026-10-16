@@ -142,6 +142,7 @@ static struct {
     u64 pvrNs, pvrMaxNs;
     u32 pvrFrames, pvrOver;
     s32 map; // gMapId while the scene ran
+    u32 fadeFrames; // frames drawn darkened for a fade (dreamcast/cover.h)
 #if DKR_PROF_SKIP == 999
     // PVR render time by what was left out (see sSkipCodes).
     u64 skipNs[32];
@@ -280,10 +281,10 @@ void pc_scene_prof_report(void) {
                (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
                (unsigned long) sScene.levelVtx);
         if (sScene.pvrFrames > 0) {
-            printf("SCENE PVR map %ld render avg %lu us max %lu us, %lu of %lu frames over 16.7 ms\n",
+            printf("SCENE PVR map %ld render avg %lu us max %lu us, %lu of %lu frames over 16.7 ms, %lu faded\n",
                    (long) sScene.map, (unsigned long) (sScene.pvrNs / sScene.pvrFrames / 1000u),
                    (unsigned long) (sScene.pvrMaxNs / 1000u), (unsigned long) sScene.pvrOver,
-                   (unsigned long) sScene.pvrFrames);
+                   (unsigned long) sScene.pvrFrames, (unsigned long) sScene.fadeFrames);
         }
         gfx_fill_report();
 #if DKR_PROF_SKIP == 999
@@ -790,6 +791,16 @@ static u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
 static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
+
+// A fade to black this frame (dreamcast/cover.h): its alpha as announced while
+// the display list was built, or -1; the frame's walk takes it.
+static s32 sFadeAnnounced = -1;
+static s32 sFadeAlpha = -1;
+static s32 sFadeSkipRect; // between the fade's tags: its rect is not drawn
+
+void pc_fade_announce(int alpha) {
+    sFadeAnnounced = alpha;
+}
 
 // Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
 // FogData system its fog-changer objects drive. gSPFogPosition packs a multiplier
@@ -2201,7 +2212,7 @@ static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u
     vt->z = (invw * sBlastZMul) + sBlastZAdd;
     vt->u = u;
     vt->v = v;
-    vt->argb = color;
+    vt->argb = gfx_fade_argb(color);
     vt->oargb = 0;
     if (sBlastRecord) {
         sBlastRecord++;
@@ -3080,6 +3091,9 @@ static void handle_fillrect(u32 w0, u32 w1) {
     u8 color[4];
     u8 unlit[3] = { 0, 0, 0 };
 
+    if (sFadeSkipRect) {
+        return;
+    }
     if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
         // Fill mode paints the fill colour flat, and its lower-right corner is
         // inclusive — one pixel further than the same rect in 1-cycle mode. The
@@ -3282,6 +3296,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     pc_swirl_draw();
                 } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
                     gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
+                } else if (w1 == PC_FADE_BEGIN_TAG) {
+                    // Everything before it is drawn darkened already; what comes
+                    // after it is drawn over the fade, as it is.
+                    sFadeSkipRect = sFadeAlpha > 0 && sFadeAlpha < 255;
+                    gfx_set_fade(255);
+                } else if (w1 == PC_FADE_END_TAG) {
+                    sFadeSkipRect = FALSE;
                 }
 #if DKR_GFX_PROFILE
                 if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
@@ -3699,6 +3720,14 @@ static void frame_walk(void *data) {
     sTileUlt = 0;
     sOtherModeL = 0;
     sGeometryMode = GFX_GEOMETRY_MODE_INIT;
+    // The fade the display list ends with, drawn into the frame (dreamcast/cover.h).
+    sFadeAlpha = sFadeAnnounced;
+    sFadeAnnounced = -1;
+    sFadeSkipRect = FALSE;
+    gfx_set_fade((sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255);
+#if DKR_GFX_PROFILE
+    sScene.fadeFrames += gDcFadeOn != 0;
+#endif
 
     // The list sets its own scissor and viewport before it draws anything
     // (src/rcp_dkr.c), but don't inherit last frame's rects until it does.

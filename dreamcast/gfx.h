@@ -91,6 +91,21 @@ int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int coun
 // The same in the opaque list, streamed as it comes (dreamcast/swirl.c).
 int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
 
+// Every colour drawn from here on scaled by keep / 255 (red, green, blue; not
+// alpha), for a fade to black drawn into the frame (dreamcast/cover.h). 255
+// draws colours as they are.
+void gfx_set_fade(int keep);
+extern int gDcFadeOn;
+extern unsigned char gDcFadeLut[256];
+
+static inline unsigned int gfx_fade_argb(unsigned int c) {
+    if (!gDcFadeOn) {
+        return c;
+    }
+    return (c & 0xFF000000u) | ((unsigned int) gDcFadeLut[(c >> 16) & 0xFF] << 16) |
+           ((unsigned int) gDcFadeLut[(c >> 8) & 0xFF] << 8) | gDcFadeLut[c & 0xFF];
+}
+
 // While set, opaque untextured 2D batches are a cover over the whole scene,
 // drawn in the opaque list; see gfx.c. The display list sets it (PC_COVER_*).
 void gfx_set_cover(int enable);
