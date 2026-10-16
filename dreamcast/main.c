@@ -114,7 +114,7 @@ static struct {
     u32 pvrBytes, ptWords, trWords;
     u64 tBlast, tFallback, tVtx, tPoly, tRect, tMtx;
     u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
-} sProf;
+} sProf DKR_HOT; // touched by every batch in a profile build, so with the hot state
 #define PROF_ADD(field, n) (sProf.field += (n))
 
 // ---------------------------------------------------------------------------
@@ -141,7 +141,7 @@ static struct {
     // instruction-cache misses, each counted on every other frame.
     u64 walkStall[2];
     u32 texLookups, texScans; // texture_lookup calls, and those that fell through to the linear scan
-} sScene;
+} sScene DKR_HOT;
 static u32 sProfWalkSp; // where the walk's stack is, for the cache layout
 static const float (*sLevelCullMatrix)[4];
 
@@ -152,8 +152,8 @@ static struct {
     u32 w0, w1, cyc, prim, env, verts;
 } sSlowCc[PROF_SLOW_CC];
 
-static void prof_slow_cc(u32 verts);
-static u32 sCcClassified, sCcProbed; // combiner_classify calls, and those that ran the probes
+static __attribute__((noinline)) void prof_slow_cc(u32 verts);
+static DKR_HOT u32 sCcClassified, sCcProbed; // combiner_classify calls, and those that ran the probes
 
 // What the display-list walk spends on racers (PC_PROF_CAT_RACERS), by
 // handler: the timers need GFX_PROFILE=2, the counts work at 1 too.
@@ -167,7 +167,7 @@ static struct { RACER_PROF_FIELDS(RACER_PROF_DECLARE) } sRacerProf, sRacerStart;
 #define RACER_PROF_SNAP(f) sRacerStart.f = sProf.f;
 #define RACER_PROF_ADD(f) sRacerProf.f += sProf.f - sRacerStart.f;
 #define RACER_PROF_PRINT(f) printf(" %s=%llu", #f, (unsigned long long) (sRacerProf.f / n));
-static s32 sCatCur;
+static DKR_HOT s32 sCatCur;
 static u64 sCatStart;
 static u32 sCatTrisStart;
 static u32 sSceneVbl; // vblank count at the previous frame's start; 0 after a load
@@ -269,7 +269,7 @@ void pc_scene_prof_report(void) {
 void pc_prof_add(int part, unsigned long long ns) {
     sProf.part[part] += ns;
 }
-static s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
+static DKR_HOT s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
 // Time of one handler call. A fallback is inside tBlast as well. These read
 // the clock a few hundred times a frame, which costs a millisecond or two, so
 // they need GFX_PROFILE=2; the frame totals stay honest at 1 and 3.
@@ -303,8 +303,8 @@ static struct {
     u32 tris;
 } sProfBlend[PROF_BLEND_KINDS];
 
-static void prof_blend(u32 modeL, u32 cc0, u32 cc1, s32 texKind, s32 vtxAlphaFull, s32 outAlphaFull, s32 fog,
-                       s32 primA, s32 envA, s32 tris) {
+static __attribute__((noinline)) void prof_blend(u32 modeL, u32 cc0, u32 cc1, s32 texKind, s32 vtxAlphaFull,
+                                                 s32 outAlphaFull, s32 fog, s32 primA, s32 envA, s32 tris) {
     s32 i;
 
     for (i = 0; i < PROF_BLEND_KINDS; i++) {
@@ -659,22 +659,27 @@ typedef struct {
 // inside-out (outer surfaces gone, inner ones visible).
 #define GFX_FRONT_FACE_SIGN (-1.0f)
 
-static u32 sGfxFrameCount = 0;
+static DKR_HOT u32 sGfxFrameCount = 0;
 
-alignas(32) static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
-static s32 sCurMatrix = 0;
-static s32 sBillboard = FALSE;
+// Aligns the hot data section (DKR_HOT) to the operand cache's size, so its
+// lines land on the same cache sets whatever else grows or shrinks, and an A/B
+// of an unrelated change does not move them onto something else.
+static DKR_HOT __attribute__((used, aligned(16384))) u32 sHotDataAnchor;
+
+alignas(32) static DKR_HOT f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
+static DKR_HOT s32 sCurMatrix = 0;
+static DKR_HOT s32 sBillboard = FALSE;
 
 _Static_assert(sizeof(GfxTriVert) == 32, "GfxTriVert must be exactly one SH4 cache line");
 _Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields must fit one cache line");
 
 static GfxVertex sVerts[GFX_MAX_VERTS];
-static s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
+static DKR_HOT s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
 
-static f32 sVpScaleX = N64_SCREEN_W / 2.0f;
-static f32 sVpScaleY = N64_SCREEN_H / 2.0f;
-static f32 sVpTransX = N64_SCREEN_W / 2.0f;
-static f32 sVpTransY = N64_SCREEN_H / 2.0f;
+static DKR_HOT f32 sVpScaleX = N64_SCREEN_W / 2.0f;
+static DKR_HOT f32 sVpScaleY = N64_SCREEN_H / 2.0f;
+static DKR_HOT f32 sVpTransX = N64_SCREEN_W / 2.0f;
+static DKR_HOT f32 sVpTransY = N64_SCREEN_H / 2.0f;
 
 // ---------------------------------------------------------------------------
 // What gets clipped away, in screen pixels, x1/y1 exclusive.
@@ -705,41 +710,41 @@ static void apply_clip_rect(void) {
 }
 
 static GfxTriVert sTriVerts[GFX_MAX_TRI_VERTS];
-static s32 sTriVertCount = 0;
+static DKR_HOT s32 sTriVertCount = 0;
 
-static u32 sTimgAddr = 0;  // G_SETTIMG — wherever the DL last pointed
-static u32 sTexAddr = 0;   // the image a G_LOADBLOCK/G_LOADTILE actually loaded
-static s32 sTexSwapped = 0; // that load had dxt == 0 — see decode_texture()
-static u8 sTileFmt = 0;    // G_SETTILE — G_IM_FMT_*
-static u8 sTileSiz = 0;    //             G_IM_SIZ_*
-static u8 sTilePalette = 0;
-static u8 sTileCmS = 0; // the raw 2-bit clamp/mirror fields, not booleans
-static u8 sTileCmT = 0;
-static u16 sTileWidth = 0; // G_SETTILESIZE
-static u16 sTileHeight = 0;
-static u16 sTileUls = 0;   //               the tile's origin within the image
-static u16 sTileUlt = 0;
-static u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
+static DKR_HOT u32 sTimgAddr = 0;  // G_SETTIMG — wherever the DL last pointed
+static DKR_HOT u32 sTexAddr = 0;   // the image a G_LOADBLOCK/G_LOADTILE actually loaded
+static DKR_HOT s32 sTexSwapped = 0; // that load had dxt == 0 — see decode_texture()
+static DKR_HOT u8 sTileFmt = 0;    // G_SETTILE — G_IM_FMT_*
+static DKR_HOT u8 sTileSiz = 0;    //             G_IM_SIZ_*
+static DKR_HOT u8 sTilePalette = 0;
+static DKR_HOT u8 sTileCmS = 0; // the raw 2-bit clamp/mirror fields, not booleans
+static DKR_HOT u8 sTileCmT = 0;
+static DKR_HOT u16 sTileWidth = 0; // G_SETTILESIZE
+static DKR_HOT u16 sTileHeight = 0;
+static DKR_HOT u16 sTileUls = 0;   //               the tile's origin within the image
+static DKR_HOT u16 sTileUlt = 0;
+static DKR_HOT u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
 
 #define GFX_GEOMETRY_MODE_INIT (G_SHADE | G_SHADING_SMOOTH | G_ZBUFFER)
-static u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
+static DKR_HOT u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
 
-static u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
-static u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
-static u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
-static u32 sCombineW1 = 0;
-static u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
-static u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static DKR_HOT u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
+static DKR_HOT u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
+static DKR_HOT u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
+static DKR_HOT u32 sCombineW1 = 0;
+static DKR_HOT u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static DKR_HOT u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
-static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
+static DKR_HOT u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
 
 // Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
 // FogData system its fog-changer objects drive. gSPFogPosition packs a multiplier
 // and an offset into one G_MOVEWORD, and the RSP turns them into a per-vertex fade
 // factor; gDPSetFogColor is the colour that factor fades towards. 
-static u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
-static s16 sFogMul = 0;
-static s16 sFogOfs = 0;
+static DKR_HOT u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
+static DKR_HOT s16 sFogMul = 0;
+static DKR_HOT s16 sFogOfs = 0;
 
 #define GFX_MAX_TEXTURES 1024
 #define GFX_MAX_TEX_TEXELS (256 * 256)
@@ -756,7 +761,7 @@ typedef struct {
 } GfxTexture;
 
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
-static s32 sTexCacheCount = 0;
+static DKR_HOT s32 sTexCacheCount = 0;
 
 // Hash hint over the cache: hash(timg, tlut) -> sTexCache index + 1 (0 = no
 // hint). Purely an accelerator: every hint is verified against the full key
@@ -801,7 +806,7 @@ static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
 
-static s32 sTexStateDirty;
+static DKR_HOT s32 sTexStateDirty;
 
 // ---------------------------------------------------------------------------
 // Prebuilt textures
@@ -1299,7 +1304,7 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
  * the RSP consumes, so the PC build sees the same rounding and the same +-32768
  * saturation the console does and the N64 ROM stays a usable oracle.
  */
-static void mtx_to_float(const Mtx *m, f32 out[4][4]) {
+static DKR_HOT_CODE void mtx_to_float(const Mtx *m, f32 out[4][4]) {
 #ifdef GBI_FLOAT_MTX
     // Float matrix ABI: mtxf_to_mtx()/guMtxF2L() stored the 16 floats raw, so
     // read them back as-is. No fixed unpack, no /65536, no bit-shuffle.
@@ -1746,10 +1751,10 @@ static __attribute__((noinline, cold)) u32 texture_lookup_slow(const u8 *tlut, u
 // tile or loads an image. Consecutive batches mostly share a texture, and the
 // lookup is not free. A new frame starts dirty so that each texture's first use
 // in a frame goes through the lookup, which is what stamps it as recently used.
-static s32 sTexStateDirty = TRUE;
-static u32 sTexCurrent;
+static DKR_HOT s32 sTexStateDirty = TRUE;
+static DKR_HOT u32 sTexCurrent;
 
-static u32 texture_current(void) {
+static DKR_HOT_CODE u32 texture_current(void) {
     if (sTexStateDirty) {
         sTexCurrent = texture_lookup();
         sTexStateDirty = FALSE;
@@ -1771,9 +1776,9 @@ static u8 clamp_u8(f32 v);
 // How the current batch's combiner collapses, per channel; see
 // combiner_classify(). sCcFast means every channel is either passthrough or a
 // constant, so project() can skip the mux entirely.
-static u8 sCcPass[4];  // 1 = this channel is the shade, unchanged
-static u8 sCcConst[4]; // otherwise, the constant it always produces
-static s32 sCcFast;
+static DKR_HOT u8 sCcPass[4];  // 1 = this channel is the shade, unchanged
+static DKR_HOT u8 sCcConst[4]; // otherwise, the constant it always produces
+static DKR_HOT s32 sCcFast;
 
 /**
  * The geometric half: perspective divide, viewport map and fog. Depends only on
@@ -1838,7 +1843,7 @@ static void project_into(GfxVertex *v) {
 // sLitStamp[i] == sLitBatch; handle_polygon starts a new batch.
 static u32 sLitColor[GFX_MAX_VERTS];
 static u32 sLitStamp[GFX_MAX_VERTS];
-static u32 sLitBatch = 1;
+static DKR_HOT u32 sLitBatch = 1;
 
 static void project(const GfxVertex *v, GfxTriVert *out) {
     if (VERTEX_PROJECTED(v)) {
@@ -2001,13 +2006,13 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
 }
 
 
-static void apply_texture_filter(void) {
+static DKR_HOT_CODE void apply_texture_filter(void) {
     u32 filt = sOtherModeH & (3 << G_MDSFT_TEXTFILT);
 
     gfx_set_texture_filter(filt == G_TF_POINT);
 }
 
-static void apply_render_mode(void) {
+static DKR_HOT_CODE void apply_render_mode(void) {
     u32 alphaCompare = sOtherModeL & (3 << G_MDSFT_ALPHACOMPARE);
     s32 zEnabled = (sGeometryMode & G_ZBUFFER) != 0;
     f32 ref = 0.0f;
@@ -2151,8 +2156,9 @@ static void handle_polygon(u32 w0, u32 w1) {
 
 
 /** Render a blast batch through the emulated path, as the DL would have. */
-static void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
-                           const Triangle *tris, s32 numTris, s32 texEnabled) {
+static __attribute__((noinline)) void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2,
+                                                     s32 numVerts2, s32 matrix2, const Triangle *tris, s32 numTris,
+                                                     s32 texEnabled) {
     PROF_ADD(fallback, 1);
 #if DKR_GFX_PROFILE_SKIP == 3
     PROF_ADD(slowTris, numTris);
@@ -2175,12 +2181,12 @@ static void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *vert
 
 // N64-pixels -> framebuffer scale, from gfx_blast_begin. File-scope so the
 // cold clip path shares the hot loop's emit.
-static f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
+static DKR_HOT f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
 // Where a blended batch's vertices are recorded; NULL streams to the open list.
-static pvr_vertex_t *sBlastRecord;
+static DKR_HOT pvr_vertex_t *sBlastRecord;
 // Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
-static f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
+static DKR_HOT f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
 
 /**
  * Write one finished PVR vertex to `vt`, which is a store queue or a slot in a
@@ -2262,7 +2268,7 @@ static u32 blast_argb_lerp(u32 a, u32 b, f32 t) {
  * project the survivors and emit the fan. Only triangles that actually cross
  * the plane come here, so this is cold.
  */
-static __attribute__((cold)) void blast_clip_tri(const BlastClipVert *in, s32 cull) {
+static __attribute__((noinline)) void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     BlastClipVert poly[4];
     f32 px[4], py[4], iw[4];
     s32 n = 0;
@@ -2315,9 +2321,9 @@ static __attribute__((cold)) void blast_clip_tri(const BlastClipVert *in, s32 cu
     }
 }
 
-/** A blast triangle with a corner behind the near plane, to the clipper. Cold, so out of the hot loop. */
-static __attribute__((noinline, cold)) void blast_clip_corners(const Triangle *t, const shz_vec4_t *cp,
-                                                                const u32 *argb, f32 uMul, f32 vMul) {
+/** A blast triangle with a corner behind the near plane, to the clipper; out of line, off the hot loop. */
+static __attribute__((noinline)) void blast_clip_corners(const Triangle *t, const shz_vec4_t *cp, const u32 *argb,
+                                                         f32 uMul, f32 vMul) {
     BlastClipVert cv[3];
 
     cv[0].c = cp[t->vi0];
@@ -2336,7 +2342,7 @@ static __attribute__((noinline, cold)) void blast_clip_corners(const Triangle *t
 }
 
 #if DKR_GFX_PROFILE
-static void prof_slow_cc(u32 verts) {
+static __attribute__((noinline)) void prof_slow_cc(u32 verts) {
     u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
     u32 prim = (sPrimColor[0] << 24) | (sPrimColor[1] << 16) | (sPrimColor[2] << 8) | sPrimColor[3];
     u32 env = (sEnvColor[0] << 24) | (sEnvColor[1] << 16) | (sEnvColor[2] << 8) | sEnvColor[3];
@@ -2400,7 +2406,7 @@ static inline u32 blast_color(const Vertex *v, s32 ccFast, u32 keep, u32 konst) 
     return blast_color_mux(v);
 }
 
-static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
                          const Triangle *tris, s32 numTris, s32 texEnabled) {
     // Per vertex, what the emit loop writes out: the framebuffer position, the
     // depth and the colour. The clip-space position is kept for the triangles
@@ -2809,13 +2815,13 @@ enum {
     CC_SRC_ENV = 15,   // 4
     CC_SRC_COUNT = 19
 };
-static f32 sCcSrc[CC_SRC_COUNT];
+static DKR_HOT f32 sCcSrc[CC_SRC_COUNT];
 // [cycle][R, G, B, A][a, b, c, d slot]: where in sCcSrc each slot reads.
-static const f32 *sCcProg[2][4][4];
-static s32 sCcProgCycles;   // 1 or 2
+static DKR_HOT const f32 *sCcProg[2][4][4];
+static DKR_HOT s32 sCcProgCycles;   // 1 or 2
 // The state the program was compiled from, as combiner_classify keys it.
-static u32 sCcProgW0, sCcProgW1, sCcProgCyc, sCcProgPrim, sCcProgEnv;
-static s32 sCcProgValid;
+static DKR_HOT u32 sCcProgW0, sCcProgW1, sCcProgCyc, sCcProgPrim, sCcProgEnv;
+static DKR_HOT s32 sCcProgValid;
 
 /**
  * An RGB input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
@@ -3079,9 +3085,9 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
 // misclassified; it fails both tests and takes the slow path.
 // ---------------------------------------------------------------------------
 // The state the classification is valid for. Any change and it is recomputed.
-static u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
-static s32 sCcSigValid = FALSE;
-static u32 sCcCacheAt;
+static DKR_HOT u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
+static DKR_HOT s32 sCcSigValid = FALSE;
+static DKR_HOT u32 sCcCacheAt;
 
 // Materials alternate within a frame, so remember more than the last result.
 #define GFX_CC_CACHE 128
@@ -3250,7 +3256,7 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
  * menu image. `w2`/`w3` are the two G_RDPHALF words that follow the opcode and
  * carry the texture coordinates.
  */
-static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
+static __attribute__((noinline)) void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
     PROF_ADD(rects, 1);
     // Screen coordinates are 10.2 fixed point, texture coordinates S10.5, and
     // the per-pixel texture steps S5.10.
@@ -3295,7 +3301,7 @@ static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
 /**
  * G_FILLRECT — the letterbox bars, dialogue-box backgrounds and screen fades.
  */
-static void handle_fillrect(u32 w0, u32 w1) {
+static __attribute__((noinline)) void handle_fillrect(u32 w0, u32 w1) {
     f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
     f32 y0 = (w1 & 0xFFF) / 4.0f;
     f32 x1 = ((w0 >> 12) & 0xFFF) / 4.0f;
@@ -3324,20 +3330,90 @@ static void handle_fillrect(u32 w0, u32 w1) {
     draw_2d_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.0f, color, unlit, 0);
 }
 
+/** The port's own tags, which ride in G_NOOP: a few a frame, so out of the hot code. */
+static __attribute__((noinline)) void handle_tag(u32 w1) {
+    if (w1 == PC_SCRAWL_TAG) {
+        pc_scrawl_draw();
+    } else if (w1 == PC_SWIRL_TAG) {
+        pc_swirl_draw();
+    } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
+        gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
+    }
+#if DKR_GFX_PROFILE
+    if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
+        scene_category((s32) (w1 & 0xFF));
+    }
+#endif
+}
+
+/** gSPViewport: the viewport map, and the rectangle it confines drawing to. */
+static __attribute__((noinline, cold)) void set_viewport(const Vp *vp) {
+    f32 halfW, halfH;
+
+    sVpScaleX = vp->vp.vscale[0] / 4.0f;
+    sVpScaleY = vp->vp.vscale[1] / 4.0f;
+    sVpTransX = vp->vp.vtrans[0] / 4.0f;
+    sVpTransY = vp->vp.vtrans[1] / 4.0f;
+
+    // The rectangle NDC +-1 maps onto. The scale carries a sign (y is commonly
+    // negative, since screen y runs the other way from clip y), so take it off
+    // before using it as a half-size.
+    halfW = (sVpScaleX < 0.0f) ? -sVpScaleX : sVpScaleX;
+    halfH = (sVpScaleY < 0.0f) ? -sVpScaleY : sVpScaleY;
+    sVpClipX0 = sVpTransX - halfW;
+    sVpClipX1 = sVpTransX + halfW;
+    sVpClipY0 = sVpTransY - halfH;
+    sVpClipY1 = sVpTransY + halfH;
+    apply_clip_rect();
+}
+
+#if DKR_GFX_PROFILE
+/** Profile only: level vertex loads, and those not drawn with the cull matrix. */
+static __attribute__((noinline)) void prof_level_vtx(void) {
+    if ((sCatCur == PC_PROF_CAT_LEVEL || sCatCur == PC_PROF_CAT_LEVEL_TR) && sLevelCullMatrix != NULL) {
+        sScene.levelVtx++;
+        if (memcmp(sMatrices[sCurMatrix], sLevelCullMatrix, sizeof(sMatrices[0])) != 0) {
+            sScene.levelVtxOtherMatrix++;
+        }
+    }
+}
+
+/** Profile only: why an unfused G_TRIN's vertices were not drawn by the blast path. */
+static __attribute__((noinline)) void prof_trin_why(u32 w0) {
+    u32 n = (((w0 >> 16) & 0xFF) >> 4) + 1;
+
+    if (sProfVtxWhy == 1) {
+        sProf.whyAppend += n;
+    } else if (sProfVtxWhy == 2) {
+        sProf.whyBillboard += n;
+    } else if (sProfVtxWhy == 3) {
+        sProf.whyShared += n;
+    } else {
+        sProf.whyLoose += n;
+    }
+}
+#endif
+
 /**
  * Interpret one display list. A `count` above zero means "at most this many
  * commands" — the task's own display list is bounded by its length rather than
  * a G_ENDDL, and G_DMADL likewise DMAs a fixed-size block. Zero means "run
  * until G_ENDDL", which is how nested G_DL lists terminate.
  */
-static void run_dl(const Gfx *dl, s32 count, s32 depth) {
+static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
     s32 i;
 
     if (dl == NULL || depth > GFX_MAX_DEPTH) {
         return;
     }
+    // One bound for both kinds of list, rather than testing count == 0 in the
+    // loop: -O3 unswitches on that test, which is a second copy of the whole
+    // interpreter for the instruction cache to hold.
+    if (count == 0) {
+        count = 0x7FFFFFFF;
+    }
 
-    for (i = 0; count == 0 || i < count; i++) {
+    for (i = 0; i < count; i++) {
         u32 w0, w1, cmd;
 
         // The game builds the frame's list in memory far larger than the
@@ -3384,35 +3460,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // 320x240 default, which looks right full-screen and falls apart
                 // the moment the game asks for a smaller one.
                 if (((w0 >> 16) & 0xFF) == G_MV_VIEWPORT && w1 != 0) {
-                    const Vp *vp = (const Vp *) w1;
-                    f32 halfW, halfH;
-
-                    sVpScaleX = vp->vp.vscale[0] / 4.0f;
-                    sVpScaleY = vp->vp.vscale[1] / 4.0f;
-                    sVpTransX = vp->vp.vtrans[0] / 4.0f;
-                    sVpTransY = vp->vp.vtrans[1] / 4.0f;
-
-                    // The rectangle NDC +-1 maps onto. The scale carries a sign
-                    // (y is commonly negative, since screen y runs the other way
-                    // from clip y), so take it off before using it as a half-size.
-                    halfW = (sVpScaleX < 0.0f) ? -sVpScaleX : sVpScaleX;
-                    halfH = (sVpScaleY < 0.0f) ? -sVpScaleY : sVpScaleY;
-                    sVpClipX0 = sVpTransX - halfW;
-                    sVpClipX1 = sVpTransX + halfW;
-                    sVpClipY0 = sVpTransY - halfH;
-                    sVpClipY1 = sVpTransY + halfH;
-                    apply_clip_rect();
+                    set_viewport((const Vp *) w1);
                 }
                 break;
             }
             case G_VTX: {
 #if DKR_GFX_PROFILE
-                if ((sCatCur == PC_PROF_CAT_LEVEL || sCatCur == PC_PROF_CAT_LEVEL_TR) && sLevelCullMatrix != NULL) {
-                    sScene.levelVtx++;
-                    if (memcmp(sMatrices[sCurMatrix], sLevelCullMatrix, sizeof(sMatrices[0])) != 0) {
-                        sScene.levelVtxOtherMatrix++;
-                    }
-                }
+                prof_level_vtx();
 #endif
                 // Peephole: a G_VTX immediately followed by the one G_TRIN that
                 // consumes it is the common object/model batch shape, and the
@@ -3438,7 +3492,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 u32 params = (w0 >> 16) & 0xFF;
 
                 if (!(params & G_VTX_APPEND) && !sBillboard) {
-#define DL_HAS(k) (count == 0 || i + (k) < count)
+#define DL_HAS(k) (i + (k) < count)
 #define DL_OP(k) ((dl[i + (k)].words.w0 >> 24) & 0xFF)
 #define DL_SELECT(k) (DL_OP(k) == (u8) G_MOVEWORD && (dl[i + (k)].words.w0 & 0xFF) == G_MW_MVPMATRIX)
 #define DL_LAST_TRIN(k) (DL_OP(k) == G_TRIN && !(DL_HAS((k) + 1) && DL_OP((k) + 1) == G_TRIN))
@@ -3490,13 +3544,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             }
             case G_TRIN:
 #if DKR_GFX_PROFILE
-                {
-                    u32 n = (((w0 >> 16) & 0xFF) >> 4) + 1;
-                    if (sProfVtxWhy == 1) sProf.whyAppend += n;
-                    else if (sProfVtxWhy == 2) sProf.whyBillboard += n;
-                    else if (sProfVtxWhy == 3) sProf.whyShared += n;
-                    else sProf.whyLoose += n;
-                }
+                prof_trin_why(w0);
 #endif
                 PROF_TIME(tPoly, handle_polygon(w0, w1));
                 break;
@@ -3507,18 +3555,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 }
                 break;
             case (u8) G_NOOP:
-                if (w1 == PC_SCRAWL_TAG) {
-                    pc_scrawl_draw();
-                } else if (w1 == PC_SWIRL_TAG) {
-                    pc_swirl_draw();
-                } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
-                    gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
-                }
-#if DKR_GFX_PROFILE
-                if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
-                    scene_category((s32) (w1 & 0xFF));
-                }
-#endif
+                handle_tag(w1);
                 break;
             case G_DMADL:
                 run_dl((const Gfx *) w1, (w0 >> 16) & 0xFF, depth + 1);
@@ -3609,7 +3646,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // A texture rectangle is three display-list words: the opcode,
                 // then G_RDPHALF_1 and G_RDPHALF_2 carrying the texture
                 // coordinates. Skip past them so they are not run as commands.
-                if (count != 0 && i + 2 >= count) {
+                if (i + 2 >= count) {
                     return; // truncated — the halves are not there to read
                 }
                 PROF_TIME(tRect, handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1,
@@ -3935,8 +3972,8 @@ static void frame_walk(void *data) {
         // The second performance counter (the first is KOS's clock) counts the
         // cycles the pipeline waits on cache misses, during the walk only:
         // operand-cache and instruction-cache misses take turns, a frame each.
-        // Starting it clears it.
         sProfWalkSp = (u32) __builtin_frame_address(0);
+        // Starting it clears it.
         sProfStallKind ^= 1;
         perf_cntr_start(PRFC1, sProfStallKind ? PMCR_PIPELINE_FREEZE_BY_ICACHE_MISS_MODE :
                                                 PMCR_PIPELINE_FREEZE_BY_DCACHE_MISS_MODE, PMCR_COUNT_CPU_CYCLES);

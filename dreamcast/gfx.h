@@ -1,6 +1,29 @@
 #ifndef LINUX_GFX_H
 #define LINUX_GFX_H
 
+// The state every batch reads, in the display-list walk (main.c) and here, is
+// some sixty small variables. Left to the linker they land in as many cache
+// lines, scattered among the big tables, and the operand cache is small and
+// direct-mapped: the vertex and recording traffic of a batch evicts them, and
+// the next batch misses on each one again. Marked with this they share one
+// section, a handful of lines.
+#define DKR_HOT __attribute__((section(".data.dkr_hot")))
+// The same for the code a batch runs through. The instruction cache is 8 KB
+// and direct-mapped too, and the walk's handlers, left where the linker puts
+// them, overlapped in it: batch after batch they evicted each other, and any
+// unrelated change that moved them made the frame faster or slower. KOS's
+// linker script gives .sub0 an address aligned to the cache size and fails
+// the link if it outgrows one cache's worth, so the hot handlers sit at a fixed
+// place in the cache and never on top of each other. Their cold paths are
+// split out of them to keep it that way.
+#if defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE == 2
+// The per-handler timers do not fit in one cache's worth; they disturb the
+// timing anyway. Kept together all the same.
+#define DKR_HOT_CODE __attribute__((section(".text.dkr_hot")))
+#else
+#define DKR_HOT_CODE __attribute__((section(".sub0.dkr_hot")))
+#endif
+
 // Host graphics layer (linux/gfx.c) — SDL2 + OpenGL.
 //
 // Its own translation unit, plain C types only: SDL's headers pull in the
