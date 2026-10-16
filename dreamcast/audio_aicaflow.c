@@ -174,6 +174,8 @@ alignas(32) static const unsigned char firmware[] = {
 #define DKR_JINGLE_BANK_PATH DKR_ASSET_MOUNT "/build/dc/aicaflow/jingles.afb"
 #define DKR_JINGLE_CONTROL_DIR DKR_ASSET_MOUNT "/build/dc/aicaflow/jingle_controls"
 #define DKR_SONG_DIR DKR_ASSET_MOUNT "/build/dc/aicaflow/music_raw"
+#define DKR_CHIME_BANK_PATH DKR_ASSET_MOUNT "/build/dc/aicaflow/chime/chime.afb"
+#define DKR_CHIME_FLOW_PATH DKR_ASSET_MOUNT "/build/dc/aicaflow/chime/chime.afx"
 #define DKR_SEQUENCE_COUNT 66
 
 /* Planned loads run with the game audio mutex held and no fallback load in
@@ -294,6 +296,16 @@ static volatile uint8_t sFade[16] = {
     127, 127, 127, 127, 127, 127, 127, 127,
     127, 127, 127, 127, 127, 127, 127, 127
 };
+/* The chime when the Dreamcast swirl appears (dreamcast/swirl.c): its takes
+ * and their flow (dreamcast/swirl/make_chime.py), when the build has one
+ * (DKR_AFX_CHIME), resident only while the boot screen is, after its packs and
+ * before its song. The swirl asks for
+ * it from the game thread, holding no lock; the audio thread starts it once
+ * the scene gate is open. */
+static afx_bank_t sChimeBank;
+static afx_asset_t sChimeFlow;
+static afx_instance_t sChime;
+static volatile uint8_t sChimeWanted;
 
 #if DKR_AICAFLOW_BENCHMARK
 /* Follows one raw sound from trigger to completion: AICAFLOW_TRACE_SOUND=<id>. */
@@ -384,6 +396,7 @@ static void take_ended(void) {
         for (i = 0; i < DKR_SFX_SLOTS; ++i)
             if (sSfxSlots[i].instance == instance) sfx_ended(&sSfxSlots[i], status);
         if (sMusic && sMusic == instance) music_ended(status);
+        if (sChime && sChime == instance) sChime = 0;
     }
     __atomic_store_n(&sEndedTail, tail, __ATOMIC_RELEASE);
 }
@@ -613,6 +626,56 @@ static int scene_packs_load_compacted(uint16_t level, const char *vehicle_path, 
     return result;
 }
 
+/* With the audio lock held: stops the chime, if it plays, and frees it. */
+static int chime_release(void) {
+    int result;
+    __atomic_store_n(&sChimeWanted, 0, __ATOMIC_RELEASE);
+    if (sChime) {
+        (void)DKR_AFX_RETRY(afx_instance_stop(sChime)); /* stale once it has ended */
+        sChime = 0; /* its flow is freed below only once the driver has let it go */
+    }
+    if (sChimeFlow && (result = DKR_AFX_RETRY(afx_asset_free(sChimeFlow)))) return result;
+    sChimeFlow = AFX_ASSET_INVALID;
+    if (sChimeBank.asset && (result = DKR_AFX_RETRY(afx_bank_release(&sChimeBank)))) return result;
+    sChimeBank = (afx_bank_t){0};
+    return AFX_OK;
+}
+
+/* With the audio lock held, after the scene's packs: makes the chime
+ * resident. The build charges it to the boot screen's plan. */
+static int chime_load(void) {
+    uint8_t *data;
+    uint32_t bytes;
+    int result;
+    if (sChimeFlow) return AFX_OK;
+    uint64_t started = timer_us_gettime64();
+    result = DKR_AFX_RETRY(afx_bank_load_file(&sChimeBank, DKR_CHIME_BANK_PATH));
+    dkr_afx_load_ns += (timer_us_gettime64() - started) * 1000u;
+    benchmark_bank_load(started, result ? 0 : sChimeBank.bytes);
+    if (!result && !(result = read_asset(DKR_CHIME_FLOW_PATH, &data, &bytes))) {
+        result = DKR_AFX_RETRY(afx_bank_flow_upload(&sChimeBank, data, bytes, &sChimeFlow));
+        free(data);
+    }
+    if (result) (void)chime_release();
+    return result;
+}
+
+/* The audio thread, with the audio lock held: starts the chime asked for,
+ * once the scene is on screen. */
+static void chime_update(void) {
+    int result;
+    if (!__atomic_load_n(&sChimeWanted, __ATOMIC_ACQUIRE) || __atomic_load_n(&sSceneHeld, __ATOMIC_ACQUIRE))
+        return;
+    result = sChimeFlow && !sChime ? afx_instance_activate(sChimeFlow, &sChime) : -AFX_BAD_COMMAND;
+    if (result == -AFX_BUSY) return; /* the next update tries again */
+    __atomic_store_n(&sChimeWanted, 0, __ATOMIC_RELEASE);
+    if (result) sChime = 0;
+}
+
+void dkr_afx_chime_play(void) {
+    __atomic_store_n(&sChimeWanted, 1, __ATOMIC_RELEASE);
+}
+
 /* Loads everything the level's audio plan lists and returns only when it is
  * resident. The caller holds the game audio mutex and calls
  * dkr_afx_music_prepare() next, so the song is the last allocation. */
@@ -637,6 +700,7 @@ int dkr_afx_sfx_scene_prepare(uint16_t level) {
     result = voices_release_all();
     if (result) return result;
     sVoiceWantedCount = 0;
+    if (level != DKR_AFX_CHIME_LEVEL && (result = chime_release())) return result;
     if (sSceneSfx.bank.asset) {
         result = sfx_bank_release(&sSceneSfx);
         if (result) return result;
@@ -659,6 +723,9 @@ int dkr_afx_sfx_scene_prepare(uint16_t level) {
         printf("DKR AICAFLOW: level %u audio plan did not load (%d)\n", level, result);
         return result;
     }
+    /* Only a sound, not part of the level: the scene goes on without it. */
+    if (DKR_AFX_CHIME && level == DKR_AFX_CHIME_LEVEL && (result = chime_load()))
+        printf("DKR AICAFLOW: the swirl's chime did not load (%d)\n", result);
     sSceneLevel = level;
     benchmark_memory("level", level);
     return AFX_OK;
@@ -1310,6 +1377,7 @@ void dkr_afx_update(void) {
     apply_room_control();
     update_sfx();
     sndp_aicaflow_retry_pending();
+    chime_update();
     wanted = __atomic_load_n(&sWantedSequence, __ATOMIC_ACQUIRE);
 
     if (sMusic) {

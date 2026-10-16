@@ -28,6 +28,10 @@
 // Two touches: a glint, a narrow band of light that sweeps across the face
 // once each time it turns square on to the camera (after it has faded in),
 // and a soft halo behind it in its colour.
+// The first time it is drawn in each visit to the boot screen, it asks for its
+// chime (dreamcast/swirl/make_chime.py; none unless the build was given one),
+// which the sound code starts as the scene gate opens: with the first frame
+// that draws it, as the boot screen starts to fade in from black.
 #include <dc/flashrom.h>
 #include <dc/pvr.h>
 #include <stdlib.h>
@@ -40,7 +44,11 @@
 #include "camera.h"
 #include "math_util.h"
 #include "gfx.h"
+#include "scene_gate.h"
 #include "swirl.h"
+#ifdef DKR_AICAFLOW
+#include "audio_aicaflow.h"
+#endif
 
 #include <ultra64.h>
 
@@ -146,6 +154,7 @@ static int sGlintArmed;     // 1 once away from square on after fading in, -1 wh
 static int sGlints;         // glints since the model was loaded
 static u32 sGlintArgb;      // this frame's glint colour, 0 for none
 static float sGlintU[3];    // this frame's texture u: [0] + [1] x + [2] y
+static unsigned int sChimeVisit; // the scene visit the chime was asked for in
 
 extern void pc_project_points(const f32 *xyz, int stride, int count, f32 (*out)[3]);
 extern const f32 *pc_current_matrix(void);
@@ -426,6 +435,12 @@ int pc_swirl_render(Object *obj, ObjectModel *model, Gfx **dl, s32 opacity) {
     }
     light(obj, cam);
     sOpacity = opacity < 0 ? 0 : opacity > 255 ? 255 : opacity;
+    if (sChimeVisit != pc_scene_visit()) {
+        sChimeVisit = pc_scene_visit();
+#ifdef DKR_AICAFLOW
+        dkr_afx_chime_play();
+#endif
+    }
     gDPNoOpTag((*dl)++, PC_SWIRL_TAG);
     return 1;
 }
