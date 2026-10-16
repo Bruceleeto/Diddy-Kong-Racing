@@ -46,7 +46,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   one, each drawn with the coverage of two, and sprites that fill much of the
   screen fade out (`FSAA_PARTICLE_THIN`, `FSAA_PARTICLE_NEAR`). In a 5-minute
   attract run that cut late frames from 417 to 306 over the same seven scenes;
-  without FSAA there are 118.
+  without FSAA there are 118. With the fades, covers and display-list work
+  below, a run of all eight attract races back to back
+  (`DEMO_RACES_ONLY=1`, FSAA, 60 fps) had 170 late frames of about 17,000
+  (99.0% on time): one at each race's first frame, and the rest in fixed bursts
+  in the same places on every visit, mostly in Boulder Canyon (32), Ancient
+  Lake (36) and Whale Bay (40), where the PVR runs over.
+- **Options for recordings.** `SHOW_FPS=0` hides the frame rate in the corner;
+  `DEMO_RACES_ONLY=1` makes the attract loop show the title sequence once and
+  then only the demo races, round and round.
 - Measurement tools: a frame profile (`GFX_PROFILE=1`), per-handler timers
   (`=2`) and a sampling profiler (`=3`, writes `build/dc/prof_samples.bin`);
   `AUTO_EXIT_SECONDS`, `DEMO_LEVEL`, `SKIP_WATER`, `SKIP_PARTICLES`, `TEX_TRACE`; and a debug view
@@ -72,6 +80,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - The scene report gives the display-list walk's cache stalls a frame,
   operand and instruction cache apart (the SH4's second performance counter),
   texture lookups and scans a frame, and where the walk's stack is.
+- The scene report says how much of the heap each scene left in use
+  (`SCENE HEAP`): the attract run peaks at 1.9 MB, with about 10 MB above code
+  and data.
 
 ### Changed
 
@@ -240,6 +251,13 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   colour taken a little towards white: a glow round the edges and between
   the arms. With the glint it costs the SH4 under half a millisecond in a
   frame with the swirl, and the boot screen still holds 60.
+- **The halo no longer shows as a flat sheet.** A second square stands across
+  the first, through the swirl's vertical axis, with the swirl's outline seen
+  from the side, blurred the same way. Each is weighted by the cosine squared
+  of its angle to the eye, so they cross-fade, neither is seen edge on, and
+  together they never light the sky more than one would. `HALO_CROSS=0` keeps
+  the single halo, which then fades out over its last degrees before edge on
+  (82 to 88 degrees from square on).
 - **A chime as the swirl appears, from the builder's own copy.** Given the
   recording, the boot screen plays it once each time it shows the swirl. The
   repository holds no sound: like the ROM, the chime is read at build time from
@@ -364,5 +382,7 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   byte, as the development tree.
 - `Makefile.dc` fetches AICAforge, which AICAflow pins with `update = none`,
   so a recursive clone no longer stops at the missing sound tools.
+- AICAflow's submodule is cloned over https; its SSH URL needed a GitHub key.
+  The README gives the 60 fps FSAA build line and the recording options.
 - The disc build starts its audio folder afresh, so files from older builds do
   not stay on the disc.
