@@ -219,6 +219,38 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   projects each distinct vertex once and streams 184 triangle strips into the
   opaque list, instead of the game drawing 1828 triangles through 115 N64
   batches, which had cut the boot screen to 40 fps. It holds 60.
+- **A glint crosses the swirl.** Each time the swirl turns square on to the
+  camera, once it has faded in, a narrow band of warm light sweeps across its
+  face, leaning, like light catching lacquer: it lies where the eye is, as
+  the reflection of a light by the camera would, stretched so it takes the
+  turn from 40 degrees one side to 40 the other, and is brightest square on.
+  The band is a small texture the PVR lays across the strips in the same
+  pass, with the lit colour added as the offset colour, so it costs no more
+  geometry. The eye comes from the matrix the swirl is drawn with.
+- **A soft halo behind the swirl.** `make_swirl.py` fills the swirl's
+  outline and blurs it (two Gaussians, a close and a wide one) into a
+  128x128 texture; the port lays it on a square in the swirl's own plane,
+  so it turns with it, just behind it, and adds it to the sky in the swirl's
+  colour taken a little towards white: a glow round the edges and between
+  the arms. With the glint it costs the SH4 under half a millisecond in a
+  frame with the swirl, and the boot screen still holds 60.
+- **A chime as the swirl appears, from the builder's own copy.** Given the
+  recording, the boot screen plays it once each time it shows the swirl. The
+  repository holds no sound: like the ROM, the chime is read at build time from
+  WAV files named by `SWIRL_CHIME_LEFT` (and `SWIRL_CHIME_RIGHT`), each with the
+  chime in one channel; without them there is no chime and nothing plays.
+  `dreamcast/swirl/make_chime.py` takes each take to mono, cuts its leading
+  silence and stores it as PCM16 with a one-note-a-take AICAflow flow
+  (`afx_compile`). `SWIRL_CHIME_MODE=centred` (the default) plays the left
+  take alone in the middle (53 KB of AICA RAM); `ringring` plays it on the
+  left and the right take on the right 0.15 s later, as rings alternate in
+  Sonic (`afx_profile` pans each note; 109 KB). It is loaded with the boot
+  screen's sounds, after its packs and before its song, charged to that scene
+  in the AICA RAM budget, and freed when the scene ends. The swirl asks for it
+  the first time it is drawn; the sound code starts it as the scene gate opens,
+  with the first frame, as the screen fades in from black with the intro
+  music. The note's velocity sets its level in the AICA (13.5 dB below full
+  scale), so the sample keeps its full resolution.
 - **"Nintendon't".** On the title screen's beach, "n't" is scratched into the
   sand right after the Nintendo logo, at its letter size, as if drawn with a
   finger. It is the game's one bump-mapped surface: `dreamcast/scrawl/make_scrawl.py`

@@ -27,6 +27,7 @@ static volatile int sAwaitingStep;  // loaded, but its first logic step has not 
 static volatile int sAwaitingFrame; // stepped, but its first frame is not on screen yet
 static int sOpeningFrame;            // the frame that opened the gate, until the profile asks
 static int sSceneLevel = -1;
+static unsigned int sSceneVisit;
 static unsigned long long sLoadStarted;
 
 void pc_scene_loading(int level) {
@@ -45,6 +46,7 @@ void pc_scene_loading(int level) {
     sAwaitingStep = sAwaitingFrame = 0;
     sLoadStarted = timer_ms_gettime64();
     sSceneLevel = level;
+    sSceneVisit++;
     // The previous scene's held models, sprites and textures go first, so the
     // new level has the room.
     pc_textures_release_held();
@@ -107,6 +109,10 @@ int pc_scene_take_opening_frame(void) {
 
 int pc_scene_level(void) {
     return sSceneLevel;
+}
+
+unsigned int pc_scene_visit(void) {
+    return sSceneVisit;
 }
 
 int pc_scene_is_ready(void) {

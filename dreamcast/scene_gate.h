@@ -27,6 +27,10 @@ int pc_scene_is_ready(void);
 // The level of the scene loading or playing; -1 before the first one.
 int pc_scene_level(void);
 
+// A number that changes each time a scene starts loading, even the same level
+// again: for what happens once each time a scene is shown.
+unsigned int pc_scene_visit(void);
+
 // Whether the frame just drawn opened the gate, once: its time is the load's.
 int pc_scene_take_opening_frame(void);
 

@@ -1475,6 +1475,11 @@ void pc_project_points(const f32 *xyz, int stride, int count, f32 (*out)[3]) {
     }
 }
 
+/** For dreamcast/swirl.c: the current matrix, model to clip, column-major. */
+const f32 *pc_current_matrix(void) {
+    return &sMatrices[sCurMatrix][0][0];
+}
+
 static void handle_vertex(u32 w0, u32 w1) {
     const Vertex *src = (const Vertex *) w1;
     u32 params = (w0 >> 16) & 0xFF;

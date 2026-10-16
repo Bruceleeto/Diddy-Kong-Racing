@@ -3,7 +3,9 @@
 
 Permanent assets (core SFX, jingles, DSP ring) load once. Every level then
 loads its vehicle pack, its scene pack and one song. The plan charges each
-scene the largest song, so any music change inside a level also fits.
+scene the largest song, so any music change inside a level also fits. The boot
+screen also loads the chime that sounds when the Dreamcast swirl appears, when
+the build has one (--chime).
 """
 import argparse
 import json
@@ -27,7 +29,7 @@ def pack_bytes(bank, controls, names):
     return aica_bytes(bank.read_bytes(), {name: (controls / name).read_bytes() for name in names})
 
 
-def plan(output, firmware, sequences, jingles):
+def plan(output, firmware, sequences, jingles, chime):
     manifest = json.loads((output / "manifest.json").read_text())
     core = pack_bytes(output / "core.afb", output / "core", [f"{sound}.afx" for sound in manifest["core"]])
     vehicle = pack_bytes(output / "vehicle.afb", output / "vehicle",
@@ -40,11 +42,17 @@ def plan(output, firmware, sequences, jingles):
     song = max(songs.values())
     levels = [(vehicle if mask else 0) + scene + song
               for mask, scene in zip(manifest["vehicle_masks"], manifest["scene_bytes"])]
+    chime_level, chime_dir = chime
+    chime_bank, chime_flow = chime_dir / "chime.afb", chime_dir / "chime.afx"
+    chime_bytes = (aica_bytes(chime_bank.read_bytes(), {chime_flow.name: chime_flow.read_bytes()})
+                   if chime_bank.is_file() else 0)
+    levels[chime_level] += chime_bytes
     return {
         "arena": arena_bytes(firmware.read_bytes()),
         "permanent": core + jingle + DSP_RING_BYTES,
         "core": core, "jingles": jingle, "dsp_ring": DSP_RING_BYTES, "vehicle": vehicle,
         "song_max": song, "song_max_sequence": max(songs, key=songs.get),
+        "chime_level": chime_level, "chime": chime_bytes,
         "levels": levels,
         # Not charged to a level: voice packs take what a level leaves.
         "voices": manifest["voice_bytes"],
@@ -66,6 +74,9 @@ def write_header(path, budget, jingles):
                     f"#define DKR_AFX_SONG_MAX_BYTES {budget['song_max']}u\n"
                     "/* Largest vehicle + scene + song any level loads. */\n"
                     f"#define DKR_AFX_LEVEL_MAX_BYTES {max(budget['levels'])}u\n"
+                    "/* The scene that loads the swirl's chime (the boot screen), and whether there is one. */\n"
+                    f"#define DKR_AFX_CHIME_LEVEL {budget['chime_level']}u\n"
+                    f"#define DKR_AFX_CHIME {int(budget['chime'] > 0)}\n"
                     "#endif\n")
 
 
@@ -75,18 +86,25 @@ def main():
     parser.add_argument("firmware", type=Path)
     parser.add_argument("--sequences", type=int, nargs="+", required=True)
     parser.add_argument("--jingles", type=int, nargs="+", required=True)
+    parser.add_argument("--chime", nargs=2, required=True, metavar=("LEVEL", "DIR"),
+                        help="the scene that loads the swirl's chime, and the directory of its "
+                             "chime.afb and chime.afx (none there: no chime)")
     args = parser.parse_args()
     output = args.output.resolve()
     jingles = sorted(set(args.jingles))
     if not set(jingles) <= set(args.sequences):
         raise SystemExit("jingles must be music sequences")
-    budget = plan(output, args.firmware, args.sequences, jingles)
+    chime = (int(args.chime[0]), Path(args.chime[1]))
+    budget = plan(output, args.firmware, args.sequences, jingles, chime)
     free = budget["arena"] - budget["permanent"]
     over = [(level, need) for level, need in enumerate(budget["levels"]) if need > free]
     (output / "budget.json").write_text(json.dumps(budget, indent=2) + "\n")
     print(f"DKR AICAFLOW budget: arena {budget['arena']}, permanent {budget['permanent']} "
           f"(core {budget['core']}, jingles {budget['jingles']}, DSP {budget['dsp_ring']}), "
           f"{free} per level")
+    if budget["chime"]:
+        print(f"DKR AICAFLOW budget: the swirl's chime adds {budget['chime']} to scene {budget['chime_level']}, "
+              f"which then needs {budget['levels'][budget['chime_level']]}")
     tight = max(range(len(budget["levels"])), key=budget["levels"].__getitem__)
     print(f"DKR AICAFLOW budget: tightest scene {tight} needs {budget['levels'][tight]} "
           f"with sequence {budget['song_max_sequence']} ({budget['song_max']}), "
