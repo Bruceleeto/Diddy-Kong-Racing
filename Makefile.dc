@@ -190,15 +190,17 @@ $(BUILD)/dreamcast/swirl.o: $(SWIRL_MODEL)
 # the builder keeps it, a 44.1 kHz 16-bit WAV with the chime in one channel:
 #   SWIRL_CHIME_LEFT   the take played alone, or first and on the left
 #   SWIRL_CHIME_RIGHT  the take played second, on the right (ringring only)
-#   SWIRL_CHIME_MODE   centred (default): the left take alone, in the middle;
-#                      ringring: the left take, then the right one 0.15 s later
+#   SWIRL_CHIME_MODE   ringring (default): the left take, then the right one
+#                      0.15 s later, as rings alternate in Sonic (the left take
+#                      alone without SWIRL_CHIME_RIGHT);
+#                      centred: the left take alone, in the middle
 # Unset or missing, there is no chime and the boot screen plays none. Quote
 # names with spaces: make SWIRL_CHIME_LEFT="$$HOME/Ring Left Channel.wav".
 # It is loaded with the boot screen (CHIME_LEVEL) and charged to it in the
 # AICA RAM budget.
 SWIRL_CHIME_LEFT ?=
 SWIRL_CHIME_RIGHT ?=
-SWIRL_CHIME_MODE ?= centred
+SWIRL_CHIME_MODE ?= ringring
 CHIME_LEVEL := 21
 CHIME_DIR := $(BUILD)/aicaflow/chime
 CHIME_STAMP := $(CHIME_DIR)/chime.stamp

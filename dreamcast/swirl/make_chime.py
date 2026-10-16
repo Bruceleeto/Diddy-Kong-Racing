@@ -13,7 +13,7 @@ nothing.
 MODE is
   centred   the left file's take alone, in the middle;
   ringring  the left file's take on the left, then the right file's take on
-            the right RING_GAP seconds later.
+            the right RING_GAP seconds later; with no right file, centred.
 
 Each take is made mono, its leading silence cut, its end faded over 5 ms once
 it has died away, and scaled to just under full scale so the AICA has all of
@@ -138,6 +138,8 @@ def main():
     out, mode, left, right, compiler, profiler = Path(sys.argv[1]), *sys.argv[2:]
     if mode not in ("centred", "ringring"):
         sys.exit(f"chime mode {mode!r}: centred or ringring")
+    if mode == "ringring" and not (right and Path(right).is_file()):
+        mode = "centred"  # one take: play it alone
     sources = [left] if mode == "centred" else [left, right]
     present = all(name and Path(name).is_file() for name in sources)
     key = hashlib.sha256(f"{VERSION} {mode} {present} {Path(__file__).read_bytes().hex()}".encode())

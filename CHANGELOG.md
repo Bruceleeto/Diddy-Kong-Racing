@@ -265,10 +265,11 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   chime in one channel; without them there is no chime and nothing plays.
   `dreamcast/swirl/make_chime.py` takes each take to mono, cuts its leading
   silence and stores it as PCM16 with a one-note-a-take AICAflow flow
-  (`afx_compile`). `SWIRL_CHIME_MODE=centred` (the default) plays the left
-  take alone in the middle (53 KB of AICA RAM); `ringring` plays it on the
-  left and the right take on the right 0.15 s later, as rings alternate in
-  Sonic (`afx_profile` pans each note; 109 KB). It is loaded with the boot
+  (`afx_compile`). `SWIRL_CHIME_MODE=ringring` (the default) plays the left
+  take on the left and the right take on the right 0.15 s later, as rings
+  alternate in Sonic (`afx_profile` pans each note; 109 KB of AICA RAM), or the
+  left take alone without a right one; `centred` plays the left take alone in
+  the middle (53 KB). It is loaded with the boot
   screen's sounds, after its packs and before its song, charged to that scene
   in the AICA RAM budget, and freed when the scene ends. The swirl asks for it
   the first time it is drawn; the sound code starts it as the scene gate opens,

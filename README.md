@@ -26,9 +26,10 @@ record with runs at 60 fps with anti-aliasing:
 Other options (all in `Makefile.dc`): `SHOW_FPS=0` hides the frame rate in the
 corner, `DEMO_RACES_ONLY=1` shows the title sequence once and then only the
 demo races, in a loop. The boot screen's chime is a recording the repository
-does not hold; point `SWIRL_CHIME_LEFT` (and for `SWIRL_CHIME_MODE=ringring`
-also `SWIRL_CHIME_RIGHT`) at a 44.1 kHz 16-bit WAV of your own, or leave it
-out and the boot screen is silent. After changing options, rebuild with
+does not hold; point `SWIRL_CHIME_LEFT` and `SWIRL_CHIME_RIGHT` at 44.1 kHz
+16-bit WAVs of your own (the left take plays, then the right one 0.15 s later;
+with only the left, it plays alone), or leave them out and the boot screen is
+silent. After changing options, rebuild with
 `make -f Makefile.dc clean` first.
 
 Run it on a console with dcload-ip or dcload-serial
