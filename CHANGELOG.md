@@ -220,51 +220,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 
 ## Boot screen
 
-- **The Dreamcast swirl spins in place of the N64 logo.** It is a 3D model in
-  the game's own object format, built by `dreamcast/swirl/make_swirl.py` from
-  the swirl in the public-domain Dreamcast logo SVG on Wikimedia Commons, and
-  embedded in the program; the port serves it when the boot screen loads the
-  N64 logo model, so `assets.bin` is unchanged. It is the European swirl's
-  blue on every console, which also sits best with the sky behind it;
-  `SWIRL_ORANGE=1` gives it the orange of the Dreamcast's own boot screen,
-  #FF5C00, as its albedo (lit, its face comes out lighter, about #EE9E3A).
-- **The swirl is lit and drawn natively.** Its faces are flat and its edge is
-  rounded by a narrow bevel. Every frame each of its 1370 distinct vertices is
-  lit on the SH4 with sh4zam from the rendering equation: Lambert diffuse and
-  Cook-Torrance specular (GGX, Smith-Schlick, Schlick's Fresnel) for a
-  lacquer, a warm key and a cool rim light that keep to the camera, the sky's
-  irradiance, and the sky reflected, staying put as the swirl turns; then ACES
-  tone mapped. The game's model is only a stand-in: the display-list walk
-  projects each distinct vertex once and streams 184 triangle strips into the
-  opaque list, instead of the game drawing 1828 triangles through 115 N64
-  batches, which had cut the boot screen to 40 fps. It holds 60.
-- **A glint crosses the swirl.** Each time the swirl turns square on to the
-  camera, once it has faded in, a narrow band of warm light sweeps across its
-  face, leaning, like light catching lacquer: it lies where the eye is, as
-  the reflection of a light by the camera would, stretched so it takes the
-  turn from 40 degrees one side to 40 the other, and is brightest square on.
-  The band is a small texture the PVR lays across the strips in the same
-  pass, with the lit colour added as the offset colour, so it costs no more
-  geometry. The eye comes from the matrix the swirl is drawn with.
-- **A warm halo glows behind the swirl.**
-- **A chime as the swirl appears, from the builder's own copy.** Given the
-  recording, the boot screen plays it once each time it shows the swirl. The
-  repository holds no sound: like the ROM, the chime is read at build time from
-  WAV files named by `SWIRL_CHIME_LEFT` (and `SWIRL_CHIME_RIGHT`), each with the
-  chime in one channel; without them there is no chime and nothing plays.
-  `dreamcast/swirl/make_chime.py` takes each take to mono, cuts its leading
-  silence and stores it as PCM16 with a one-note-a-take AICAflow flow
-  (`afx_compile`). `SWIRL_CHIME_MODE=ringring` (the default) plays the left
-  take on the left and the right take on the right 0.15 s later, as rings
-  alternate in Sonic (`afx_profile` pans each note; 109 KB of AICA RAM), or the
-  left take alone without a right one; `centred` plays the left take alone in
-  the middle (53 KB). It is loaded with the boot
-  screen's sounds, after its packs and before its song, charged to that scene
-  in the AICA RAM budget, and freed when the scene ends. The swirl asks for it
-  the first time it is drawn; the sound code starts it as the scene gate opens,
-  with the first frame, as the screen fades in from black with the intro
-  music. The note's velocity sets its level in the AICA (13.5 dB below full
-  scale), so the sample keeps its full resolution.
+- **The Dreamcast swirl spins in place of the N64 logo**, built from the
+  public-domain logo SVG (`dreamcast/swirl/make_swirl.py`). Blue by default;
+  `SWIRL_ORANGE=1` makes it orange.
+- **It is lit per vertex with sh4zam** (physically based, two lights and the
+  sky) and drawn natively, at 60 fps.
+- **A glint sweeps across it** each time it faces the camera.
+- **A warm halo glows behind it.**
+- **A chime plays as it appears**, if you build with your own recording
+  (`SWIRL_CHIME_LEFT`, `SWIRL_CHIME_RIGHT`); the repository holds no sound.
 - **"Nintendon't".** On the title screen's beach, "n't" is scratched into the
   sand right after the Nintendo logo, at its letter size, as if drawn with a
   finger. It is the game's one bump-mapped surface: `dreamcast/scrawl/make_scrawl.py`
