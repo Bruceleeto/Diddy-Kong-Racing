@@ -18,6 +18,23 @@ It checks what it needs first: a KallistiOS toolchain, KOS's `pvrtex` utility
 `make setup`, `make extract`, `make build_assets` and `make -f Makefile.dc`,
 and leaves `bin/dkracing.elf` (and `bin/dkracing.cdi`).
 
+Arguments after `--cdi` go to `make -f Makefile.dc`. The build we test and
+record with runs at 60 fps with anti-aliasing:
+
+`dreamcast/build.sh --cdi FSAA=1 FRAME_FIELDS=1`
+
+Other options (all in `Makefile.dc`): `SHOW_FPS=0` hides the frame rate in the
+corner, `DEMO_RACES_ONLY=1` shows the title sequence once and then only the
+demo races, in a loop. The boot screen's chime is a recording the repository
+does not hold; point `SWIRL_CHIME_LEFT` (and for `SWIRL_CHIME_MODE=ringring`
+also `SWIRL_CHIME_RIGHT`) at a 44.1 kHz 16-bit WAV of your own, or leave it
+out and the boot screen is silent. After changing options, rebuild with
+`make -f Makefile.dc clean` first.
+
+Run it on a console with dcload-ip or dcload-serial
+(`dc-tool-ip -t <address> -x bin/dkracing.elf`), or burn or emulate
+`bin/dkracing.cdi`.
+
 The Dreamcast build uses enDjinn's build system (`third_party/enDjinn`):
 `Makefile.dc` holds DKR's options and asset pipeline and includes enDjinn's
 `base_link.mk`, which compiles, links and makes the disc image with the
