@@ -35,5 +35,9 @@ void dkr_afx_sfx_volume(void *owner, uint8_t gain);
 void dkr_afx_sfx_pitch(void *owner, float pitch);
 void dkr_afx_sfx_pan(void *owner, uint8_t pan);
 void dkr_afx_sfx_fx(void *owner, uint8_t fx);
+/* Plays the chime for the Dreamcast swirl once, when the scene gate opens.
+ * Any thread, no lock: it only asks. Only the boot screen has it loaded, and
+ * only a build given one (SWIRL_CHIME_LEFT in Makefile.dc) has one. */
+void dkr_afx_chime_play(void);
 
 #endif

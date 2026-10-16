@@ -24,6 +24,11 @@
 // matrix once, then the strips streamed into the opaque list (translucent
 // while the logo fades). The boot screen's camera never brings it to the
 // near plane, so it isn't clipped. The game's model is only a stand-in.
+//
+// The first time it is drawn in each visit to the boot screen, it asks for its
+// chime (dreamcast/swirl/make_chime.py; none unless the build was given one),
+// which the sound code starts as the scene gate opens: with the first frame
+// that draws it, as the boot screen starts to fade in from black.
 #include <dc/flashrom.h>
 #include <dc/pvr.h>
 #include <string.h>
@@ -35,7 +40,11 @@
 #include "camera.h"
 #include "math_util.h"
 #include "gfx.h"
+#include "scene_gate.h"
 #include "swirl.h"
+#ifdef DKR_AICAFLOW
+#include "audio_aicaflow.h"
+#endif
 
 #include <ultra64.h>
 
@@ -88,6 +97,7 @@ static u8 sOpacity;
 static pvr_poly_hdr_t sHeader[2] __attribute__((aligned(32))); // opaque, translucent
 static pvr_vertex_t sStrip[SWIRL_MAX_STRIP] __attribute__((aligned(32)));
 static float sScreen[SWIRL_MAX_POINTS][3];
+static unsigned int sChimeVisit; // the scene visit the chime was asked for in
 
 extern void pc_project_points(const f32 *xyz, int stride, int count, f32 (*out)[3]);
 
@@ -290,6 +300,12 @@ int pc_swirl_render(Object *obj, ObjectModel *model, Gfx **dl, s32 opacity) {
     }
     light(obj, cam);
     sOpacity = opacity < 0 ? 0 : opacity > 255 ? 255 : opacity;
+    if (sChimeVisit != pc_scene_visit()) {
+        sChimeVisit = pc_scene_visit();
+#ifdef DKR_AICAFLOW
+        dkr_afx_chime_play();
+#endif
+    }
     gDPNoOpTag((*dl)++, PC_SWIRL_TAG);
     return 1;
 }
