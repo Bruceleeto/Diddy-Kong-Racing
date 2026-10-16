@@ -135,6 +135,15 @@ static const float sGlintColour[3] = { 1.0f, 0.96f, 0.88f }; // the key light's 
 #ifndef HALO_BREATHE
 #define HALO_BREATHE 0.0f   // how far its strength ebbs and comes back, slowly (0: steady)
 #endif
+// Edge on, the square would show as a line across the sky: the halo fades out
+// over the last few degrees before the swirl is edge on, between these cosines
+// of the angle from square on (82 and 88 degrees).
+#ifndef HALO_EDGE_FULL
+#define HALO_EDGE_FULL 0.14f
+#endif
+#ifndef HALO_EDGE_GONE
+#define HALO_EDGE_GONE 0.035f
+#endif
 #define HALO_BREATH 240     // frames a breath takes
 static const float sHaloTowards[3] = { HALO_TOWARDS };
 
@@ -288,7 +297,12 @@ u32 pc_object_model_override(s32 modelID, void *out) {
     if (out != NULL) {
         memcpy(out, sSwirlModel, sizeof(sSwirlModel));
         sSwirl = out;
+#ifdef SWIRL_REGION_EUROPE
+        // Build-time override, to see the other region's swirl on one console.
+        memcpy(sAlbedo, SWIRL_REGION_EUROPE ? sBlue : sOrange, sizeof(sAlbedo));
+#else
         memcpy(sAlbedo, flashrom_get_region() == FLASHROM_REGION_EUROPE ? sBlue : sOrange, sizeof(sAlbedo));
+#endif
         tone_init();
         headers_init();
     }
@@ -494,21 +508,35 @@ static void glint_update(shz_vec3_t eye) {
     sGlintU[2] = GLINT_LEAN_Y / GLINT_SPAN;
 }
 
-/** The halo: a square of the blurred silhouette in the swirl's plane, behind it. */
-static void halo_draw(void) {
+/**
+ * The halo: a square of the blurred silhouette in the swirl's plane, behind
+ * it, fading out as the swirl turns edge on to the eye (in the model's space).
+ */
+static void halo_draw(shz_vec3_t eye) {
     const float e = ((const float *) sSwirlGlow)[1];
     float corner[4][3], screen[4][3];
     pvr_vertex_t quad[4] __attribute__((aligned(32)));
     u32 colour = sHaloArgb, level = sOpacity;
+    float facing, t;
 
     if (sHaloTexture == NULL) {
         return;
+    }
+    // The cosine of the angle between the swirl's axis and the eye, then a
+    // smoothstep from gone to full.
+    facing = shz_fabsf(eye.z) * shz_inv_sqrtf(shz_vec3_dot(eye, eye));
+    t = (facing - HALO_EDGE_GONE) * shz_invf(HALO_EDGE_FULL - HALO_EDGE_GONE);
+    if (t <= 0.0f) {
+        return;
+    }
+    if (t < 1.0f) {
+        level = (u32) (level * t * t * (3.0f - 2.0f * t));
     }
     if (HALO_BREATHE != 0.0f) {
         // Slowly, from its full strength down and back: 1 - BREATHE (1 - cos) / 2.
         float c = shz_cosf((float) (sDraws % HALO_BREATH) * (2.0f * SHZ_F_PI / HALO_BREATH));
 
-        level = (u32) (sOpacity * (1.0f - HALO_BREATHE * 0.5f * (1.0f - c)));
+        level = (u32) (level * (1.0f - HALO_BREATHE * 0.5f * (1.0f - c)));
     }
     if (level < 255) {
         u32 r = (colour >> 16 & 0xFF) * level / 255, g = (colour >> 8 & 0xFF) * level / 255,
@@ -550,9 +578,11 @@ void pc_swirl_draw(void) {
     u32 alpha = (u32) sOpacity << 24;
     u32 s;
 
+    shz_vec3_t eye = model_eye();
+
     sDraws++;
-    glint_update(model_eye());
-    halo_draw();
+    glint_update(eye);
+    halo_draw(eye);
     hdr = &sHeader[translucent][sGlintArgb != 0];
     pc_project_points(&pts->px, sizeof(SwirlPoint) / sizeof(float), n->points, sScreen);
     for (s = 0; s < n->strips; s++) {
