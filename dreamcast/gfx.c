@@ -1473,13 +1473,18 @@ static void fps_tick(void) {
     }
     sLastFrameUs = now;
  
+#if DKR_GFX_PROFILE
     {
+        // In the profile's log (main.c): a printf over dcload mid-scene costs
+        // a round trip to the host, enough to make a frame late.
+        extern void pc_prof_log(const char *format, ...);
         static unsigned int frames = 0;
 
         if ((++frames % 120u) == 0u) {
-            printf("fps: %d.%d\n", (int) sFps, ((int) (sFps * 10.0f)) % 10);
+            pc_prof_log("fps: %d.%d\n", (int) sFps, ((int) (sFps * 10.0f)) % 10);
         }
     }
+#endif
 }
 
 /** The frame rate in the top-right corner, white over a black shadow. */

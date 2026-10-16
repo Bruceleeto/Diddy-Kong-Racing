@@ -815,6 +815,20 @@ s32 osMotorStop(void *pfs) {
 void isv_printf(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
+#if DKR_GFX_PROFILE
+    {
+        // A profile run counts late frames, and a printf over dcload is a
+        // round trip to the host: while a scene plays, into the profile's log.
+        extern int pc_scene_is_ready(void);
+        extern void pc_prof_vlog(const char *format, va_list args);
+
+        if (pc_scene_is_ready()) {
+            pc_prof_vlog(fmt, args);
+            va_end(args);
+            return;
+        }
+    }
+#endif
     vprintf(fmt, args);
     va_end(args);
     // Flush every line: this is the port's only debug channel, and on a crash or

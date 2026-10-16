@@ -57,6 +57,46 @@ static OSThread sHostThread;
 #define DKR_AUTO_EXIT_SECONDS 0
 #endif
 #if DKR_GFX_PROFILE
+// The profile's lines wait in RAM and go out while a scene loads (or at exit).
+// A printf over dcload is a round trip to the host: printed mid-scene, the
+// lines about a long frame made the next frames long too.
+#include <stdarg.h>
+static char sProfLog[64 * 1024];
+static u32 sProfLogLength, sProfLogDropped;
+
+void pc_prof_vlog(const char *format, va_list args) {
+    u32 room = sizeof(sProfLog) - sProfLogLength;
+    int n = vsnprintf(sProfLog + sProfLogLength, room, format, args);
+
+    if (n < 0 || (u32) n >= room) {
+        sProfLog[sProfLogLength] = '\0';
+        sProfLogDropped++;
+        return;
+    }
+    sProfLogLength += (u32) n;
+}
+
+void pc_prof_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
+void pc_prof_log(const char *format, ...) {
+    va_list args;
+
+    va_start(args, format);
+    pc_prof_vlog(format, args);
+    va_end(args);
+}
+
+/** Prints what the profile logged; between scenes, where it costs no frame. */
+void pc_prof_log_flush(void) {
+    if (sProfLogLength > 0) {
+        fwrite(sProfLog, 1, sProfLogLength, stdout);
+        fflush(stdout);
+    }
+    if (sProfLogDropped > 0) {
+        printf("PROF LOG full: %lu lines dropped\n", (unsigned long) sProfLogDropped);
+    }
+    sProfLogLength = sProfLogDropped = 0;
+}
+
 enum { PROF_FRAMES = 60 };
 static struct {
     u64 last, wait, waitFrame, begin, dl, end;
@@ -99,6 +139,16 @@ static struct {
     u32 levelVtx, levelVtxOtherMatrix; // level G_VTX loads, and those not drawn with the cull matrix
 } sScene;
 static const float (*sLevelCullMatrix)[4];
+
+// Vertices that ran the combiner per vertex (not passthrough or constant), by
+// combiner, for the scene's report.
+#define PROF_SLOW_CC 16
+static struct {
+    u32 w0, w1, cyc, prim, env, verts;
+} sSlowCc[PROF_SLOW_CC];
+
+static void prof_slow_cc(u32 verts);
+static u32 sCcClassified, sCcProbed; // combiner_classify calls, and those that ran the probes
 
 // What the display-list walk spends on racers (PC_PROF_CAT_RACERS), by
 // handler: the timers need GFX_PROFILE=2, the counts work at 1 too.
@@ -162,6 +212,8 @@ void pc_scene_prof_report(void) {
     u32 n = sScene.frames ? sScene.frames : 1;
     s32 c;
 
+    pc_prof_log_flush();
+
     if (sScene.frames > 0) {
         printf("SCENE PROF %lu frames: late %lu (%lu fields, max %lu), pacer oversleep %lu us max %lu us | "
                "level %lu batches %lu tris/frame, frustum would drop %lu batches %lu tris (%lu%%) |",
@@ -174,6 +226,18 @@ void pc_scene_prof_report(void) {
         for (c = 0; c < PC_PROF_CAT_COUNT; c++) {
             printf(" %s %lu us %lu tris", sCatNames[c], (unsigned long) (sScene.catNs[c] / n / 1000u),
                    (unsigned long) (sScene.catTris[c] / n));
+        }
+        printf("\nSCENE CC classify %lu/frame, probed %lu/frame", (unsigned long) (sCcClassified / n),
+               (unsigned long) (sCcProbed / n));
+        sCcClassified = sCcProbed = 0;
+        for (c = 0; c < PROF_SLOW_CC; c++) {
+            if (sSlowCc[c].verts != 0) {
+                printf("\nSCENE SLOWCC %lu verts/frame cc=%08lx/%08lx cyc=%lu prim=%08lx env=%08lx",
+                       (unsigned long) (sSlowCc[c].verts / n), (unsigned long) sSlowCc[c].w0,
+                       (unsigned long) sSlowCc[c].w1, (unsigned long) (sSlowCc[c].cyc >> G_MDSFT_CYCLETYPE),
+                       (unsigned long) sSlowCc[c].prim, (unsigned long) sSlowCc[c].env);
+            }
+            sSlowCc[c].verts = 0;
         }
         printf(" | view matrix changed under the level in %lu frames, %lu false culls, %lu of %lu level vertex loads "
                "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
@@ -271,7 +335,7 @@ static void prof_blend_print(u32 frames) {
         if (best < 0) {
             break;
         }
-        printf("GFX BLEND: tris=%lu modeL=%08lx cc=%08lx/%08lx tex=%d vtxA255=%d outA255=%d fog=%d primA=%d envA=%d\n",
+        pc_prof_log("GFX BLEND: tris=%lu modeL=%08lx cc=%08lx/%08lx tex=%d vtxA255=%d outA255=%d fog=%d primA=%d envA=%d\n",
                (unsigned long) (sProfBlend[best].tris / frames), (unsigned long) sProfBlend[best].modeL,
                (unsigned long) sProfBlend[best].cc0, (unsigned long) sProfBlend[best].cc1, sProfBlend[best].texKind,
                sProfBlend[best].vtxAlphaFull, sProfBlend[best].outAlphaFull, sProfBlend[best].fog,
@@ -302,7 +366,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         int opening = pc_scene_take_opening_frame();
 
         if (work > 20000 && pc_scene_is_ready() && !opening) {
-            printf("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us, %lu model loads | logic %lu "
+            pc_prof_log("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us, %lu model loads | logic %lu "
                    "scene %lu us, %lu tris, transition %ld, audio loads %lu us\n",
                    (unsigned long) work, (unsigned long) ((t2 - t1) / 1000u), (unsigned long) sTexLoadsInFrame,
                    (unsigned long) (sTexLoadNsInFrame / 1000u), (unsigned long) sModelLoadsInFrame,
@@ -337,7 +401,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         u32 period = (u32) ((t3 - sProf.last) / 1000u / n), wait = (u32) (sProf.wait / 1000u / n);
         u32 begin = (u32) (sProf.begin / 1000u / n), dl = (u32) (sProf.dl / 1000u / n);
         u32 end = (u32) (sProf.end / 1000u / n);
-        printf("GFX PROF: frame=%lu us wait=%lu game=%lu dl=%lu begin=%lu end=%lu | batches=%lu+%lu verts=%lu "
+        pc_prof_log("GFX PROF: frame=%lu us wait=%lu game=%lu dl=%lu begin=%lu end=%lu | batches=%lu+%lu verts=%lu "
                "tris=%lu culled=%lu clipped=%lu sent=%lu max=%lu slow=%lu rects=%lu | "
                "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu | "
                "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
@@ -2156,6 +2220,28 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
+#if DKR_GFX_PROFILE
+static void prof_slow_cc(u32 verts) {
+    u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
+    u32 prim = (sPrimColor[0] << 24) | (sPrimColor[1] << 16) | (sPrimColor[2] << 8) | sPrimColor[3];
+    u32 env = (sEnvColor[0] << 24) | (sEnvColor[1] << 16) | (sEnvColor[2] << 8) | sEnvColor[3];
+    s32 i;
+
+    for (i = 0; i < PROF_SLOW_CC; i++) {
+        if (sSlowCc[i].verts == 0 || (sSlowCc[i].w0 == sCombineW0 && sSlowCc[i].w1 == sCombineW1 &&
+                                      sSlowCc[i].cyc == cyc && sSlowCc[i].prim == prim && sSlowCc[i].env == env)) {
+            sSlowCc[i].w0 = sCombineW0;
+            sSlowCc[i].w1 = sCombineW1;
+            sSlowCc[i].cyc = cyc;
+            sSlowCc[i].prim = prim;
+            sSlowCc[i].env = env;
+            sSlowCc[i].verts += verts;
+            return;
+        }
+    }
+}
+#endif
+
 static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
                          const Triangle *tris, s32 numTris, s32 texEnabled) {
     f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
@@ -2215,6 +2301,11 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
 
     PROF_ADD(blast, 1);
     PROF_ADD(verts, total);
+#if DKR_GFX_PROFILE
+    if (!sCcFast) {
+        prof_slow_cc((u32) total);
+    }
+#endif
     PROF_ADD(tris, numTris);
     PROF_LAP(tState);
 #if DKR_GFX_PROFILE_SKIP == 2
@@ -2722,6 +2813,9 @@ static void combiner_classify(void) {
     u8 a[4], b[4], c[4];
     s32 i;
 
+#if DKR_GFX_PROFILE
+    sCcClassified++;
+#endif
     if (sCcSigValid && sCombineW0 == sCcSigW0 && sCombineW1 == sCcSigW1 && cyc == sCcSigCyc && prim == sCcSigPrim &&
         env == sCcSigEnv) {
         return; // still the combiner we classified last time
@@ -2748,6 +2842,9 @@ static void combiner_classify(void) {
         }
         sCcCacheAt = at;
     }
+#if DKR_GFX_PROFILE
+    sCcProbed++;
+#endif
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
@@ -3594,6 +3691,9 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
         pc_scene_prof_report();
 #endif
         prof_sample_write();
+#if DKR_GFX_PROFILE
+        pc_prof_log_flush();
+#endif
 #if DKR_ASSET_TRACE
         {
             extern void pc_asset_trace_report(void);
@@ -3645,6 +3745,9 @@ static void enj_frame_submitted(void *data) {
         pc_scene_prof_report();
 #endif
         prof_sample_write();
+#if DKR_GFX_PROFILE
+        pc_prof_log_flush();
+#endif
 #if DKR_ASSET_TRACE
         {
             extern void pc_asset_trace_report(void);

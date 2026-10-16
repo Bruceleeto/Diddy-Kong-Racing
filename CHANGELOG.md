@@ -54,6 +54,14 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   controller.
 - The sampling profiler can sample any one map (`PROF_SAMPLE_MAP`), and
   `GFX_PROFILE=4` counts only the samples of frames that were late.
+- **The profile no longer makes the frames it measures late.** Its lines, the
+  game's debug messages and the `fps:` line went out with printf as they came,
+  each a round trip to the host over dcload, and a `GFX LONG FRAME` line made
+  the frames after it long too: two runs of the same build gave race 28 10 and
+  39 late frames. While a scene plays they now collect in RAM and print while
+  the next scene loads; two runs now agree. The `fps:` line is only in profile
+  builds. The scene report also lists the combiners that ran per vertex
+  (`SCENE SLOWCC`) and how often batches were classified (`SCENE CC`).
 
 ### Changed
 
