@@ -35,6 +35,9 @@ PROF_SAMPLE_MAP ?= -1
 SHOW_FPS ?= 1
 # 1: the attract loop shows the title sequence once, then only the demo races, in a loop.
 DEMO_RACES_ONLY ?= 0
+# 1: the boot screen's swirl is the orange of the Dreamcast's own boot screen,
+# #FF5C00, instead of the European blue.
+SWIRL_ORANGE ?= 0
 # With GFX_PROFILE: 1 adds what each list fills, by category (SCENE FILL lines).
 FILL_PROF ?= 0
 # With GFX_PROFILE, measurement only: leave part of the frame out, to see what

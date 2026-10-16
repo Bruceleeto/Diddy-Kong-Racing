@@ -16,7 +16,8 @@
 // hemisphere, and the sky reflected, Fresnel-weighted; the sky stays put as
 // the swirl turns. The result is tone mapped (ACES, fitted) to sRGB. It is the
 // European swirl's blue on every console: DKR is a European game, and the blue
-// sits with the sky behind it. The eye, the lights
+// sits with the sky behind it; SWIRL_ORANGE=1 makes it the orange of the
+// Dreamcast's own boot screen. The eye, the lights
 // and the sky's up are taken into the model's own space once a frame, so each
 // vertex is lit from its model-space position and normal as they are.
 //
@@ -79,8 +80,10 @@ typedef struct {
 #define SWIRL_TONE_STEPS 1024 // the tone curve's table, by the square root of radiance
 #define SWIRL_TONE_SCALE 256.0f
 
-// Linear albedo: the European swirl's blue, #1E55C0.
+// Linear albedo: the European swirl's blue, #1E55C0, or with SWIRL_ORANGE the
+// orange of the Dreamcast's own boot screen, #FF5C00.
 static const float sBlue[3] = { 0.013f, 0.091f, 0.527f };
+static const float sOrange[3] = { 1.0f, 0.107f, 0.0f };
 
 // Light colours as irradiance (times pi, folded out of the diffuse term).
 #define SWIRL_LIGHTS 2
@@ -126,10 +129,10 @@ static const float sGlintColour[3] = { 1.0f, 0.96f, 0.88f }; // the key light's 
 #define HALO_STRENGTH 0.45f
 #endif
 #ifndef HALO_TOWARDS
-#define HALO_TOWARDS 1.0f, 1.0f, 1.0f // the colour the halo is taken a little towards from the albedo
+#define HALO_TOWARDS 1.0f, 0.8f, 0.55f // the warm white the halo is taken towards from the albedo
 #endif
 #ifndef HALO_WHITE
-#define HALO_WHITE 0.3f     // how far towards it
+#define HALO_WHITE 0.5f     // how far towards it
 #endif
 #ifndef HALO_BREATHE
 #define HALO_BREATHE 0.0f   // how far its strength ebbs and comes back, slowly (0: steady)
@@ -307,7 +310,7 @@ u32 pc_object_model_override(s32 modelID, void *out) {
     if (out != NULL) {
         memcpy(out, sSwirlModel, sizeof(sSwirlModel));
         sSwirl = out;
-        memcpy(sAlbedo, sBlue, sizeof(sAlbedo));
+        memcpy(sAlbedo, DKR_SWIRL_ORANGE ? sOrange : sBlue, sizeof(sAlbedo));
         tone_init();
         headers_init();
     }

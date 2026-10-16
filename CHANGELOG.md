@@ -225,7 +225,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   the swirl in the public-domain Dreamcast logo SVG on Wikimedia Commons, and
   embedded in the program; the port serves it when the boot screen loads the
   N64 logo model, so `assets.bin` is unchanged. It is the European swirl's
-  blue on every console, which also sits best with the sky behind it.
+  blue on every console, which also sits best with the sky behind it;
+  `SWIRL_ORANGE=1` gives it the orange of the Dreamcast's own boot screen,
+  #FF5C00, as its albedo (lit, its face comes out lighter, about #EE9E3A).
 - **The swirl is lit and drawn natively.** Its faces are flat and its edge is
   rounded by a narrow bevel. Every frame each of its 1370 distinct vertices is
   lit on the SH4 with sh4zam from the rendering equation: Lambert diffuse and
@@ -248,8 +250,8 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   outline and blurs it (two Gaussians, a close and a wide one) into a
   128x128 texture; the port lays it on a square in the swirl's own plane,
   so it turns with it, just behind it, and adds it to the sky in the swirl's
-  colour taken a little towards white: a glow round the edges and between
-  the arms. With the glint it costs the SH4 under half a millisecond in a
+  colour taken halfway towards a warm white: a glow round the edges and
+  between the arms. With the glint it costs the SH4 under half a millisecond in a
   frame with the swirl, and the boot screen still holds 60.
 - **The halo no longer shows as a flat sheet.** A second square stands across
   the first, through the swirl's vertical axis, with the swirl's outline seen

@@ -25,7 +25,8 @@ record with runs at 60 fps with anti-aliasing:
 
 Other options (all in `Makefile.dc`): `SHOW_FPS=0` hides the frame rate in the
 corner, `DEMO_RACES_ONLY=1` shows the title sequence once and then only the
-demo races, in a loop. The boot screen's chime is a recording the repository
+demo races, in a loop, `SWIRL_ORANGE=1` makes the boot screen's swirl orange
+instead of blue. The boot screen's chime is a recording the repository
 does not hold; point `SWIRL_CHIME_LEFT` and `SWIRL_CHIME_RIGHT` at 44.1 kHz
 16-bit WAVs of your own (the left take plays, then the right one 0.15 s later;
 with only the left, it plays alone), or leave them out and the boot screen is
