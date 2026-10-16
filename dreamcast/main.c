@@ -1737,6 +1737,7 @@ static u32 texture_current(void) {
 static void combiner_eval(const f32 shade[4], u8 out[4], u8 sec[3]);
 static void combiner_eval_lit(const f32 shade[4], u8 lit[4]);
 static void combiner_classify(void);
+static void cc_prog_sync_current(void);
 static u8 clamp_u8(f32 v);
 
 // How the current batch's combiner collapses, per channel; see
@@ -1805,6 +1806,12 @@ static void project_into(GfxVertex *v) {
  * so it can change between the G_VTX that loads a vertex and the G_TRIN that
  * draws with it.
  */
+// The emulated path's combiner results for the loaded vertices, valid while
+// sLitStamp[i] == sLitBatch; handle_polygon starts a new batch.
+static u32 sLitColor[GFX_MAX_VERTS];
+static u32 sLitStamp[GFX_MAX_VERTS];
+static u32 sLitBatch = 1;
+
 static void project(const GfxVertex *v, GfxTriVert *out) {
     if (VERTEX_PROJECTED(v)) {
         out->x = v->sx;
@@ -1833,20 +1840,35 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
         out->a = sCcPass[3] ? v->a : sCcConst[3];
     } else {
         // At least one channel mixes shade with something else; run the real mux.
-        // Only the lit half is wanted, see combiner_eval_lit.
-        f32 shade[4];
-        u8 lit[4];
+        // Only the lit half is wanted, see combiner_eval_lit. A loaded vertex
+        // is a corner of two or three triangles, so its result is kept for the
+        // batch; a vertex the near clip made is not one of them.
+        u32 at = (u32) ((const u8 *) v - (const u8 *) sVerts) / sizeof(GfxVertex);
+        union {
+            u8 c[4];
+            u32 word;
+        } lit;
 
-        shade[0] = v->r * (1.0f / 255.0f);
-        shade[1] = v->g * (1.0f / 255.0f);
-        shade[2] = v->b * (1.0f / 255.0f);
-        shade[3] = v->a * (1.0f / 255.0f);
-        combiner_eval_lit(shade, lit);
+        if (at < GFX_MAX_VERTS && sLitStamp[at] == sLitBatch) {
+            lit.word = sLitColor[at];
+        } else {
+            f32 shade[4];
 
-        out->r = lit[0];
-        out->g = lit[1];
-        out->b = lit[2];
-        out->a = lit[3];
+            shade[0] = v->r * (1.0f / 255.0f);
+            shade[1] = v->g * (1.0f / 255.0f);
+            shade[2] = v->b * (1.0f / 255.0f);
+            shade[3] = v->a * (1.0f / 255.0f);
+            combiner_eval_lit(shade, lit.c);
+            if (at < GFX_MAX_VERTS) {
+                sLitColor[at] = lit.word;
+                sLitStamp[at] = sLitBatch;
+            }
+        }
+
+        out->r = lit.c[0];
+        out->g = lit.c[1];
+        out->b = lit.c[2];
+        out->a = lit.c[3];
     }
 }
 
@@ -2035,6 +2057,10 @@ static void handle_polygon(u32 w0, u32 w1) {
     // Settle how this batch's combiner collapses before touching any vertex. The
     // mux, prim and env cannot change inside a batch, so once is enough.
     combiner_classify();
+    if (!sCcFast) {
+        cc_prog_sync_current(); // project() runs it per vertex
+        sLitBatch++;
+    }
     PROF_LAP(tPolyState);
 
     for (i = 0; i < count; i++) {
@@ -2332,6 +2358,10 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         s32 ccFast = sCcFast;
         s32 run;
 
+        if (!ccFast) {
+            cc_prog_sync_current();
+        }
+
         i = 0;
         for (run = 0; run < 2; run++) {
             const Vertex *v = run ? verts2 : verts;
@@ -2558,103 +2588,173 @@ static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
 // black (Diddy's plane went dark).
 // ---------------------------------------------------------------------------
 
+// The combiner is compiled per state, not interpreted per vertex. Every input a
+// slot can name is one of a handful of values: a shade channel, a channel of
+// the first cycle's result, or a constant of the batch (0, 1, a PRIM or ENV
+// channel, the texel). All of them sit in one array, sCcSrc, and each slot of
+// each cycle becomes a pointer into it, so a channel costs four loads, a
+// subtract and a multiply-add: (a - b) * c + d, clamped, the same arithmetic in
+// the same order as the RDP formula always was here.
+enum {
+    CC_SRC_SHADE = 0, // 4: the vertex's shade, RGBA
+    CC_SRC_COMB = 4,  // 4: what the first cycle produced
+    CC_SRC_ZERO = 8,
+    CC_SRC_ONE = 9,
+    CC_SRC_TEXEL = 10, // 1 (white) for the modulate half, 0 for the additive half (combiner_eval)
+    CC_SRC_PRIM = 11,  // 4
+    CC_SRC_ENV = 15,   // 4
+    CC_SRC_COUNT = 19
+};
+static f32 sCcSrc[CC_SRC_COUNT];
+// [cycle][R, G, B, A][a, b, c, d slot]: where in sCcSrc each slot reads.
+static const f32 *sCcProg[2][4][4];
+static s32 sCcProgCycles;   // 1 or 2
+// The state the program was compiled from, as combiner_classify keys it.
+static u32 sCcProgW0, sCcProgW1, sCcProgCyc, sCcProgPrim, sCcProgEnv;
+static s32 sCcProgValid;
+
 /**
- * A colour input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
+ * An RGB input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
  * encode 0..7 and treat anything from 8 up as zero; the 3-bit d slot puts 1 at 6
  * and zero at 7. Slot 7 of a 4-bit slot is NOISE/K4, neither of which DKR uses,
- * so it lands in the zero default.
+ * so it lands in the zero default. `comb` is where COMBINED reads: the shade in
+ * the first cycle, the first cycle's result in the second.
  */
-static f32 sCcTexel = 1.0f; // the value TEXEL0/TEXEL1 take for this evaluation
-
-static void cc_rgb_in(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
-    s32 i;
-
+static u8 cc_src_rgb(u32 mux, s32 ch, u8 comb) {
     switch (mux) {
         case G_CCMUX_COMBINED:
-            for (i = 0; i < 3; i++) {
-                out[i] = comb[i];
-            }
-            return;
+            return (u8) (comb + ch);
         case G_CCMUX_TEXEL0:
         case G_CCMUX_TEXEL1: // no TEXEL1 yet; it follows TEXEL0
-            out[0] = out[1] = out[2] = sCcTexel;
-            return;
+            return CC_SRC_TEXEL;
         case G_CCMUX_1:
-            out[0] = out[1] = out[2] = 1.0f;
-            return;
+            return CC_SRC_ONE;
         case G_CCMUX_PRIMITIVE:
-            for (i = 0; i < 3; i++) {
-                out[i] = sPrimColor[i] / 255.0f;
-            }
-            return;
+            return (u8) (CC_SRC_PRIM + ch);
         case G_CCMUX_SHADE:
-            for (i = 0; i < 3; i++) {
-                out[i] = shade[i];
-            }
-            return;
+            return (u8) (CC_SRC_SHADE + ch);
         case G_CCMUX_ENVIRONMENT:
-            for (i = 0; i < 3; i++) {
-                out[i] = sEnvColor[i] / 255.0f;
-            }
-            return;
+            return (u8) (CC_SRC_ENV + ch);
         default:
-            out[0] = out[1] = out[2] = 0.0f;
-            return;
+            return CC_SRC_ZERO;
     }
 }
 
 /**
- * A colour input from the 5-bit multiplier (c) slot, which also reaches the alpha
+ * An RGB input from the 5-bit multiplier (c) slot, which also reaches the alpha
  * registers: the source of ENV_ALPHA and SHADE_ALPHA, both used by DKR's lighting.
  */
-static void cc_rgb_mul(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
-    f32 scalar;
-
+static u8 cc_src_mul(u32 mux, s32 ch, u8 comb) {
     switch (mux) {
         case G_CCMUX_COMBINED_ALPHA:
-            scalar = comb[3];
-            break;
+            return (u8) (comb + 3);
         case G_CCMUX_TEXEL0_ALPHA:
         case G_CCMUX_TEXEL1_ALPHA:
-            scalar = sCcTexel;
-            break;
+            return CC_SRC_TEXEL;
         case G_CCMUX_PRIMITIVE_ALPHA:
-            scalar = sPrimColor[3] / 255.0f;
-            break;
+            return CC_SRC_PRIM + 3;
         case G_CCMUX_SHADE_ALPHA:
-            scalar = shade[3];
-            break;
+            return CC_SRC_SHADE + 3;
         case G_CCMUX_ENV_ALPHA:
-            scalar = sEnvColor[3] / 255.0f;
-            break;
+            return CC_SRC_ENV + 3;
         default:
             // Everything below 7 is a plain colour input; LOD_FRAC and K5 are not
-            // used by DKR and fall through cc_rgb_in()'s zero default.
-            cc_rgb_in(mux, shade, comb, out);
-            return;
+            // used by DKR and fall through to cc_src_rgb()'s zero default.
+            return cc_src_rgb(mux, ch, comb);
     }
-    out[0] = out[1] = out[2] = scalar;
 }
 
 /** Every alpha slot is 3 bits and they all share one encoding. */
-static f32 cc_alpha_in(u32 mux, const f32 shade[4], const f32 comb[4]) {
+static u8 cc_src_alpha(u32 mux, u8 comb) {
     switch (mux) {
         case G_ACMUX_COMBINED:
-            return comb[3];
+            return (u8) (comb + 3);
         case G_ACMUX_TEXEL0:
         case G_ACMUX_TEXEL1:
-            return sCcTexel;
+            return CC_SRC_TEXEL;
         case G_ACMUX_1:
-            return 1.0f;
+            return CC_SRC_ONE;
         case G_ACMUX_PRIMITIVE:
-            return sPrimColor[3] / 255.0f;
+            return CC_SRC_PRIM + 3;
         case G_ACMUX_SHADE:
-            return shade[3];
+            return CC_SRC_SHADE + 3;
         case G_ACMUX_ENVIRONMENT:
-            return sEnvColor[3] / 255.0f;
+            return CC_SRC_ENV + 3;
         default:
-            return 0.0f; // G_ACMUX_0
+            return CC_SRC_ZERO; // G_ACMUX_0
     }
+}
+
+/** One cycle's slots, (a - b) * c + d, colour and alpha on their own muxes. */
+static void cc_compile_cycle(const f32 *prog[4][4], u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA,
+                             u8 comb) {
+    s32 ch;
+
+    for (ch = 0; ch < 3; ch++) {
+        prog[ch][0] = &sCcSrc[cc_src_rgb(a, ch, comb)];
+        prog[ch][1] = &sCcSrc[cc_src_rgb(b, ch, comb)];
+        prog[ch][2] = &sCcSrc[cc_src_mul(c, ch, comb)];
+        prog[ch][3] = &sCcSrc[cc_src_rgb(d, ch, comb)];
+    }
+    prog[3][0] = &sCcSrc[cc_src_alpha(aA, comb)];
+    prog[3][1] = &sCcSrc[cc_src_alpha(bA, comb)];
+    prog[3][2] = &sCcSrc[cc_src_alpha(cA, comb)];
+    prog[3][3] = &sCcSrc[cc_src_alpha(dA, comb)];
+}
+
+/**
+ * Make the compiled combiner match the current state. Cheap when it already
+ * does; run once per batch or rectangle, never per vertex.
+ */
+static void cc_prog_sync(u32 cyc, u32 prim, u32 env) {
+    s32 i;
+
+    if (sCcProgValid && sCombineW0 == sCcProgW0 && sCombineW1 == sCcProgW1 && cyc == sCcProgCyc &&
+        prim == sCcProgPrim && env == sCcProgEnv) {
+        return;
+    }
+    sCcProgW0 = sCombineW0;
+    sCcProgW1 = sCombineW1;
+    sCcProgCyc = cyc;
+    sCcProgPrim = prim;
+    sCcProgEnv = env;
+    sCcProgValid = TRUE;
+
+    sCcSrc[CC_SRC_ZERO] = 0.0f;
+    sCcSrc[CC_SRC_ONE] = 1.0f;
+    sCcSrc[CC_SRC_TEXEL] = 1.0f;
+    for (i = 0; i < 4; i++) {
+        sCcSrc[CC_SRC_PRIM + i] = sPrimColor[i] / 255.0f;
+        sCcSrc[CC_SRC_ENV + i] = sEnvColor[i] / 255.0f;
+    }
+
+    // Both cycles, if othermode says so: the directional-lighting materials are
+    // two-cycle and the second cycle is where the environment blend lives. The
+    // first cycle's COMBINED is the shade.
+    cc_compile_cycle(sCcProg[0], (sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F,
+                     (sCombineW1 >> 15) & 0x7, (sCombineW0 >> 12) & 0x7, (sCombineW1 >> 12) & 0x7,
+                     (sCombineW0 >> 9) & 0x7, (sCombineW1 >> 9) & 0x7, CC_SRC_SHADE);
+    sCcProgCycles = 1;
+    if (cyc == G_CYC_2CYCLE) {
+        cc_compile_cycle(sCcProg[1], (sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F,
+                         (sCombineW1 >> 6) & 0x7, (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7,
+                         (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, CC_SRC_COMB);
+        sCcProgCycles = 2;
+    }
+}
+
+/** The current state's (cycle type, PRIM, ENV) as the combiner keys them. */
+#define CC_KEY_CYC() (sOtherModeH & (3 << G_MDSFT_CYCLETYPE))
+#define CC_KEY_RGBA(c) (((u32) (c)[0] << 24) | ((u32) (c)[1] << 16) | ((u32) (c)[2] << 8) | (u32) (c)[3])
+
+/**
+ * Compile the combiner for the current state if it is not already. Only the
+ * batches that run it per vertex call this: most batches collapse to selects
+ * (combiner_classify) and their state changes, prim and env colours that differ
+ * per object, would otherwise recompile it batch after batch.
+ */
+static void cc_prog_sync_current(void) {
+    cc_prog_sync(CC_KEY_CYC(), CC_KEY_RGBA(sPrimColor), CC_KEY_RGBA(sEnvColor));
 }
 
 static f32 cc_clamp(f32 v) {
@@ -2671,46 +2771,32 @@ static u8 clamp_u8(f32 v) {
     return (u8) (cc_clamp(v) * 255.0f);
 }
 
-/** One cycle of (a - b) * c + d, colour and alpha on their own muxes. */
-static void cc_cycle(u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA, const f32 shade[4], const f32 in[4],
-                     f32 out[4]) {
-    f32 va[3], vb[3], vc[3], vd[3];
-    s32 i;
-
-    cc_rgb_in(a, shade, in, va);
-    cc_rgb_in(b, shade, in, vb);
-    cc_rgb_mul(c, shade, in, vc);
-    cc_rgb_in(d, shade, in, vd);
-
-    for (i = 0; i < 3; i++) {
-        out[i] = cc_clamp(((va[i] - vb[i]) * vc[i]) + vd[i]);
-    }
-    out[3] = cc_clamp(((cc_alpha_in(aA, shade, in) - cc_alpha_in(bA, shade, in)) * cc_alpha_in(cA, shade, in)) +
-                      cc_alpha_in(dA, shade, in));
-}
-
 /**
- * Run the combiner for one shade value. Both cycles, if othermode says so — the
- * directional-lighting materials are two-cycle and the second cycle is where the
- * environment blend lives, so stopping after cycle 0 (as we used to) throws away
- * the half that matters.
+ * Run the compiled combiner on one shade value, with the texel at `texel`
+ * (1 = white, 0 = black). The result is left in sCcSrc[CC_SRC_COMB..+3].
  */
-static void combiner_run(const f32 shade[4], f32 out[4]) {
-    f32 cycle0[4];
-    s32 i;
+static inline void cc_prog_run(const f32 shade[4], f32 texel) {
+    f32 *src = sCcSrc;
+    s32 cycle;
 
-    cc_cycle((sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F, (sCombineW1 >> 15) & 0x7,
-             (sCombineW0 >> 12) & 0x7, (sCombineW1 >> 12) & 0x7, (sCombineW0 >> 9) & 0x7, (sCombineW1 >> 9) & 0x7,
-             shade, shade, cycle0);
+    src[CC_SRC_SHADE + 0] = shade[0];
+    src[CC_SRC_SHADE + 1] = shade[1];
+    src[CC_SRC_SHADE + 2] = shade[2];
+    src[CC_SRC_SHADE + 3] = shade[3];
+    src[CC_SRC_TEXEL] = texel;
+    for (cycle = 0; cycle < sCcProgCycles; cycle++) {
+        const f32 *const (*prog)[4] = sCcProg[cycle];
+        f32 out[4];
+        s32 ch;
 
-    if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) {
-        cc_cycle((sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F, (sCombineW1 >> 6) & 0x7,
-                 (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7, (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, shade,
-                 cycle0, out);
-    } else {
-        for (i = 0; i < 4; i++) {
-            out[i] = cycle0[i];
+        for (ch = 0; ch < 4; ch++) {
+            out[ch] = cc_clamp(((*prog[ch][0] - *prog[ch][1]) * *prog[ch][2]) + *prog[ch][3]);
         }
+        // Written after all four channels: the second cycle reads the first's.
+        src[CC_SRC_COMB + 0] = out[0];
+        src[CC_SRC_COMB + 1] = out[1];
+        src[CC_SRC_COMB + 2] = out[2];
+        src[CC_SRC_COMB + 3] = out[3];
     }
 }
 
@@ -2735,39 +2821,34 @@ static void combiner_run(const f32 shade[4], f32 out[4]) {
  * TEXEL0 * PRIM form DKR's 2D uses everywhere.
  */
 static void combiner_eval(const f32 shade[4], u8 lit[4], u8 unlit[3]) {
-    f32 on[4];  // texel = white
-    f32 off[4]; // texel = black
     s32 i;
 
-    sCcTexel = 1.0f;
-    combiner_run(shade, on);
-    sCcTexel = 0.0f;
-    combiner_run(shade, off);
-    sCcTexel = 1.0f;
-
-    for (i = 0; i < 3; i++) {
-        lit[i] = clamp_u8(on[i]);
-        unlit[i] = clamp_u8(off[i]);
+    cc_prog_sync_current();
+    cc_prog_run(shade, 1.0f);
+    for (i = 0; i < 4; i++) {
+        lit[i] = clamp_u8(sCcSrc[CC_SRC_COMB + i]);
     }
-    lit[3] = clamp_u8(on[3]);
+    cc_prog_run(shade, 0.0f);
+    for (i = 0; i < 3; i++) {
+        unlit[i] = clamp_u8(sCcSrc[CC_SRC_COMB + i]);
+    }
 }
 
 /**
  * Just the lit half. The 3D path (project) only ever consumes `lit` — the
  * texel=0 run that combiner_eval also does is thrown away there, so the second
- * combiner_run was pure waste on every 3D vertex in the frame. The 2D path still
- * needs both halves and keeps using combiner_eval.
+ * run was pure waste on every 3D vertex in the frame. The 2D path still needs
+ * both halves and keeps using combiner_eval.
+ *
+ * Per vertex, so it trusts the program to be current: every caller has run
+ * cc_prog_sync_current() for the batch.
  */
 static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
-    f32 on[4];
-    s32 i;
-
-    sCcTexel = 1.0f;
-    combiner_run(shade, on);
-
-    for (i = 0; i < 4; i++) {
-        lit[i] = clamp_u8(on[i]);
-    }
+    cc_prog_run(shade, 1.0f);
+    lit[0] = clamp_u8(sCcSrc[CC_SRC_COMB + 0]);
+    lit[1] = clamp_u8(sCcSrc[CC_SRC_COMB + 1]);
+    lit[2] = clamp_u8(sCcSrc[CC_SRC_COMB + 2]);
+    lit[3] = clamp_u8(sCcSrc[CC_SRC_COMB + 3]);
 }
 
 // ---------------------------------------------------------------------------
@@ -2813,9 +2894,9 @@ static void combiner_classify(void) {
     static const u8 probeA[4] = { 13, 71, 149, 233 };
     static const u8 probeB[4] = { 200, 5, 96, 44 };
     static const u8 probeC[4] = { 0, 255, 255, 0 };
-    u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
-    u32 prim = (sPrimColor[0] << 24) | (sPrimColor[1] << 16) | (sPrimColor[2] << 8) | sPrimColor[3];
-    u32 env = (sEnvColor[0] << 24) | (sEnvColor[1] << 16) | (sEnvColor[2] << 8) | sEnvColor[3];
+    u32 cyc = CC_KEY_CYC();
+    u32 prim = CC_KEY_RGBA(sPrimColor);
+    u32 env = CC_KEY_RGBA(sEnvColor);
     f32 shade[4];
     u8 a[4], b[4], c[4];
     s32 i;
@@ -2852,6 +2933,7 @@ static void combiner_classify(void) {
 #if DKR_GFX_PROFILE
     sCcProbed++;
 #endif
+    cc_prog_sync(cyc, prim, env);
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
