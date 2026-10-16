@@ -28,6 +28,7 @@
 // Two touches: a glint, a narrow band of light that sweeps across the face
 // once each time it turns square on to the camera (after it has faded in),
 // and a soft halo behind it in its colour.
+//
 // The first time it is drawn in each visit to the boot screen, it asks for its
 // chime (dreamcast/swirl/make_chime.py; none unless the build was given one),
 // which the sound code starts as the scene gate opens: with the first frame
