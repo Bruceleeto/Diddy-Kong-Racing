@@ -2182,22 +2182,56 @@ static pvr_vertex_t *sBlastRecord;
 // Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
 static f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
 
+/**
+ * Write one finished PVR vertex to `vt`, which is a store queue or a slot in a
+ * recording. A recorded vertex is one whole 32-byte cache line, so `alloc`
+ * claims the line with movca.l instead of letting the first store miss read it
+ * in from memory, only for all eight words to be overwritten. movca.l stores r0
+ * to the line's first word, which is `flags` anyway.
+ *
+ * The words go out from the top down with pre-decrement stores: the FPU has no
+ * displacement store, so field by field the compiler spends an address add on
+ * each. The asm is said to write the whole vertex, which keeps it ordered with
+ * the flush, and there is no memory clobber to make the caller reload every
+ * global around each vertex.
+ */
+static inline void blast_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v,
+                             u32 argb) {
+    u8 *top = (u8 *) vt + 32;
+
+    if (alloc) {
+        __asm__ __volatile__("movca.l r0, @%1" : "=m"(*vt) : "r"(vt), "z"(flags));
+    }
+    __asm__ __volatile__("mov.l %[zero], @-%[p]\n\t"
+                         "mov.l %[argb], @-%[p]\n\t"
+                         "fmov.s %[v], @-%[p]\n\t"
+                         "fmov.s %[u], @-%[p]\n\t"
+                         "fmov.s %[z], @-%[p]\n\t"
+                         "fmov.s %[y], @-%[p]\n\t"
+                         "fmov.s %[x], @-%[p]\n\t"
+                         "mov.l %[flags], @-%[p]"
+                         : [p] "+r"(top), "+m"(*vt)
+                         : [zero] "r"(0), [argb] "r"(argb), [v] "f"(v), [u] "f"(u), [z] "f"(z), [y] "f"(y),
+                           [x] "f"(x), [flags] "r"(flags));
+}
+
+/** Send a store queue's vertex to the TA. The asm reads the vertex, which orders the stores before it. */
+static inline void blast_sq_flush(pvr_vertex_t *vt) {
+    __asm__ __volatile__("pref @%0" : : "r"(vt), "m"(*vt));
+}
+
 /** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
-    pvr_vertex_t *vt = sBlastRecord ? sBlastRecord : (pvr_vertex_t *) pvr_dr_target();
+    pvr_vertex_t *rec = sBlastRecord;
 
-    vt->flags = flags;
-    vt->x = x * sBlastSX;
-    vt->y = y * sBlastSY;
-    vt->z = (invw * sBlastZMul) + sBlastZAdd;
-    vt->u = u;
-    vt->v = v;
-    vt->argb = color;
-    vt->oargb = 0;
-    if (sBlastRecord) {
-        sBlastRecord++;
+    if (rec) {
+        blast_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        sBlastRecord = rec + 1;
     } else {
-        pvr_dr_commit(vt);
+        pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
+
+        blast_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        blast_sq_flush(vt);
     }
 }
 
@@ -2228,7 +2262,7 @@ static u32 blast_argb_lerp(u32 a, u32 b, f32 t) {
  * project the survivors and emit the fan. Only triangles that actually cross
  * the plane come here, so this is cold.
  */
-static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
+static __attribute__((cold)) void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     BlastClipVert poly[4];
     f32 px[4], py[4], iw[4];
     s32 n = 0;
@@ -2281,6 +2315,26 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
+/** A blast triangle with a corner behind the near plane, to the clipper. Cold, so out of the hot loop. */
+static __attribute__((noinline, cold)) void blast_clip_corners(const Triangle *t, const shz_vec4_t *cp,
+                                                                const u32 *argb, f32 uMul, f32 vMul) {
+    BlastClipVert cv[3];
+
+    cv[0].c = cp[t->vi0];
+    cv[0].u = t->uv0.u * uMul;
+    cv[0].v = t->uv0.v * vMul;
+    cv[0].argb = argb[t->vi0];
+    cv[1].c = cp[t->vi1];
+    cv[1].u = t->uv1.u * uMul;
+    cv[1].v = t->uv1.v * vMul;
+    cv[1].argb = argb[t->vi1];
+    cv[2].c = cp[t->vi2];
+    cv[2].u = t->uv2.u * uMul;
+    cv[2].v = t->uv2.v * vMul;
+    cv[2].argb = argb[t->vi2];
+    blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
+}
+
 #if DKR_GFX_PROFILE
 static void prof_slow_cc(u32 verts) {
     u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
@@ -2303,17 +2357,65 @@ static void prof_slow_cc(u32 verts) {
 }
 #endif
 
+/**
+ * shz_xmtrx_transform_vec4 on fv4 rather than fv8, with w = 1: a second vector
+ * register, so two vertices can be in the transform at once.
+ */
+static inline shz_vec4_t blast_transform_fv4(f32 x, f32 y, f32 z) {
+    register f32 rx __asm__("fr4") = x;
+    register f32 ry __asm__("fr5") = y;
+    register f32 rz __asm__("fr6") = z;
+    register f32 rw __asm__("fr7") = 1.0f;
+
+    __asm__ __volatile__("ftrv xmtrx, fv4" : "+f"(rx), "+f"(ry), "+f"(rz), "+f"(rw));
+    return shz_vec4_init(rx, ry, rz, rw);
+}
+
+/**
+ * The combiner mixes shade with something else: run the real mux, once per
+ * vertex rather than once per corner. Out of line, so the loop that calls it
+ * stays small for the batches that never do.
+ */
+static __attribute__((noinline)) u32 blast_color_mux(const Vertex *v) {
+    f32 shade[4];
+    u8 lit[4];
+
+    shade[0] = v->r * (1.0f / 255.0f);
+    shade[1] = v->g * (1.0f / 255.0f);
+    shade[2] = v->b * (1.0f / 255.0f);
+    shade[3] = v->a * (1.0f / 255.0f);
+    combiner_eval_lit(shade, lit);
+    return ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
+}
+
+/**
+ * A vertex's colour in a blast batch: the shade bytes through the per-batch
+ * keep/constant masks when the combiner collapses (sCcFast), the real mux
+ * otherwise.
+ */
+static inline u32 blast_color(const Vertex *v, s32 ccFast, u32 keep, u32 konst) {
+    if (ccFast) {
+        return ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) | konst;
+    }
+    return blast_color_mux(v);
+}
+
 static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
                          const Triangle *tris, s32 numTris, s32 texEnabled) {
-    f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
+    // Per vertex, what the emit loop writes out: the framebuffer position, the
+    // depth and the colour. The clip-space position is kept for the triangles
+    // that cross the near plane.
+    f32 px[GFX_BLAST_MAX_VERTS], py[GFX_BLAST_MAX_VERTS], pz[GFX_BLAST_MAX_VERTS];
     u32 argb[GFX_BLAST_MAX_VERTS];
     shz_vec4_t cp[GFX_BLAST_MAX_VERTS];
     u32 behind = 0;
     u32 texture = 0;
+    u32 keep, konst;
     f32 uMul = 0.0f, vMul = 0.0f;
     f32 uS, vS;
     s32 i;
     s32 total = numVerts + numVerts2;
+    s32 ccFast;
 
     if (verts == NULL || tris == NULL || numTris <= 0 || numVerts <= 0) {
         return;
@@ -2323,6 +2425,11 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         printf("blast: oversized batch %dv/%dt\n", (int) numVerts, (int) numTris);
         return;
     }
+    // The batch's vertices and triangles are rarely in the cache. Start on the
+    // first lines now, so they arrive while the state work below runs; the
+    // vertex loop fetches the rest a line ahead.
+    __builtin_prefetch(verts);
+    __builtin_prefetch(tris);
 
     PROF_LAP_START();
     // The color must be per-batch trivial: shade byte or constant per channel.
@@ -2360,6 +2467,30 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
         return;
     }
 
+    // Each channel is the vertex's own or a per-batch constant; settle which
+    // once, so a vertex costs a mask and an or.
+    ccFast = sCcFast;
+    if (!ccFast) {
+        cc_prog_sync_current();
+    }
+    keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
+           (sCcPass[2] ? 0x000000FFu : 0);
+    konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) | (u32) sCcConst[2]) &
+            ~keep;
+    argb[0] = blast_color(&verts[0], ccFast, keep, konst);
+
+    // Open the batch before transforming: the list and the depth mapping are
+    // folded into each vertex as it is projected. The first vertex's alpha is
+    // what decides the list. A triangle crossing the near plane can come back
+    // as two.
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord, (int) (argb[0] >> 24),
+                         &sBlastZMul, &sBlastZAdd)) {
+        // handle_polygon redoes this state, so falling back here is safe.
+        PROF_ADD(whyFull, numTris);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
+        return;
+    }
+
     PROF_ADD(blast, 1);
     PROF_ADD(verts, total);
 #if DKR_GFX_PROFILE
@@ -2370,25 +2501,24 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
     PROF_ADD(tris, numTris);
     PROF_LAP(tState);
 #if DKR_GFX_PROFILE_SKIP == 2
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
     return;
 #endif
 
-    // Transform + project every vertex. A vertex behind the near plane just marks
-    // its bit; the triangles touching it go through the in-path clipper below.
+    // Transform + project every vertex, all the way to what the PVR is sent. A
+    // vertex behind the near plane just marks its bit; the triangles touching
+    // it go through the in-path clipper below.
     {
-        // Each channel is the vertex's own or a per-batch constant; settle which
-        // once, so a vertex costs a mask and an or.
-        u32 keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) |
-                   (sCcPass[1] ? 0x0000FF00u : 0) | (sCcPass[2] ? 0x000000FFu : 0);
-        u32 konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) |
-                     (u32) sCcConst[2]) & ~keep;
-        f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
-        s32 ccFast = sCcFast;
+        // N64 viewport, then framebuffer scale, kept apart in that order so the
+        // result is the same float the emit used to compute per corner.
+        const f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
+        const f32 outSX = sBlastSX, outSY = sBlastSY, zMul = sBlastZMul, zAdd = sBlastZAdd;
+        const u8 *triEnd = (const u8 *) (tris + numTris);
+        const u8 *triPref = (const u8 *) tris + 32;
         s32 run;
-
-        if (!ccFast) {
-            cc_prog_sync_current();
-        }
 
         i = 0;
         for (run = 0; run < 2; run++) {
@@ -2399,36 +2529,66 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
                 continue;
             }
             shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[run ? matrix2 : sCurMatrix]);
-            for (; v < end; v++, i++) {
+            // Two vertices at a time, on two vector registers, so the second
+            // one's transform runs while the first is divided and mapped: one
+            // vertex alone is a single chain of dependent latencies. Every
+            // vertex is projected, even one behind the near plane; its numbers
+            // are garbage and nothing reads them, but the loop has no branch.
+            for (; v + 1 < end; v += 2, i += 2) {
+                shz_vec4_t c0, c1;
+                f32 inv0, inv1;
+
+                // The next vertex line, and one more line of the triangles
+                // until they are all on their way. Fetching a line that is
+                // already in the cache costs next to nothing.
+                __builtin_prefetch((const u8 *) v + 40);
+                if (triPref < triEnd) {
+                    __builtin_prefetch(triPref);
+                    triPref += 32;
+                }
+                c0 = shz_xmtrx_transform_vec4(shz_vec4_init(v[0].x, v[0].y, v[0].z, 1.0f));
+                c1 = blast_transform_fv4(v[1].x, v[1].y, v[1].z);
+                inv0 = shz_invf_fsrra(c0.w);
+                inv1 = shz_invf_fsrra(c1.w);
+                cp[i] = c0;
+                cp[i + 1] = c1;
+                behind |= ((u32) (c0.w < GFX_NEAR_W) << i) | ((u32) (c1.w < GFX_NEAR_W) << (i + 1));
+                px[i] = ((c0.x * inv0 * vpSX) + vpTX) * outSX;
+                py[i] = (vpTY - (c0.y * inv0 * vpSY)) * outSY;
+                pz[i] = (inv0 * zMul) + zAdd;
+                px[i + 1] = ((c1.x * inv1 * vpSX) + vpTX) * outSX;
+                py[i + 1] = (vpTY - (c1.y * inv1 * vpSY)) * outSY;
+                pz[i + 1] = (inv1 * zMul) + zAdd;
+            }
+            if (v < end) {
                 shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
-                f32 invW;
+                f32 invW = shz_invf_fsrra(c.w);
 
                 cp[i] = c;
-                if (ccFast) {
-                    argb[i] = ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) |
-                              konst;
-                } else {
-                    // The combiner mixes shade with something else: run the real
-                    // mux, once per vertex rather than once per corner.
-                    f32 shade[4];
-                    u8 lit[4];
-
-                    shade[0] = v->r * (1.0f / 255.0f);
-                    shade[1] = v->g * (1.0f / 255.0f);
-                    shade[2] = v->b * (1.0f / 255.0f);
-                    shade[3] = v->a * (1.0f / 255.0f);
-                    combiner_eval_lit(shade, lit);
-                    argb[i] = ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
-                }
-                if (c.w < GFX_NEAR_W) {
-                    behind |= 1u << i;
-                    continue;
-                }
-                invW = shz_invf_fsrra(c.w);
-                sx[i] = (c.x * invW * vpSX) + vpTX;
-                sy[i] = vpTY - (c.y * invW * vpSY);
-                iw[i] = invW;
+                behind |= (u32) (c.w < GFX_NEAR_W) << i;
+                px[i] = ((c.x * invW * vpSX) + vpTX) * outSX;
+                py[i] = (vpTY - (c.y * invW * vpSY)) * outSY;
+                pz[i] = (invW * zMul) + zAdd;
+                i++;
             }
+        }
+    }
+
+    // The colours in a pass of their own, so the transform loop has no branch
+    // on the combiner for the compiler to make two copies of it over.
+    if (ccFast) {
+        for (i = 0; i < numVerts; i++) {
+            argb[i] = blast_color(&verts[i], TRUE, keep, konst);
+        }
+        for (i = 0; i < numVerts2; i++) {
+            argb[numVerts + i] = blast_color(&verts2[i], TRUE, keep, konst);
+        }
+    } else {
+        for (i = 0; i < numVerts; i++) {
+            argb[i] = blast_color_mux(&verts[i]);
+        }
+        for (i = 0; i < numVerts2; i++) {
+            argb[numVerts + i] = blast_color_mux(&verts2[i]);
         }
     }
 
@@ -2446,66 +2606,82 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2
                    (sGeometryMode & G_FOG) != 0, sPrimColor[3], sEnvColor[3], numTris);
     }
 #endif
-    // A triangle crossing the near plane can come back as two.
-    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord,
-                         (int) (argb[0] >> 24), &sBlastZMul, &sBlastZAdd)) {
-        // handle_polygon redoes this state, so falling back here is safe.
-        PROF_ADD(whyFull, numTris);
-        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
-        return;
-    }
     if (texture != 0) {
         uMul = shz_invf_fsrra(32.0f * (f32) sTileWidth) * uS;
         vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
     }
 
-    for (i = 0; i < numTris; i++) {
-        const Triangle *t = &tris[i];
-        s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
+    {
+        // The output position lives in locals for the whole loop: the store
+        // queue address alternates between the two queues, a recording just
+        // advances.
+        pvr_vertex_t *rec = sBlastRecord;
+        u32 sq = pvr_dr_addr;
 
-        if (i0 >= total || i1 >= total || i2 >= total) {
-            continue;
-        }
-        if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
-            BlastClipVert cv[3];
+        for (i = 0; i < numTris; i++) {
+            const Triangle *t = &tris[i];
+            s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
+            pvr_vertex_t *o0, *o1, *o2;
 
-            cv[0].c = cp[i0];
-            cv[0].u = t->uv0.u * uMul;
-            cv[0].v = t->uv0.v * vMul;
-            cv[0].argb = argb[i0];
-            cv[1].c = cp[i1];
-            cv[1].u = t->uv1.u * uMul;
-            cv[1].v = t->uv1.v * vMul;
-            cv[1].argb = argb[i1];
-            cv[2].c = cp[i2];
-            cv[2].u = t->uv2.u * uMul;
-            cv[2].v = t->uv2.v * vMul;
-            cv[2].argb = argb[i2];
-            PROF_ADD(clipped, 1);
-#if DKR_GFX_PROFILE_SKIP != 1
-            blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
-#endif
-            continue;
-        }
-        if (!(t->flags & BACKFACE_DRAW)) {
-            f32 area = ((sx[i1] - sx[i0]) * (sy[i2] - sy[i0])) -
-                       ((sx[i2] - sx[i0]) * (sy[i1] - sy[i0]));
-            if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
-                PROF_ADD(culled, 1);
+            if (i0 >= total || i1 >= total || i2 >= total) {
                 continue;
             }
-        }
-        PROF_ADD(sent, 1);
-        PROF_ADD(sentFrame, 1);
-#if DKR_GFX_PROFILE_SKIP == 1
-        continue;
+            if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
+                PROF_ADD(clipped, 1);
+#if DKR_GFX_PROFILE_SKIP != 1
+                // The cold clipper emits through the globals.
+                sBlastRecord = rec;
+                pvr_dr_addr = sq;
+                blast_clip_corners(t, cp, argb, uMul, vMul);
+                rec = sBlastRecord;
+                sq = pvr_dr_addr;
 #endif
-        blast_emit(sx[i0], sy[i0], iw[i0], t->uv0.u * uMul, t->uv0.v * vMul, argb[i0],
-                   PVR_CMD_VERTEX);
-        blast_emit(sx[i1], sy[i1], iw[i1], t->uv1.u * uMul, t->uv1.v * vMul, argb[i1],
-                   PVR_CMD_VERTEX);
-        blast_emit(sx[i2], sy[i2], iw[i2], t->uv2.u * uMul, t->uv2.v * vMul, argb[i2],
-                   PVR_CMD_VERTEX_EOL);
+                continue;
+            }
+            if (!(t->flags & BACKFACE_DRAW)) {
+                // In framebuffer pixels: the scale is positive, so the winding
+                // is the same as in N64 pixels.
+                f32 area = ((px[i1] - px[i0]) * (py[i2] - py[i0])) - ((px[i2] - px[i0]) * (py[i1] - py[i0]));
+                if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                    PROF_ADD(culled, 1);
+                    continue;
+                }
+            }
+            PROF_ADD(sent, 1);
+            PROF_ADD(sentFrame, 1);
+#if DKR_GFX_PROFILE_SKIP == 1
+            continue;
+#endif
+            if (rec) {
+                o0 = rec;
+                o1 = rec + 1;
+                o2 = rec + 2;
+                rec += 3;
+            } else {
+                o0 = (pvr_vertex_t *) (sq ^ 32);
+                o1 = (pvr_vertex_t *) sq;
+                o2 = (pvr_vertex_t *) (sq ^ 32);
+            }
+            blast_put(o0, rec != NULL, PVR_CMD_VERTEX, px[i0], py[i0], pz[i0], t->uv0.u * uMul, t->uv0.v * vMul,
+                      argb[i0]);
+            if (!rec) {
+                blast_sq_flush(o0);
+            }
+            blast_put(o1, rec != NULL, PVR_CMD_VERTEX, px[i1], py[i1], pz[i1], t->uv1.u * uMul, t->uv1.v * vMul,
+                      argb[i1]);
+            if (!rec) {
+                blast_sq_flush(o1);
+            }
+            blast_put(o2, rec != NULL, PVR_CMD_VERTEX_EOL, px[i2], py[i2], pz[i2], t->uv2.u * uMul, t->uv2.v * vMul,
+                      argb[i2]);
+            if (!rec) {
+                blast_sq_flush(o2);
+                // Three flips from sq leave it where the third vertex went.
+                sq ^= 32;
+            }
+        }
+        pvr_dr_addr = sq;
+        sBlastRecord = rec;
     }
     if (sBlastRecord) {
         gfx_blast_end(sBlastRecord);
@@ -3162,9 +3338,17 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
     }
 
     for (i = 0; count == 0 || i < count; i++) {
-        u32 w0 = dl[i].words.w0;
-        u32 w1 = dl[i].words.w1;
-        u32 cmd = (w0 >> 24) & 0xFF;
+        u32 w0, w1, cmd;
+
+        // The game builds the frame's list in memory far larger than the
+        // cache, so each new line of it would be a miss. On entering a line,
+        // start on the one after next.
+        if (!((u32) &dl[i] & 31)) {
+            __builtin_prefetch(&dl[i + 8]);
+        }
+        w0 = dl[i].words.w0;
+        w1 = dl[i].words.w1;
+        cmd = (w0 >> 24) & 0xFF;
 
         // The immediate-mode opcodes are negative ints in gbi.h (G_ENDDL is
         // G_IMMFIRST-7 = -72), so every case has to be masked to the byte the
