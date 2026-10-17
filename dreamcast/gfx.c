@@ -119,6 +119,7 @@ static int sPendingFreeCount;
 #define ROUTE_OP 2
 
 static int sRoute;
+static int sHasMenu2dBackground = 0;
 
 // PVR punch-through alpha threshold: a texel with alpha below this is discarded
 // before the depth stage. KOS neither names nor writes this register. 0x80 is the
@@ -167,7 +168,7 @@ void gfx_window_init(int width, int height, int scale) {
         0,          // DMA disabled (we submit via the store queues)
         0,          // no FSAA
         1,          // autosort DISABLED -> submission order preserved
-        3           // OPB overflow count
+        5          // OPB overflow count
     };
 
     (void) scale; // the DC always outputs 640x480; we stretch to fit
@@ -443,6 +444,7 @@ void gfx_frame_begin(void) {
     sPtCount = 0;
     sOpCount = 0;
     sRoute = ROUTE_TR;
+	sHasMenu2dBackground = 0;
 }
 
 // User clip is specified in 32-pixel tiles, lower-right inclusive.
@@ -622,6 +624,7 @@ static int clip_tri_to_scissor(const GfxTriVert *tri, GfxTriVert *poly) {
     if (n < 3) return 0;
     return n;
 }
+static int sForceNoDepthWrite = 0;
 
 static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     pvr_poly_cxt_t cxt;
@@ -659,11 +662,11 @@ static void compile_header_for(int list, pvr_poly_hdr_t *out) {
     // Cost: these sprites no longer occlude anything drawn after them, so
     // something passing behind a tree can show through it. Only fixed by
     // classifying the lists.
-    if (!USE_PT_LIST && sAlphaRef > 0.0f) {
-        cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
+    if ((!USE_PT_LIST && sAlphaRef > 0.0f) || sForceNoDepthWrite) {
+    cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
     } else {
-        cxt.depth.write = sDepthWrite ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
-    }
+    cxt.depth.write = sDepthWrite ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
+   }
     cxt.blend.src = PVR_BLEND_SRCALPHA;
     cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
 
@@ -686,6 +689,21 @@ static void emit_vert(const GfxTriVert *s, int eol, float uScale, float vScale) 
 
     if (sDepthOffset) {
         invw *= 1.003f; // nudge decals toward the viewer
+    }
+	
+	
+    // 🛑 REPARO JEFE DINOSAURIO (TRICKY - DINO DOMAIN)
+    if (sBoundTex == 7 && s->w > 50.0f && s->r >= 240 && s->g >= 240 && s->b <= 20) {
+        v->flags = eol ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+        v->x = 0.0f;
+        v->y = 0.0f;
+        v->z = -1.0f;
+        v->u = 0.0f;
+        v->v = 0.0f;
+        v->argb = 0;
+        v->oargb = 0;
+        ta_commit(v);
+        return;
     }
 
     v->flags = eol ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
@@ -751,18 +769,115 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
     // screen's tiled backdrop is 320 blend-path quads with a black vertex colour and
     // a fully opaque texture, and excluding the blend path outright left them in TR
     // to paint over the sky and the trees.
+   // 🟢 1. Calcular dimensiones del lote (ancho X y alto Y) PRIMERO
+    float minX = verts[0].x, maxX = verts[0].x;
+    float minY = verts[0].y, maxY = verts[0].y;
+    for (int k = 1; k < count; k++) {
+        if (verts[k].x < minX) minX = verts[k].x;
+        if (verts[k].x > maxX) maxX = verts[k].x;
+        if (verts[k].y < minY) minY = verts[k].y;
+        if (verts[k].y > maxY) maxY = verts[k].y;
+    }
+    float spanX = maxX - minX;
+    float spanY = maxY - minY;
+
+    // 🟢 2. Detectar si el scissor actual es de pantalla dividida (2P, 3P, 4P):
+    // 🛡️ Acepta 319px y 239px (coordenadas inclusivas de N64) para que el lado derecho nunca dé falso:
+    int isSplitScreenScissor = sScisEnable && (
+        ((sScisX0 == 0.0f || (sScisX0 >= 158.0f && sScisX0 <= 162.0f)) && ((sScisX1 >= 158.0f && sScisX1 <= 162.0f) || sScisX1 >= 318.0f)) &&
+        ((sScisY0 == 0.0f || (sScisY0 >= 118.0f && sScisY0 <= 122.0f)) && ((sScisY1 >= 118.0f && sScisY1 <= 122.0f) || sScisY1 >= 238.0f))
+    );
+         // int isMultiViewport = sScisEnable && (sScisX1 < 300.0f || sScisY1 < 220.0f);
+		  int isMultiViewport = sScisEnable && (sScisX1 < 300.0f || sScisY1 < 220.0f);
+          int fullScreenScis = (sScisX0 == 0 && sScisY0 == 0 && !isMultiViewport);
+		  
+    // 🦖 DETECCIÓN DEL MINIMAPA 2D:
+    int isMinimap = 0;
+    if (!sDepthTest && !(sAlphaRef > 0.0f)) {
+        int isRightSideMap = (!sDepthOffset && minX >= 150.0f && spanX <= 145.0f && spanY <= 145.0f);
+        int isCenterMap    = (!sDepthOffset && minX >= 70.0f && maxX <= 250.0f && minY >= 30.0f && maxY <= 210.0f && spanX <= 145.0f && spanY <= 145.0f);
+        int isRacerArrow   = (!sDepthOffset && spanX <= 25.0f && spanY <= 25.0f && (minX > 60.0f || minY > 30.0f));
+        isMinimap = isRightSideMap || isCenterMap || isRacerArrow;
+    }
+   
+	   
+	   
+    // 🟢 Solo liberar el scissor si es el minimapa 2D en pantalla dividida:
+    int bypassScissor = isMinimap && isSplitScreenScissor;
+
+    // 🟢 3. Detectar fondo 2D completo de menú
+    if (sBoundTex != 0 && count == 6 && verts[0].w <= 1.05f && !sDepthTest && 
+        fullScreenScis && spanX >= 280.0f && spanY >= 180.0f) {
+        sHasMenu2dBackground = 1;
+    }
+
+    // 🔵 DETECCIÓN DE AROS DE VELOCIDAD:
+    int isBlueRing   = (verts[0].b > verts[0].r + 30 && verts[0].b >= 100);
+    int isYellowRing = (verts[0].r >= 180 && verts[0].g >= 180 && verts[0].b <= 120);
+    int isTrackRing  = isBlueRing || isYellowRing;
+
+    // 🟢 4. DETECCIÓN DE TABLAS Y ELEMENTOS DE MENÚ:
+    int isVolumeSlider   = (!sDepthTest && fullScreenScis && spanY <= 20.0f && spanX >= 100.0f && spanX <= 160.0f);
+    int isAdventureSlot  = (!sDepthTest && fullScreenScis && spanY >= 40.0f && spanY <= 75.0f && ((spanX >= 60.0f && spanX <= 110.0f) || spanX >= 240.0f));
+    int isMenuBoards3D   = (!isTrackRing && !sDepthTest && fullScreenScis && count > 6 && spanY >= 20.0f && spanY <= 220.0f && spanX >= 100.0f && spanX <= 320.0f);
+    int isVictoryBanner  = (!sDepthTest && fullScreenScis && spanY >= 35.0f && spanY <= 90.0f && verts[0].w <= 1.05f);
+    int isMenuBackground = (sHasMenu2dBackground && !sDepthTest && fullScreenScis && verts[0].w <= 1.05f);
+
+    int isMenuBoard = isVolumeSlider || isAdventureSlot || isMenuBoards3D || isVictoryBanner || isMenuBackground ||
+                      (sHasMenu2dBackground && !sDepthTest && fullScreenScis && (count > 6 || verts[0].w > 1.0f || (count == 6 && spanY < 120.0f)));
+
+    // 🟢 ENRUTAMIENTO ARQUITECTÓNICO INTACTO (Garantiza que los demos funcionen al 100%):
     {
         int emitAlpha = sTexEnvBlend ? sBlendColor[3] : verts[0].a;
+       int virtualPtCount = sPtCount;
+
+       if (sScisY0 > 0 || sScisX0 > 0 || isMultiViewport) {
+       virtualPtCount = 0;
+    }
 
         sRoute = ROUTE_TR;
         if (USE_PT_LIST && sAlphaRef > 0.0f) {
             sRoute = ROUTE_PT;
-        } else if (USE_PT_LIST && sPtCount == 0 && !sDepthTest && emitAlpha == 0xFF &&
-                   (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque)) {
+        } else if (USE_PT_LIST && virtualPtCount == 0 && !sDepthTest && emitAlpha == 0xFF &&
+                   (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque) && !isMenuBoard) {
             sRoute = ROUTE_OP;
+            sScisDirtyOp = 1;
+        }
+    }
+     // 🟢 Aplicar Depth Test:
+    int forceDepth = 0;
+    if (sRoute != ROUTE_OP && !sDepthTest && sBoundTex != 0 && verts[0].w > 1.2f && (!isMenuBoard || isTrackRing || sDepthOffset)) {
+        int isHugeFrame = (spanX >= 70.0f && spanY >= 50.0f);
+
+        // 🟢 DETECCIÓN UNIVERSAL DE PODERES:
+        // 1 Jugador:
+        int is1PPowerup  = (!isSplitScreenScissor && minX <= 110.0f && minY >= 125.0f && spanX <= 90.0f && spanY <= 90.0f);
+
+        // 2P, 3P y 4P (Sin límite de vértices para no perder el marco ni el icono):
+        int is4PPowerup  = (isSplitScreenScissor && spanX <= 75.0f && spanY <= 75.0f && !sDepthOffset);
+
+        // 🛡️ Respaldo especial para el Jugador de Arriba a la Derecha (3P / 4P):
+        int isTopRightPowerup = (!sDepthOffset && minX >= 150.0f && minY >= 50.0f && maxY <= 135.0f && spanX <= 75.0f && spanY <= 75.0f);
+
+        // 🟢 Aguja del velocímetro (1P):
+        int is1PSpeedo   = (!isSplitScreenScissor && minX >= 180.0f && minY >= 110.0f && spanX <= 110.0f && spanY <= 110.0f);
+
+        int isBossPowerup = is1PPowerup || is4PPowerup || isTopRightPowerup || is1PSpeedo;
+
+        int isHUD = isHugeFrame || (isMinimap && isSplitScreenScissor) || isBossPowerup;
+        int allowDepth = !isHUD;
+
+        if (allowDepth) {
+            sDepthTest = 1;
+            sHdrDirty = 1;
+            forceDepth = 1;
         }
     }
 
+    // 🟢 Desactivar recorte CPU SOLO si es el minimapa en multijugador:
+    if (bypassScissor) {
+        exact = 0;
+    }
     // Only the recorded lists reserve space up front, and clipping changes the
     // triangle count, so count them first when it is active.
     // TR streams straight out and needs no count, which keeps the second pass off
@@ -811,7 +926,9 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         uScale = sTextures[sBoundTex - 1].u_scale;
         vScale = sTextures[sBoundTex - 1].v_scale;
     }
-
+     // 🟢 Mejora 4: Recorte inteligente con memoria sWasBypassed:
+      static int sWasBypassed = 0;
+	  
     if ((sRoute == ROUTE_PT) ? sScisDirtyPt : ((sRoute == ROUTE_OP) ? sScisDirtyOp : sScisDirty)) {
         if (sScisEnable) {
             // The scissor arrives in N64 pixels; the framebuffer is scaled up, so
@@ -868,9 +985,17 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
             }
         }
     }
-
+    if (forceDepth) {
+        sDepthTest = 0;
+        sHdrDirty = 1;
+    }
+    if (sForceNoDepthWrite) {
+       sForceNoDepthWrite = 0;
+       sHdrDirty = 1;
+    }
     sRoute = ROUTE_TR;
 }
+
 
 // ---------------------------------------------------------------------------
 // Blast streaming — the native path for static level geometry (see handle_blast

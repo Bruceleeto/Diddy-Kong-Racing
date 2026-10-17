@@ -3603,7 +3603,8 @@ void update_camera_plane(f32 updateRate, Object *obj, Object_Racer *racer) {
             brakeVar = 0.0f;
             break;
     }
-    if (numViewports < 2) {
+    // 🟢 Carga de modelos completos en multijugador
+    if (1) {
         baseFloat2 += baseSpeed * 60.0f;
     } else {
         baseFloat2 += baseSpeed * 30.0f;
@@ -4243,11 +4244,31 @@ void update_player_racer(Object *obj, s32 updateRate) {
         update_AI_racer(obj, tempRacer, updateRate, updateRateF);
     } else {
         // Print player 1's coordinates to the screen if the debug cheat is enabled.
-        if (gRaceStartTimer == 0 && tempRacer->playerIndex == PLAYER_ONE) {
-            if (get_filtered_cheats() & CHEAT_PRINT_COORDS) {
-                render_printf(gRacerDebugCoords, obj->trans.x_position, obj->trans.y_position, obj->trans.z_position);
+       // 🟢 Velocímetro dinámico estilo FPS (Bit 27)
+        if (tempRacer->playerIndex == PLAYER_ONE && (get_filtered_cheats() & (1 << 27))) {
+            f32 forwardSpeed = -tempRacer->velocity;
+            s32 displayCC = 0;
+
+            if (forwardSpeed > 0.0f) {
+                // 🟢 Calibrado con redondeo para alcanzar exactamente los 200 CC
+                displayCC = (s32)((forwardSpeed * 13.75f) + 0.5f);
             }
+
+            set_render_printf_colour(255, 255, 0, 255);         // 🟡 Amarillo idéntico al FPS
+            set_render_printf_background_colour(0, 0, 0, 128);   // ⬛ Misma cajita negra translúcida del FPS
+            set_render_printf_position(26, 52);
+            render_printf("%d CC\n", displayCC);
+            set_render_printf_colour(255, 255, 255, 255);       // ⚪ Restaurar blanco
         }
+
+        // 🟢 PRINT COORDS (Bit 9): Coordenadas en tiempo real de tu vehículo
+        if (tempRacer->playerIndex == PLAYER_ONE && (get_filtered_cheats() & (1 << 9))) {
+            set_render_printf_background_colour(0, 0, 0, 160); // Fondo oscuro
+            set_render_printf_colour(255, 255, 255, 255);       // Letras blancas
+            set_render_printf_position(16, 68);                 // Justo debajo de los CC
+            render_printf("X:%.0f Y:%.0f Z:%.0f\n", obj->trans.x_position, obj->trans.y_position, obj->trans.z_position);
+        }
+
         set_render_printf_background_colour(0, 0, 0, 128);
         if (is_taj_challenge()) {
             gDialogueCameraAngle = 0;
@@ -4438,9 +4459,15 @@ void update_player_racer(Object *obj, s32 updateRate) {
             }
         }
         set_collision_mode(COLLISION_MODE_DEFAULT);
-        switch (tempRacer->vehicleID) {
+       switch (tempRacer->vehicleID) {
             case VEHICLE_CAR:
-                func_8004F7F4(updateRate, updateRateF, obj, tempRacer);
+                // 🟢 TRUCO FLYING CARS: Si está activo, el auto vuela como avión (acelera y curva en el aire)
+                if (tempRacer->playerIndex >= 0 && tempRacer->playerIndex < 4 && (get_filtered_cheats() & (1 << 29))) {
+                    func_80049794(updateRate, updateRateF, obj, tempRacer);
+                } else {
+                    // Si está en OFF, corre como auto terrestre normal
+                    func_8004F7F4(updateRate, updateRateF, obj, tempRacer);
+                }
                 break;
             case VEHICLE_LOOPDELOOP:
                 func_8004CC20(updateRate, updateRateF, obj, tempRacer);
@@ -4610,15 +4637,14 @@ void update_player_racer(Object *obj, s32 updateRate) {
 
         tempVar = ((tempRacer->headAngleTarget - tempRacer->headAngle) * updateRate) >> 3;
         CLAMP(tempVar, -0x800, 0x800);
-#ifdef ANTI_TAMPER
-        if (gAntiPiracyHeadroll) {
-            tempRacer->headAngle += gAntiPiracyHeadroll;
+
+        // 🟢 Cabezas giratorias: si el truco está en ON (Bit 3), gira en 360° continuamente
+        if ((get_filtered_cheats() & (1 << 3)) || gAntiPiracyHeadroll) {
+            tempRacer->headAngle += 0x800 * updateRate;
         } else {
             tempRacer->headAngle += tempVar;
         }
-#else
-        tempRacer->headAngle += tempVar;
-#endif
+
         if ((gCurrentButtonsPressed & R_TRIG) && tempRacer->tapTimerR) {
             tempRacer->tappedR = TRUE;
             tempRacer->tapTimerR = 0;
@@ -4986,7 +5012,10 @@ void func_8004F7F4(s32 updateRate, f32 updateRateF, Object *racerObj, Object_Rac
                 racer->lateral_velocity -= spBC + 0.5;
             }
         }
-        if (racer->boostTimer == 0 && gNumViewports < 2) {
+        // 🟢 MODIFICACIÓN: Fuego de tubo de escape en multijugador
+        // ❌ ANTES: if (racer->boostTimer == 0 && gNumViewports < 2)
+        // Se quitó "&& gNumViewports < 2" para que el escape funcione en 2, 3 y 4 jugadores.
+        if (racer->boostTimer == 0) {
             asset20 = (Object_Boost *) get_misc_asset(ASSET_MISC_20);
             asset20 = &asset20[racer->racerIndex];
             var_v1 = ((racer->boostType & EMPOWER_BOOST) >> 2) + 0x10;
@@ -5186,16 +5215,14 @@ void func_80050A28(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateR
         }
         sp60 = TRUE;
         if (gCurrentPlayerIndex >= PLAYER_ONE) {
-            if (gNumViewports < FOUR_PLAYERS) {
-                if (racer->drift_direction > 0) {
-                    obj->particleEmittersEnabled |= 0x1000 | 0x400;
-                } else if (racer->drift_direction < 0) {
-                    obj->particleEmittersEnabled |= 0x2000 | 0x800;
-                } else {
-                    obj->particleEmittersEnabled |= 0x2000 | 0x1000;
-                }
+            // 🟢 MODIFICACIÓN: Humo y chispas de frenado siempre activos
+            // ❌ ANTES: Tenía "if (gNumViewports < FOUR_PLAYERS)" y un "else { sp58 = 1; }" que lo apagaba en 4P.
+            if (racer->drift_direction > 0) {
+                obj->particleEmittersEnabled |= 0x1000 | 0x400;
+            } else if (racer->drift_direction < 0) {
+                obj->particleEmittersEnabled |= 0x2000 | 0x800;
             } else {
-                sp58 = 1;
+                obj->particleEmittersEnabled |= 0x2000 | 0x1000;
             }
         }
         if ((racer->miscAnimCounter & 7) < 2) {
@@ -5218,11 +5245,11 @@ void func_80050A28(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateR
         gCurrentRacerInput |= B_BUTTON;
         gCurrentStickY = -70;
         sp60 = TRUE;
-        if (gNumViewports < FOUR_PLAYERS) {
-            obj->particleEmittersEnabled |= 0x2000 | 0x1000 | 0x800 | 0x400;
-        } else {
-            sp58 = TRUE;
-        }
+
+        // 🟢 MODIFICACIÓN: Partículas completas de derrape en 4 jugadores
+        // ❌ ANTES: if (gNumViewports < FOUR_PLAYERS) { obj->particleEmittersEnabled |= ... } else { sp58 = TRUE; }
+        obj->particleEmittersEnabled |= 0x2000 | 0x1000 | 0x800 | 0x400;
+
         i = racer->y_rotation_vel;
         racer->y_rotation_vel += updateRate * 0x600 * racer->drifting;
         if (racer->drifting > 0) {
@@ -5243,14 +5270,12 @@ void func_80050A28(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateR
     }
     // Apply some flags when drifting
     if (racer->drift_direction != 0 && gCurrentPlayerIndex >= PLAYER_ONE) {
-        if (gNumViewports < FOUR_PLAYERS) {
-            if (racer->drift_direction > 0) {
-                obj->particleEmittersEnabled |= 0x1000 | 0x400;
-            } else {
-                obj->particleEmittersEnabled |= 0x2000 | 0x800;
-            }
+        // 🟢 MODIFICACIÓN: Humo de dirección de derrape activo en 4 jugadores
+        // ❌ ANTES: if (gNumViewports < FOUR_PLAYERS) { ... } else { sp58 = TRUE; }
+        if (racer->drift_direction > 0) {
+            obj->particleEmittersEnabled |= 0x1000 | 0x400;
         } else {
-            sp58 = TRUE;
+            obj->particleEmittersEnabled |= 0x2000 | 0x800;
         }
     }
     // Decide which way to drift when the R button is held
@@ -5470,7 +5495,10 @@ void func_80050A28(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateR
     } else {
         racer->unk1EE = 0;
     }
-    if (cam_get_viewport_layout() < THREE_PLAYERS) {
+    // 🟢 MODIFICACIÓN: Efectos de superficie (tierra/césped/arena) activos en 3 y 4 jugadores
+    // ❌ ANTES: if (cam_get_viewport_layout() < THREE_PLAYERS)
+    // El juego original desactivaba este bloque si había 3 o 4 pantallas divididas.
+    if (1) {
         if ((sp60 != 0 && racer->velocity < -2.0) || sp58 != 0 || racer->unk1FB != 0) {
             if (racer->wheel_surfaces[2] < SURFACE_NONE) {
                 obj->particleEmittersEnabled |= gSurfaceFlagTable[racer->wheel_surfaces[2]];
@@ -6570,7 +6598,11 @@ void update_car_velocity_ground(Object *obj, Object_Racer *racer, s32 updateRate
     } else {
         racer->unk1EE = 0;
     }
-    if (cam_get_viewport_layout() < 2 && sp38 && racer->velocity < -2.0) {
+
+    // 🟢 MODIFICACIÓN: Partículas de derrape de ruedas traseras activas en 3 y 4 jugadores
+    // ❌ ANTES: if (cam_get_viewport_layout() < 2 && sp38 && racer->velocity < -2.0)
+    // Se eliminó "cam_get_viewport_layout() < 2" para que no se apague al haber 3 o 4 jugadores.
+    if (sp38 && racer->velocity < -2.0) {
         if (racer->wheel_surfaces[2] < SURFACE_NONE) {
             obj->particleEmittersEnabled |= 1 << (racer->wheel_surfaces[2] * 2);
         }
@@ -7484,6 +7516,12 @@ f32 handle_racer_top_speed(Object *obj, Object_Racer *racer) {
 
     // If you want to change the baseline speed of vehicles, this is what you change.
     speedMultiplier = 1.0f;
+
+    // 🟢 Truco HIGH SPEED: Aumenta la velocidad un 45% (modo súper rápido / 200cc)
+    if (get_filtered_cheats() & (1 << 27)) {
+        speedMultiplier = 1.45f;
+    }
+
     // Set the player's top speed to 0 before the race starts, so you can't jump the start.
     if (gRaceStartTimer) {
         speedMultiplier = 0.0f;
@@ -8394,9 +8432,49 @@ s32 load_tt_ghost(s32 ghostOffset, s32 size, s16 *outTime) {
         }
         gGhostData[GHOST_STAFF] = mempool_alloc_safe(size - sizeof(GhostHeader), COLOUR_TAG_WHITE);
         if (gGhostData[GHOST_STAFF] != NULL) {
-            *outTime = ghost->time;
-            gGhostNodeCount[GHOST_STAFF] = ghost->nodeCount;
+            s16 time = ghost->time;
+            s16 nodeCount = ghost->nodeCount;
+            s32 i;
+            s32 numNodes;
+            GhostNode *nodes;
+
+            // 🟢 Byteswap de Big-Endian (N64) a Little-Endian (Dreamcast SH-4):
+            // En N64 un recorrido nunca supera los 360 nodos; si viene sin swap supera 1000:
+            if ((u16) nodeCount > 500) {
+                u16 rawTime = (u16) time;
+                u16 rawCount = (u16) nodeCount;
+                time = (s16) ((rawTime >> 8) | (rawTime << 8));
+                nodeCount = (s16) ((rawCount >> 8) | (rawCount << 8));
+            }
+
+            *outTime = time;
+            gGhostNodeCount[GHOST_STAFF] = nodeCount;
             bcopy((u8 *) ghost + 8, gGhostData[GHOST_STAFF], size - sizeof(GhostHeader));
+
+            // 🟢 Byteswap de las coordenadas (X, Y, Z) y giros de cada punto de la ruta:
+            if ((u16) ghost->nodeCount > 500) {
+                nodes = gGhostData[GHOST_STAFF];
+                numNodes = nodeCount;
+                if (numNodes > (s32) ((size - sizeof(GhostHeader)) / sizeof(GhostNode))) {
+                    numNodes = (size - sizeof(GhostHeader)) / sizeof(GhostNode);
+                }
+                for (i = 0; i < numNodes; i++) {
+                    u16 x = (u16) nodes[i].x;
+                    u16 y = (u16) nodes[i].y;
+                    u16 z = (u16) nodes[i].z;
+                    u16 zRot = (u16) nodes[i].zRotation;
+                    u16 xRot = (u16) nodes[i].xRotation;
+                    u16 yRot = (u16) nodes[i].yRotation;
+
+                    nodes[i].x = (s16) ((x >> 8) | (x << 8));
+                    nodes[i].y = (s16) ((y >> 8) | (y << 8));
+                    nodes[i].z = (s16) ((z >> 8) | (z << 8));
+                    nodes[i].zRotation = (s16) ((zRot >> 8) | (zRot << 8));
+                    nodes[i].xRotation = (s16) ((xRot >> 8) | (xRot << 8));
+                    nodes[i].yRotation = (s16) ((yRot >> 8) | (yRot << 8));
+                }
+            }
+
             mempool_free(ghost);
             return 0;
         }
@@ -8472,11 +8550,11 @@ s16 timetrial_ghost_full(void) {
 s32 timetrial_ghost_read(Object *obj) {
     f32 catmullX;
     s32 temp;
-    f32 vectorX[3];
+    f32 vectorX[4]; // 🟢 Cambiar [3] a [4]
     s32 rotDiff;
-    f32 vectorY[3];
+    f32 vectorY[4]; // 🟢 Cambiar [3] a [4]
     Object_Racer *racer;
-    f32 vectorZ[3];
+    f32 vectorZ[4]; // 🟢 Cambiar [3] a [4]
     s32 commonUnk0s32;
     s32 ghostDataIndex;
     s32 pad_sp58;
@@ -8513,7 +8591,8 @@ s32 timetrial_ghost_read(Object *obj) {
     }
     nodeIndex = commonUnk0s32 - 1;
 
-    for (i = 0; i <= ARRAY_COUNT(vectorY); i++) {
+    // 🟢 4 puntos de control para la interpolación Catmull-Rom (evita rebotes del fantasma):
+    for (i = 0; i < 4; i++) {
         curGhostNode = &gGhostData[ghostDataIndex][nodeIndex];
         if (nodeIndex == -1) {
             vectorX[i] = ((curGhostNode + 1)->x + (curGhostNode + 1)->x) - (curGhostNode + 2)->x;
@@ -8941,16 +9020,15 @@ void update_AI_racer(Object *obj, Object_Racer *racer, s32 updateRate, f32 updat
         racer->stretch_height_cap = 1.0f;
     }
     var_t2 = ((racer->headAngleTarget - racer->headAngle) * updateRate) >> 3;
-    CLAMP(var_t2, -0x800, 0x800)
-#ifdef ANTI_TAMPER
-    if (gAntiPiracyHeadroll) {
-        racer->headAngle += gAntiPiracyHeadroll;
+    CLAMP(var_t2, -0x800, 0x800);
+
+    // 🟢 Cabezas giratorias para los rivales de la CPU si el truco está en ON (Bit 3)
+    if ((get_filtered_cheats() & (1 << 3)) || gAntiPiracyHeadroll) {
+        racer->headAngle += 0x800 * updateRate;
     } else {
         racer->headAngle += var_t2;
     }
-#else
-    racer->headAngle += var_t2;
-#endif
+
     if (racer->shieldTimer > 0) {
         if (racer->shieldTimer > 60) {
             if (racer->shieldSoundMask) {
@@ -8994,7 +9072,6 @@ void update_AI_racer(Object *obj, Object_Racer *racer, s32 updateRate, f32 updat
     racer->unk1FE = 0xFF;
     set_racer_tail_lights(racer);
 }
-
 void func_8005B818(Object *obj, Object_Racer *racer, s32 updateRate, f32 updateRateF) {
     f32 temp_f0;
     s32 checkpointIdx;

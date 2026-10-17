@@ -1572,7 +1572,7 @@ void track_setup_racers(Vehicle vehicle, u32 entranceID, s32 playerCount) {
             if (racerEntry->playerIndex != 4) {
                 if (numPlayers == 1) {
                     spawnObjFlags |= OBJECT_BEHAVIOUR_INTERACTIVE;
-                }
+               }
             }
             if (vehicle >= VEHICLE_BOSSES) {
                 spawnObjFlags = OBJECT_BEHAVIOUR_SHADED;
@@ -1653,9 +1653,11 @@ void track_setup_racers(Vehicle vehicle, u32 entranceID, s32 playerCount) {
             i = racerObj->header->flags;
             if (i & OBJECT_HEADER_NO_TIME_TRIAL && gIsTimeTrial) {
                 free_object(racerObj);
-            } else if (i & OBJECT_HEADER_NO_MULTIPLATER && numPlayers >= 2) {
-                free_object(racerObj);
             }
+            // 🟢 Permitir que el dinosaurio aparezca en multijugador en Dreamcast
+            /* else if (i & OBJECT_HEADER_NO_MULTIPLATER && numPlayers >= 2) {
+                free_object(racerObj);
+            } */
         }
     }
     gGhostObjStaff = NULL;
@@ -4117,6 +4119,11 @@ void set_temp_model_transforms(Object *obj) {
                 modInstList--;
             }
 
+            // 🟢 ELIMINAR CONITOS: Forzar siempre el modelo 3D en alta calidad a cualquier distancia:
+            if (obj->behaviorId != BHV_TIMETRIAL_GHOST) {
+                modelIndex = firstNonEmptyModelIndex;
+            }
+
             if (modelIndex < firstNonEmptyModelIndex) {
                 modelIndex = firstNonEmptyModelIndex;
             }
@@ -4540,7 +4547,8 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     i = startIndex;
     endLoop = FALSE;
     while (i < objModel->numberOfBatches && !endLoop) {
-        if (!(objModel->batches[i].flags & RENDER_SEMI_TRANSPARENT) || flags & RENDER_SEMI_TRANSPARENT) {
+        // CORRECCIÓN: Si es el Skydome (objectID == -1), dibuja siempre todos los lotes incluido el sol
+        if (!(objModel->batches[i].flags & RENDER_SEMI_TRANSPARENT) || (flags & RENDER_SEMI_TRANSPARENT) || (obj->objectID == -1)) {
             // Hidden/Invisible geometry
             textureIndex = objModel->batches[i].flags & RENDER_HIDDEN;
             // Probably a fakematch to use textureIndex here, but it works.
@@ -4567,6 +4575,16 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                 if (flags & RENDER_SEMI_TRANSPARENT &&
                     !(objModel->batches[i].flags & (flags & ~RENDER_SEMI_TRANSPARENT))) {
                     texToSetFlags |= RENDER_SEMI_TRANSPARENT;
+                } 
+
+                    // 🟢 FIX: Si el objeto es el Skydome/Fondo, desactivar Z-Compare y Z-Update
+                    // para que no tape los billboards ni objetos en pantalla dividida.
+                if (obj->objectID == -1 || (obj->header->flags & HEADER_FLAGS_UNK_0080)) {
+                    texToSetFlags &= ~(RENDER_Z_COMPARE | RENDER_Z_UPDATE);
+                }
+				// 🟢 FIX AROS: Forzar comparación de profundidad para que las montañas los tapen:
+                if (obj->behaviorId == BHV_ZIPPER_AIR || obj->behaviorId == BHV_ZIPPER_WATER || obj->behaviorId == BHV_ZIPPER_GROUND) {
+                    texToSetFlags |= RENDER_Z_COMPARE;
                 }
                 if (gObjectTexAnim == FALSE) {
                     material_set(&dList, texToSet, texToSetFlags, texOffset);
@@ -4814,9 +4832,10 @@ void sort_objects_by_dist(s32 startIndex, s32 lastIndex) {
                 // get_distance_to_camera calculates the distance to the camera from a XYZ location.
                 obj->distanceToCamera =
                     -get_distance_to_camera(obj->trans.x_position, obj->trans.y_position, obj->trans.z_position);
+					// Cámbialo a asignación directa (=)
             } else if (obj->header->flags & HEADER_FLAGS_UNK_0080) {
-                obj->distanceToCamera += -16000.0f;
-            } else {
+                obj->distanceToCamera = -get_distance_to_camera(obj->trans.x_position, obj->trans.y_position, obj->trans.z_position) - 16000.0f;
+           } else {
                 obj->distanceToCamera =
                     -get_distance_to_camera(obj->trans.x_position, obj->trans.y_position, obj->trans.z_position);
             }
@@ -11284,9 +11303,8 @@ s16 *func_80024594(s32 *currentCount, s32 *maxCount) {
 void func_800245B4(s16 arg0) {
     D_8011AC20[D_800DC700++] = arg0;
     if (D_800DC700 >= ARRAY_COUNT(D_8011AC20)) {
-        D_800DC700 = 0;
+              D_800DC700 = 0;
     }
 }
-
 UNUSED const char sReadOutErrorString[] = "RO error %d!!\n";
 UNUSED const char sPureAnguishString[] = "ARGHHHHHHHHH\n";

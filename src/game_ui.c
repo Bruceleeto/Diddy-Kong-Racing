@@ -743,8 +743,8 @@ void hud_render_player(Gfx **dList, Mtx **mtx, Vertex **vertexList, Object *obj,
                             D_800E2794[gHUDNumPlayers][racer->playerIndex] = 0;
                         }
                         sound_play((SOUND_TING_HIGHEST - (D_800E2794[gHUDNumPlayers][racer->playerIndex] == 0)), NULL);
-                    }
-                    if (input_pressed(gHudController) & R_CBUTTONS && racer->raceFinished == FALSE && gHudRaceStart &&
+                    }   
+                     if (input_pressed(gHudController) & R_CBUTTONS && racer->raceFinished == FALSE && gHudRaceStart &&
                         gMinimapOpacity == 0) {
                         gHudToggleSettings[gHUDNumPlayers] = 1 - gHudToggleSettings[gHUDNumPlayers];
                         if (gHudToggleSettings[gHUDNumPlayers] == 0) {
@@ -1943,14 +1943,14 @@ void hud_race_start(s32 countdown, s32 updateRate) {
             gCurrentHud->entry[HUD_RACE_START_GO].raceStartGo.musicStartTimer[gHudCurrentViewport] += updateRate;
             if (gCurrentHud->entry[HUD_RACE_START_GO].raceStartGo.musicStartTimer[gHudCurrentViewport] >= 60) {
                 if (gRaceStartShowHudStep == 4) {
-                    // Mute background music in 3/4 player.
-                    if (cam_get_viewport_layout() > TWO_PLAYERS) {
-                        music_play(SEQUENCE_NONE);
-                    } else {
-                        level_music_start(1.0f);
-                    }
-                    sound_play(SOUND_WHOOSH1, NULL);
-                    gRaceStartShowHudStep++;
+                     // Mute background music in 3/4 player (Cambiado a > 4 para permitir musica en 3P y 4P):
+                   if (cam_get_viewport_layout() > 4) {
+                       music_play(SEQUENCE_NONE);
+                   } else {
+                     level_music_start(1.0f);
+                   }
+                     sound_play(SOUND_WHOOSH1, NULL);
+                     gRaceStartShowHudStep++;
                 }
                 gCurrentHud->entry[HUD_RACE_START_GO].pos.x -= (updateRate * 8);
             }

@@ -17,6 +17,7 @@
 /************ .data ************/
 
 s8 gAntiPiracyViewport = FALSE;
+s8 gIsRacingOnTrack = FALSE; // 🟢 1 en carrera, 0 en menús
 
 // x1, y1, x2, y2
 // posX, posY, width, height
@@ -467,6 +468,7 @@ void copy_viewports_to_stack(void) {
                 if (0) {} // Fakematch
                 width = -width;
             }
+
             gViewportStack[port].vp.vtrans[0] = xPos;
             gViewportStack[port].vp.vtrans[1] = yPos;
             gViewportStack[port].vp.vscale[0] = width;
@@ -899,6 +901,11 @@ void func_80067D3C(Gfx **dList, UNUSED Mtx **mtx) {
         gCameras[gActiveCameraID].trans.rotation.x_rotation + gCameras[gActiveCameraID].pitch;
     gCameraTransform.rotation.z_rotation = gCameras[gActiveCameraID].trans.rotation.z_rotation;
 
+    // 🟢 Solo voltea si estás en la pista Y NO estás en menús ni cinemáticas (!gCutsceneCameraActive)
+    if (gIsRacingOnTrack && !gCutsceneCameraActive && (gAntiPiracyViewport || (get_filtered_cheats() & (1 << 30)))) {
+        gCameraTransform.rotation.z_rotation += 0x8000;
+    }
+
     gCameraTransform.x_position = -gCameras[gActiveCameraID].trans.x_position;
     gCameraTransform.y_position = -gCameras[gActiveCameraID].trans.y_position;
     if (gNoCamShake) {
@@ -912,7 +919,7 @@ void func_80067D3C(Gfx **dList, UNUSED Mtx **mtx) {
     gCameraTransform.rotation.y_rotation = -0x8000 - gCameras[gActiveCameraID].trans.rotation.y_rotation;
     gCameraTransform.rotation.x_rotation =
         -(gCameras[gActiveCameraID].trans.rotation.x_rotation + gCameras[gActiveCameraID].pitch);
-    gCameraTransform.rotation.z_rotation = -gCameras[gActiveCameraID].trans.rotation.z_rotation;
+    gCameraTransform.rotation.z_rotation = -gCameraTransform.rotation.z_rotation;
     gCameraTransform.scale = 1.0f;
     gCameraTransform.x_position = gCameras[gActiveCameraID].trans.x_position;
     gCameraTransform.y_position = gCameras[gActiveCameraID].trans.y_position;
@@ -993,13 +1000,7 @@ void mtx_perspective(Gfx **dList, Mtx **mtx) {
  */
 void viewport_rsp_set(Gfx **dList, s32 halfWidth, s32 halfHeight, s32 centerX, s32 centerY) {
     s32 tempWidth = (get_filtered_cheats() & CHEAT_MIRRORED_TRACKS) ? -halfWidth : halfWidth;
-#ifdef ANTI_TAMPER
-    // Antipiracy measure. Flips the screen upside down.
-    if (gAntiPiracyViewport) {
-        halfHeight = -halfHeight;
-        tempWidth = -halfWidth;
-    }
-#endif
+
     if (!(gScreenViewports[gActiveCameraID].flags & VIEWPORT_EXTRA_BG)) {
         gViewportStack[gActiveCameraID].vp.vtrans[0] = centerX * 4;
         gViewportStack[gActiveCameraID].vp.vtrans[1] = centerY * 4;
@@ -1179,6 +1180,12 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         } else {
             tiltAngle = gCameras[gActiveCameraID + 4].trans.rotation.z_rotation + obj->trans.rotation.z_rotation;
         }
+
+        // 🟢 Hojas de árboles y matas: voltearlas solo si estamos corriendo en la pista
+        if (gIsRacingOnTrack && !gCutsceneCameraActive && (gAntiPiracyViewport || (get_filtered_cheats() & (1 << 30)))) {
+            tiltAngle += 0x8000;
+        }
+
         frameID = obj->animFrame;
         gModelMatrixStackPos++;
         mtxf_billboard(gModelMatrixF[gModelMatrixStackPos], tiltAngle, obj->trans.scale, gVideoAspectRatio);

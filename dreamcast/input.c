@@ -2,7 +2,6 @@
 
 #include <kos.h>
 
-
 #define BTN_A 0x8000
 #define BTN_B 0x4000
 #define BTN_Z 0x2000
@@ -28,7 +27,7 @@
 // take over that axis. Covers centering drift without eating real input.
 #define STICK_IDLE 8
 
-void input_host_read(unsigned short *button, signed char *stickX, signed char *stickY) {
+void input_host_read(int port, unsigned short *button, signed char *stickX, signed char *stickY) {
     maple_device_t *cont;
     cont_state_t *st;
     unsigned short buttons = 0;
@@ -38,37 +37,35 @@ void input_host_read(unsigned short *button, signed char *stickX, signed char *s
     *stickX = 0;
     *stickY = 0;
 
-    cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    cont = maple_enum_type(port, MAPLE_FUNC_CONTROLLER);
     if (cont == NULL) {
-        return; // no pad plugged in — report neutral
+        return;
     }
     st = (cont_state_t *) maple_dev_status(cont);
     if (st == NULL) {
         return;
     }
 
-    // Face buttons and start.
-    if (st->buttons & CONT_A) buttons |= BTN_A;         // accelerate
-    if (st->buttons & CONT_B) buttons |= BTN_B;         // brake / reverse
-    if (st->buttons & CONT_START) buttons |= BTN_START;
+    // 🟢 1. Botones frontales (A: Acelerar | B y X: Freno doble | Y: Cámara)
+    if (st->buttons & CONT_A) buttons |= BTN_A;     // A: Acelerar
+    if (st->buttons & CONT_B) buttons |= BTN_B;     // B: Frenar / Reversa
+    if (st->buttons & CONT_X) buttons |= BTN_B;     // X: Frenar / Reversa
+    if (st->buttons & CONT_Y) buttons |= BTN_CUP;   // Y: Zoom de cámara
 
-    // Triggers: N64 Z (fire) on the left, N64 R (hop / powerslide) on the right.
-    if (st->ltrig > TRIG_THRESHOLD) buttons |= BTN_Z;
-    if (st->rtrig > TRIG_THRESHOLD) buttons |= BTN_R;
+    // 🟢 2. Gatillos (L: Armas y corneta original | R: Derrape y salto)
+    if (st->ltrig > TRIG_THRESHOLD) buttons |= BTN_Z; // L: Disparar armas / Corneta
+    if (st->rtrig > TRIG_THRESHOLD) buttons |= BTN_R; // R: Derrape / Salto
 
-    // The DC pad has no C-cluster; put camera on the X/Y face buttons, and let
-    // X double as the N64 L (only used in a couple of debug spots).
-    if (st->buttons & CONT_Y) buttons |= BTN_CUP;
-    if (st->buttons & CONT_X) buttons |= BTN_CDOWN | BTN_L;
+    // 🟢 3. Start
+    if (st->buttons & CONT_START) buttons |= BTN_START; // Pausa
 
-    // D-pad drives the N64 D-pad (menu navigation).
-    if (st->buttons & CONT_DPAD_UP) buttons |= BTN_UP;
-    if (st->buttons & CONT_DPAD_DOWN) buttons |= BTN_DOWN;
-    if (st->buttons & CONT_DPAD_LEFT) buttons |= BTN_LEFT;
-    if (st->buttons & CONT_DPAD_RIGHT) buttons |= BTN_RIGHT;
+    // 🟢 4. Cruceta (D-Pad)
+    if (st->buttons & CONT_DPAD_UP)    buttons |= BTN_CUP;    // ⬆️ Arriba: Zoom de cámara (igual que Y)
+    if (st->buttons & CONT_DPAD_RIGHT) buttons |= BTN_CRIGHT; // ➡️ Derecha: TT CAM / Mapa / Radar
+    if (st->buttons & CONT_DPAD_LEFT)  buttons |= BTN_CDOWN;  // ⬅️ Izquierda: Velocímetro / Info carrera
+    // ⬇️ Abajo queda VACÍO (no hace nada)
 
-    // Analog stick: DC joyx/joyy are -128..127. Scale to the N64's -80..80, and
-    // flip Y — the DC reports up as negative, the N64 as positive.
+    // 🟢 5. Palanca Analógica (Conducción limpia)
     x = (st->joyx * STICK_MAX) / 128;
     y = (-st->joyy * STICK_MAX) / 128;
 
@@ -76,17 +73,6 @@ void input_host_read(unsigned short *button, signed char *stickX, signed char *s
     if (x > STICK_MAX) x = STICK_MAX;
     if (y < -STICK_MAX) y = -STICK_MAX;
     if (y > STICK_MAX) y = STICK_MAX;
-
-    // The game only reads the stick for steering/pitch, so the D-pad also
-    // synthesizes full stick deflection on any axis the stick leaves idle.
-    if (x > -STICK_IDLE && x < STICK_IDLE) {
-        if (st->buttons & CONT_DPAD_LEFT) x = -STICK_MAX;
-        if (st->buttons & CONT_DPAD_RIGHT) x = STICK_MAX;
-    }
-    if (y > -STICK_IDLE && y < STICK_IDLE) {
-        if (st->buttons & CONT_DPAD_UP) y = STICK_MAX;
-        if (st->buttons & CONT_DPAD_DOWN) y = -STICK_MAX;
-    }
 
     *button = buttons;
     *stickX = (signed char) x;

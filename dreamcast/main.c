@@ -6,6 +6,8 @@
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
+#include "save.h"
+#include "vmu_anim.h"
 
 
 extern u64 pc_uptime_ns(void);
@@ -18,7 +20,9 @@ extern OSThread *__osRunningThread;
 static OSThread sHostThread;
 
 #define PC_RETRACE_NSEC (1000000000ll / 60)
-#define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
+// 🟢 Variable dinámica de framerate (2 = 30 FPS, 1 = 60 FPS)
+int gPcLogicUpdateRate = 2;
+//#define PC_LOGIC_UPDATE_RATE 1 // LOGIC_30FPS — what gVideoDeltaTime commits to
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
 
 s32 pc_retrace_wait(void) {
@@ -27,16 +31,27 @@ s32 pc_retrace_wait(void) {
     u64 nowNs;
     s32 periods;
 
+    // 🟢 DETECCIÓN DIRECTA POR PANTALLAS:
+    // Si la cámara tiene más de 1 pantalla (2P, 3P o 4P), bloquea a 30 FPS sólidos.
+    // En 1 Jugador, inicio y demos (layout == 0), corre a 60 FPS.
+    extern s32 cam_get_viewport_layout(void);
+    int currentRate = gPcLogicUpdateRate;
+
+    if (cam_get_viewport_layout() > 0) {
+        currentRate = 2; // 30 FPS sólidos en 2P, 3P y 4P
+    }
+
+    
     nowNs = pc_uptime_ns();
 
     if (sLastNs == 0) {
         sLastNs = nowNs;
-        return PC_LOGIC_UPDATE_RATE;
+        return currentRate; // 👈 1. Cambiado aquí currentRate
     }
 
     // Sleep until this frame has covered its full committed cadence. This is
     // the stand-in for retail's blocking osRecvMesg on the vblank queue.
-    targetNs = sLastNs + (PC_LOGIC_UPDATE_RATE * PC_RETRACE_NSEC);
+    targetNs = sLastNs + ((u64) currentRate * PC_RETRACE_NSEC); // 👈 2. Cambiado aquí
     if (nowNs < targetNs) {
         struct timespec req;
         req.tv_sec = (targetNs - nowNs) / 1000000000ll;
@@ -46,8 +61,8 @@ s32 pc_retrace_wait(void) {
     }
 
     periods = (s32) ((nowNs - sLastNs) / PC_RETRACE_NSEC);
-    if (periods < PC_LOGIC_UPDATE_RATE) {
-        periods = PC_LOGIC_UPDATE_RATE;
+    if (periods < currentRate) { // 👈 3. Cambiado aquí currentRate
+        periods = currentRate;
     }
     if (periods > PC_MAX_UPDATE_RATE) {
         periods = PC_MAX_UPDATE_RATE;
@@ -55,6 +70,8 @@ s32 pc_retrace_wait(void) {
 
     // Advance by whole periods so rounding doesn't accumulate into drift.
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
+    eeprom_update();
+    vmu_anim_update();
     return periods;
 }
 
@@ -99,7 +116,9 @@ typedef struct {
 // Which screen-space winding is a front face. Screen y runs downwards, so this is
 // the opposite sign from the y-up convention. Flip if the world renders
 // inside-out (outer surfaces gone, inner ones visible).
-#define GFX_FRONT_FACE_SIGN (-1.0f)
+//#define GFX_FRONT_FACE_SIGN (-1.0f)
+// 🟢 Detecta automáticamente si la pantalla está invertida o en modo espejo
+#define GFX_FRONT_FACE_SIGN ((sVpScaleX * sVpScaleY < 0.0f) ? 1.0f : -1.0f)
 
 static u32 sGfxFrameCount = 0;
 
@@ -613,7 +632,9 @@ static void project_geom(const GfxVertex *v, f32 *sx, f32 *sy, f32 *sz, f32 *sw,
     // geometry mode gates it — material_set() sets and clears G_FOG per material,
     // and clears it whenever a material wants vertex alpha instead, because the
     // RSP keeps the fog factor in the shade-alpha slot.
-    if (sGeometryMode & G_FOG) {
+    // 🟢 FIX NIEBLA: No aplicar niebla a los sprites/billboards (sBillboard) 
+    // para evitar que se saturen de color celeste en pantalla dividida (P2)
+     if ((sGeometryMode & G_FOG) && !sBillboard) {
         f32 fog = (ndcZ * (f32) sFogMul) + (f32) sFogOfs;
 
         if (fog < 0.0f) {
@@ -1521,7 +1542,6 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     apply_texture_filter();
     gfx_draw_tris(q, 6);
 }
-
 /**
  * G_TEXRECT / G_TEXRECTFLIP — the whole 2D layer: every glyph, HUD sprite and
  * menu image. `w2`/`w3` are the two G_RDPHALF words that follow the opcode and
@@ -1713,8 +1733,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             case G_DMADL:
                 run_dl((const Gfx *) w1, (w0 >> 16) & 0xFF, depth + 1);
                 break;
-            case (u8) G_SETTIMG:
+           case (u8) G_SETTIMG:
                 sTimgAddr = w1;
+                // 🟢 Solo actualizar si es una imagen real (ancho > 1) y no una paleta TLUT (ancho == 1).
+                // Esto hace aparecer el logo de la consola N64 en Save sin corromper el demo.
+                if ((w0 & 0xFFF) > 0 && w1 != 0) {
+                    sTexAddr = w1;
+                }
                 break;
             case (u8) G_SETTILE: {
                 // Only the tile the triangles actually render with matters.
@@ -1908,6 +1933,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
     (void)addr;
     (void)btns;
+	eeprom_flush_to_vmu(); // 💾 Si el jugador presiona A+B+X+Y+Start, guarda antes de salir
     arch_exit();
 }
 
