@@ -32,7 +32,7 @@ alignas(32) static const unsigned char sScrawlTexture[] = {
 
 extern int pc_project_world(const float world[3], float out[3]);
 
-#define SCRAWL_LIGHT_ROTATION (F_PI * 1.25f)   // from the upper left of the texture
+#define SCRAWL_LIGHT_ROTATION (F_PI * 1.75f)   // from the upper right of the texture, as the sun
 #define SCRAWL_SHADE 0.4f                      // how dark a wall facing away gets
 #define SCRAWL_HIGHLIGHT 0.45f                 // how light one facing the light gets
 #define SCRAWL_DEPTH_NUDGE 1.01f               // 1/w raised a little: in front of the sand
