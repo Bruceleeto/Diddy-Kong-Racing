@@ -319,7 +319,7 @@ void main_game_loop(void) {
     {
         extern float pc_get_fps(void);
         s32 fps10 = (s32) (pc_get_fps() * 10.0f + 0.5f);
-        set_render_printf_position(16, 108);
+        set_render_printf_position(20, 212); // 🟢 Justo debajo del cuadro del poder
         set_render_printf_colour(255, 255, 0, 255);
         render_printf("FPS %d.%d", fps10 / 10, fps10 % 10);
     }

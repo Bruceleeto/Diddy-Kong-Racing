@@ -34,6 +34,7 @@
 #include "tracks.h"
 #include "types.h"
 #include "video.h"
+extern int gPcLogicUpdateRate;
 
 /**
  * @file Contains all the code used for every menu in the game.
@@ -579,6 +580,7 @@ s32 gMenuSpriteFlags = 0;
 s32 gIsInTracksMode = TRUE;
 s32 gNumberOfActivePlayers = 1;
 s32 gIsInTwoPlayerAdventure = 0;
+s32 gAdventurePlayerCount = 1; // 🟢 Guarda la cantidad exacta de jugadores
 s32 gTrackIdForPreview = ASSET_LEVEL_CENTRALAREAHUB;
 s32 gTrackSelectRow = 0; // 1 = Dino Domain, 2 = Sherbet Island, etc.
 s32 gSaveFileIndex = 0;
@@ -2516,6 +2518,8 @@ void init_save_data(void) {
         gMenuAssets[i] = NULL;
     }
     // clang-format on
+
+    gUnlockedMagicCodes = 0xFFFFFFFF; // 🟢 Desbloquear los 32 trucos en la lista
 }
 
 /**
@@ -3354,7 +3358,7 @@ void func_80083098(f32 updateRateF) {
  * Load the title textures and reset player allocation.
  * Set the current level and demo.
  */
-void menu_prefetch_next_title_demo_music(void) {
+ void menu_prefetch_next_title_demo_music(void) {
     s8 *demo;
     u32 *offsets;
     u8 sequence = SEQUENCE_NONE;
@@ -3417,7 +3421,7 @@ void menu_title_screen_init(void) {
     set_time_trial_enabled(FALSE);
     gTitleDemoIndex = 0;
     sTitleScreenDemoIds = (s8 *) get_misc_asset(ASSET_MISC_TITLE_SCREEN_DEMO_IDS);
-    numberOfPlayers = sTitleScreenDemoIds[gTitleDemoIndex + DEMO_PLAYER_COUNT];
+     numberOfPlayers = sTitleScreenDemoIds[gTitleDemoIndex + DEMO_PLAYER_COUNT];
     gTitleDemoTimer = 0;
     if (numberOfPlayers == -2) {
         numberOfPlayers = 0;
@@ -6512,6 +6516,8 @@ void menu_magic_codes_list_init(void) {
 #else
     load_font(ASSET_FONTS_BIGFONT);
 #endif
+   // 🟢 Cargar el recurso 61 (flecha arriba) y 63 (flecha abajo)
+    menu_asset_load(61);
     menu_asset_load(63);
     menu_init_arrow_textures();
     transition_begin(&sMenuTransitionFadeOut);
@@ -6530,64 +6536,136 @@ void cheatlist_render(UNUSED s32 updateRate) {
     s32 i;
     s32 alpha;
     s32 yPos;
-    s32 numOfUnlockedCheats;
     s32 code;
     u16 *cheatData;
+    s32 numOfUnlockedCheats;
+    s32 cheatID;
+    char *cheatTextPtr;
+
+    // 🟢 Asegura que todos los trucos estén desbloqueados en la memoria
+    gUnlockedMagicCodes = 0xFFFFFFFF;
+
+   // 🟢 Lista de los 31 trucos reales (CheatID == Bit exacto de 0 a 32)
+    static const char *sCheatNames[32] = {
+        "UNLOCK T.T.",          // Bit 0: Desbloquear a T.T.
+        "UNLOCK DRUMSTICK",     // Bit 1: Desbloquear a Drumstick
+        "MIRROR TRACKS",        // Bit 2: Pistas Espejo
+        "SPINNING HEADS",       // Bit 3: Cabezas Giratorias (Anti-piratería)
+        "GIANT RACERS",         // Bit 4: Coches gigantes (ARNOLD)
+        "MINI RACERS",          // Bit 5: Coches diminutos (TEENYWEENIES)
+        "MUSIC PLAYER",         // Bit 6: Menú de música (JUKEBOX)
+        "START 10 BANANAS",     // Bit 7: 10 Plátanos (FREEFRUIT)
+        "HORN VOICES",          // Bit 8: Bocina con voces (BLABBERMOUTH)
+        "PRINT COORDS",         // Bit 9: Debug coordenadas
+        "VIEW CREDITS",         // Bit 10: Ver créditos (WHODIDTHIS)
+        "NO CPU WEAPONS",       // Bit 11: Rivales sin armas (BYEBYEBALLOONS)
+        "NO BANANAS",           // Bit 12: Sin plátanos (NOYELLOWSTUFF)
+        "POISON BANANAS",       // Bit 13: Plátanos frenan (BOGUSBANANAS)
+        "UNLIMITED BANANAS",    // Bit 14: Sin tope de 10 plátanos (VITAMINB)
+        "ONLY ROCKETS",         // Bit 15: Solo cohetes (BOMBSAWAY)
+        "ONLY TRAPS",           // Bit 16: Solo trampas (TOXICOFFENDER)
+        "ONLY BOOSTS",          // Bit 17: Solo turbos (ROCKETFUEL)
+        "ONLY SHIELDS",         // Bit 18: Solo escudos (BODYARMOR)
+        "ONLY MAGNETS",         // Bit 19: Solo imanes (OPPOSITESATTRACT)
+        "MAX POWER UP",         // Bit 20: Armas al máximo nivel 3 (FREEFORALL)
+        "NO TRACK ZIPS",        // Bit 21: Sin turbos en suelo (ZAPTHEZIPPERS)
+        "SAME CHARACTER",       // Bit 22: Mismo corredor (DOUBLEVISION)
+        "FOUR WHEEL DRIVE",     // Bit 23: Tracción 4x4 (OFFROAD)
+        "MULTI ADVENTURE",      // Bit 24: Aventura multijugador (JOINTVENTURE)
+        "EXPERT AI",            // Bit 25: IA Experta (TIMETOLOSE)
+        "FREE BALLOON",         // Bit 26: Globo gratis (EOLAOBFENRLONE)
+		"HIGH SPEED",           // Bit 27: Carreras de alta velocidad (+45% velocidad)
+		"ROM CHECKSUM",         // Bit 28: Letrero de depuración original)
+        "FLYING CARS",          // Bit 29: Autos voladores sin ruedas (Hovercar ID 3)
+		"FLIPPED SCREEN",       // Bit 30: Pantalla 180° de cabeza)
+		"60 FPS 1 PLAYER"       // Bit 31: 60 FPS MODO INTELIGENTE Si hay 2, 3 o 4 jugadores, bloquea a 30 FPS
+	   };                        // En 1 Jugador, usa la velocidad seleccionada (60 FPS si el truco está en ON)
+   
 
     set_text_background_colour(0, 0, 0, 0);
     set_text_font(ASSET_FONTS_BIGFONT);
-    set_text_colour(0, 0, 0, 255, 128);
-    draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF + 1, 35, gMenuText[ASSET_MENU_TEXT_MAGICCODESLIST],
-              ALIGN_MIDDLE_CENTER); // MAGIC CODES LIST
-    set_text_colour(255, 255, 255, 0, 255);
-    draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, 32, gMenuText[ASSET_MENU_TEXT_MAGICCODESLIST],
-              ALIGN_MIDDLE_CENTER); // MAGIC CODES LIST
 
-    for (i = 0, code = 1, numOfUnlockedCheats = 0; i < 32; i++, code <<= 1) {
-        if (code & gUnlockedMagicCodes) {
-            gUnlockedCheatIDs[numOfUnlockedCheats] = i;
-            numOfUnlockedCheats += 1;
-        }
-    }
-    yPos = 54;
-    alpha = gOptionBlinkTimer * 8;
-    if (alpha >= 256) {
-        alpha = 511 - alpha;
-    }
-    set_text_font(ASSET_FONTS_FUNFONT);
+    // 🟢 Título Superior en inglés ajustado en Y = 18 para dar espacio a la flecha
+    set_text_colour(0, 0, 0, 255, 128);
+    draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF + 1, 19, gMenuText[ASSET_MENU_TEXT_MAGICCODESLIST], ALIGN_MIDDLE_CENTER);
     set_text_colour(255, 255, 255, 0, 255);
-    for (i = gMenuStage, cheatData = (*gCheatsAssetData) + 1;
-         (i < gMenuStage + gNumOnscreenMagicCodes) && (i < numOfUnlockedCheats); i++, yPos += 16) {
+    draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, 18, gMenuText[ASSET_MENU_TEXT_MAGICCODESLIST], ALIGN_MIDDLE_CENTER);
+
+    // 🟢 Mete directamente los 31 trucos desbloqueados a la lista
+    for (i = 0, numOfUnlockedCheats = 0; i < 32; i++) {
+        gUnlockedCheatIDs[numOfUnlockedCheats] = i;
+        numOfUnlockedCheats++;
+    }
+
+    gNumOnscreenMagicCodes = 14;
+    if (gNumOnscreenMagicCodes > numOfUnlockedCheats) {
+        gNumOnscreenMagicCodes = numOfUnlockedCheats;
+    }
+
+    if (gOptionsMenuItemIndex < 0) gOptionsMenuItemIndex = 0;
+    if (gOptionsMenuItemIndex > numOfUnlockedCheats) gOptionsMenuItemIndex = numOfUnlockedCheats;
+    if (gOptionsMenuItemIndex >= gMenuStage + gNumOnscreenMagicCodes) gMenuStage = gOptionsMenuItemIndex - gNumOnscreenMagicCodes + 1;
+    if (gOptionsMenuItemIndex < gMenuStage) gMenuStage = gOptionsMenuItemIndex;
+
+    // 🟢 Lista inicia en Y = 43 para dar espacio a la flecha arriba
+    yPos = 43; 
+    alpha = gOptionBlinkTimer * 8;
+    if (alpha >= 256) { alpha = 511 - alpha; }
+
+    // 🟢 FLECHA ARRIBA TITILANDO
+    if (gOptionBlinkTimer & 8) {
+        texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrowUp, SCREEN_WIDTH_HALF, 33, 255, 255, 255, 255);
+    }
+
+    set_text_font(ASSET_FONTS_FUNFONT);
+    cheatData = (*gCheatsAssetData) + 1;
+    
+    for (i = gMenuStage; (i < gMenuStage + gNumOnscreenMagicCodes) && (i < numOfUnlockedCheats); i++, yPos += 11) {
+        cheatID = gUnlockedCheatIDs[i];
+
+        // 🟢 Se conserva el bloque original por compatibilidad de versiones
+#if VERSION == VERSION_79
+        cheatTextPtr = (char *) (*gCheatsAssetData) + cheatData[(cheatID * 3) + 2];
+#elif VERSION == VERSION_80
+        cheatTextPtr = (char *) (*gCheatsAssetData) + cheatData[(cheatID * 3) + 1];
+#else
+        cheatTextPtr = (char *) (*gCheatsAssetData) + cheatData[(cheatID * 2) + 1];
+#endif
+
+        // 🟢 Asignamos el nombre de la lista
+        if (cheatID < 32 && sCheatNames[cheatID] != NULL) {
+            cheatTextPtr = (char *) sCheatNames[cheatID];
+        }  
+
         if (i == gOptionsMenuItemIndex) {
             set_text_colour(255, 255, 255, alpha, 255);
-        }
-        draw_text(&sMenuCurrDisplayList, 48, yPos,
-#if VERSION == VERSION_79
-                  (char *) (*gCheatsAssetData) + cheatData[(gUnlockedCheatIDs[i] * 3) + 2], ALIGN_TOP_LEFT);
-#elif VERSION == VERSION_80
-                  (char *) (*gCheatsAssetData) + cheatData[(gUnlockedCheatIDs[i] * 3) + 1], ALIGN_TOP_LEFT);
-#else
-                  (char *) (*gCheatsAssetData) + cheatData[(gUnlockedCheatIDs[i] * 2) + 1], ALIGN_TOP_LEFT);
-#endif
-        if ((1 << gUnlockedCheatIDs[i]) & gActiveMagicCodes) {
-            draw_text(&sMenuCurrDisplayList, 256, yPos, gMenuText[ASSET_MENU_TEXT_ON], ALIGN_TOP_LEFT); // ON
         } else {
-            draw_text(&sMenuCurrDisplayList, 256, yPos, gMenuText[ASSET_MENU_TEXT_OFF], ALIGN_TOP_LEFT); // OFF
-        }
-        if (i == gOptionsMenuItemIndex) {
             set_text_colour(255, 255, 255, 0, 255);
         }
+
+        // 🟢 Dibuja el nombre a la izquierda
+        draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF - 124, yPos, cheatTextPtr, ALIGN_TOP_LEFT);
+
+        // 🟢 Muestra ON u OFF en +95 para no chocar con nombres largos
+         if (((1u << cheatID) & (u32)gActiveMagicCodes)) {
+             draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF + 95, yPos, "ON", ALIGN_TOP_LEFT);
+         } else {
+             draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF + 95, yPos, "OFF", ALIGN_TOP_LEFT);
+         }
     }
-    if (i < gMenuStage + gNumOnscreenMagicCodes) {
-        if (numOfUnlockedCheats == gOptionsMenuItemIndex) {
-            set_text_colour(255, 255, 255, alpha, 255);
-        }
-        draw_text(&sMenuCurrDisplayList, POS_CENTRED, yPos, gMenuText[ASSET_MENU_TEXT_RETURN],
-                  ALIGN_TOP_CENTER); // RETURN
-        return;
+
+    yPos += 2;
+    if (gOptionsMenuItemIndex == numOfUnlockedCheats) {
+        set_text_colour(255, 255, 255, alpha, 255);
+    } else {
+        set_text_colour(255, 255, 255, 0, 255);
     }
+    // 🟢 Botón RETURN centrado
+    draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, yPos, gMenuText[ASSET_MENU_TEXT_RETURN], ALIGN_TOP_CENTER);
+
+    // 🟢 FLECHA ABAJO TITILANDO (separada a yPos + 22 para no tapar RETURN)
     if (gOptionBlinkTimer & 8) {
-        texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrowDown, SCREEN_WIDTH_HALF, yPos + 8, 255, 255, 255, 255);
+        texrect_draw(&sMenuCurrDisplayList, gMenuSelectionArrowDown, SCREEN_WIDTH_HALF, yPos + 22, 255, 255, 255, 255);
     }
 }
 
@@ -6639,61 +6717,63 @@ s32 menu_magic_codes_list_loop(s32 updateRate) {
         }
     }
 
-    for (i = 0, code = 1, numUnlockedCodes = 0; i < MAX_CHEATS; i++) {
-        if (code & gUnlockedMagicCodes) {
-            gUnlockedCheatIDs[numUnlockedCodes] = i;
-            numUnlockedCodes++;
-        }
-        code <<= 1;
+    // 🟢 31 trucos desbloqueados listos para control
+     for (i = 0, numUnlockedCodes = 0; i < 32; i++) {
+        gUnlockedCheatIDs[numUnlockedCodes] = i;
+        numUnlockedCodes++;
     }
 
-    if ((xAxis < 0 || xAxis > 0) && numUnlockedCodes != gOptionsMenuItemIndex) {
+    // 🟢 Alternar el truco con Stick Izquierda/Derecha O presionando A / START
+    if (((xAxis != 0) || (buttonsPressed & (A_BUTTON | START_BUTTON))) && (gOptionsMenuItemIndex < numUnlockedCodes)) {
+        s32 currentCheatID = gUnlockedCheatIDs[gOptionsMenuItemIndex];
+
         sound_play(SOUND_SELECT2, NULL);
-        code = 1 << gUnlockedCheatIDs[gOptionsMenuItemIndex];
-        gActiveMagicCodes ^= code;                                               // Toggle active cheats?
-        cheatlist_exclusive(code, CHEAT_BIG_CHARACTERS, CHEAT_SMALL_CHARACTERS); // cheatlist_exclusive() = Clear flags?
+        
+        // 🟢 Directo: cada truco alterna su bit exacto (del 0 al 30)
+        code = 1u << currentCheatID;
+        gActiveMagicCodes ^= code; // Alterna entre ON y OFF
+		
+		 // 🟢 Al activar o desactivar el truco 31:
+        if (currentCheatID == 31) {
+            if ((u32)gActiveMagicCodes & (1u << 31)) {
+                gPcLogicUpdateRate = 1; // 60 FPS activado
+            } else {
+                gPcLogicUpdateRate = 2; // 30 FPS normal
+            }
+        }
+
+        // Exclusiones de trucos incompatibles originales
+        cheatlist_exclusive(code, CHEAT_BIG_CHARACTERS, CHEAT_SMALL_CHARACTERS);
         cheatlist_exclusive(code, CHEAT_SMALL_CHARACTERS, CHEAT_BIG_CHARACTERS);
-        cheatlist_exclusive(code, CHEAT_DISABLE_BANANAS,
-                            CHEAT_NO_LIMIT_TO_BANANAS | CHEAT_BANANAS_REDUCE_SPEED | CHEAT_START_WITH_10_BANANAS);
-        cheatlist_exclusive(code, CHEAT_NO_LIMIT_TO_BANANAS | CHEAT_BANANAS_REDUCE_SPEED | CHEAT_START_WITH_10_BANANAS,
-                            CHEAT_DISABLE_BANANAS);
-        cheatlist_exclusive(code, CHEAT_DISABLE_WEAPONS,
-                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE |
-                                CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW |
-                                CHEAT_MAXIMUM_POWER_UP);
-        cheatlist_exclusive(code,
-                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE |
-                                CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW | CHEAT_MAXIMUM_POWER_UP,
-                            CHEAT_DISABLE_WEAPONS);
-        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_RED,
-                            CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE | CHEAT_ALL_BALLOONS_ARE_YELLOW |
-                                CHEAT_ALL_BALLOONS_ARE_RAINBOW);
-        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_GREEN,
-                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_BLUE | CHEAT_ALL_BALLOONS_ARE_YELLOW |
-                                CHEAT_ALL_BALLOONS_ARE_RAINBOW);
-        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_BLUE,
-                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_YELLOW |
-                                CHEAT_ALL_BALLOONS_ARE_RAINBOW);
-        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_YELLOW,
-                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE |
-                                CHEAT_ALL_BALLOONS_ARE_RAINBOW);
-        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_RAINBOW,
-                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE |
-                                CHEAT_ALL_BALLOONS_ARE_YELLOW);
+        cheatlist_exclusive(code, CHEAT_BANANAS_REDUCE_SPEED, CHEAT_START_WITH_10_BANANAS);
+        cheatlist_exclusive(code, CHEAT_START_WITH_10_BANANAS, CHEAT_BANANAS_REDUCE_SPEED);
+        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_RED, CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE | CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW);
+        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_GREEN, CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_BLUE | CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW);
+        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_BLUE, CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW);
+        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_YELLOW, CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE | CHEAT_ALL_BALLOONS_ARE_RAINBOW);
+        cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_RAINBOW, CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE | CHEAT_ALL_BALLOONS_ARE_YELLOW);
     }
 
     previousMenuItemIndex = gOptionsMenuItemIndex;
 
+    // 🟢 Navegación circular (giratoria):
     if (yAxis < 0) {
         gOptionsMenuItemIndex++;
-        if (numUnlockedCodes < gOptionsMenuItemIndex) {
-            gOptionsMenuItemIndex = numUnlockedCodes;
+        // Si bajas desde RETURN, salta directamente al primer truco (arriba)
+        if (gOptionsMenuItemIndex > numUnlockedCodes) {
+            gOptionsMenuItemIndex = 0;
+            gMenuStage = 0; // Sube la pantalla al inicio
         }
     }
     if (yAxis > 0) {
         gOptionsMenuItemIndex--;
+        // Si subes desde el primer truco, salta directamente a RETURN (abajo)
         if (gOptionsMenuItemIndex < 0) {
-            gOptionsMenuItemIndex = 0;
+            gOptionsMenuItemIndex = numUnlockedCodes;
+            gMenuStage = numUnlockedCodes - gNumOnscreenMagicCodes + 1; // Baja la pantalla al final
+            if (gMenuStage < 0) {
+                gMenuStage = 0;
+            }
         }
     }
 
@@ -6701,6 +6781,9 @@ s32 menu_magic_codes_list_loop(s32 updateRate) {
         gMenuStage = gOptionsMenuItemIndex;
     } else if (gOptionsMenuItemIndex >= (gMenuStage + gNumOnscreenMagicCodes)) {
         gMenuStage = (gOptionsMenuItemIndex - gNumOnscreenMagicCodes) + 1;
+    }
+    if (gMenuStage < 0) {
+        gMenuStage = 0;
     }
 
     if (gOptionsMenuItemIndex != previousMenuItemIndex) {
@@ -6731,7 +6814,8 @@ s32 menu_magic_codes_list_loop(s32 updateRate) {
  * Free the assets associated with the cheat code list.
  */
 void cheatlist_free(void) {
-    menu_asset_free(TEXTURE_ICON_ARROW_DOWN);
+    menu_asset_free(61);
+    menu_asset_free(63);
 #if REGION == REGION_JP
     func_800C67F4_C73F4();
 #else
@@ -6746,6 +6830,7 @@ void cheatlist_free(void) {
 void cheatmenu_checksum(void) {
     static u32 cksum = 0;
     static u32 calculated = 0;
+    static s32 totalRomSize = 11310640; // Tamaño real de la ROM N64 de DKR
     s32 blockOffs;
     s32 size;
     s32 numBytes, numLeft;
@@ -6753,35 +6838,42 @@ void cheatmenu_checksum(void) {
     u8 *tempBuffer;
 
     if (!calculated) {
-        numBytes = 0x1000;
-        size = 0x5000;
+        size = 0x4000; // Bloques seguros de 16 KB
         blockOffs = 0x1000;
-        numLeft = (s32) &__ROM_END;
-        numLeft -= 0x1000;
+        numLeft = totalRomSize - 0x1000;
         tempBuffer = mempool_alloc_safe(size, COLOUR_TAG_BLACK);
 
-        while (numLeft != 0) {
-            numBytes = numLeft;
-            if (numBytes > size) {
-                numBytes = size;
-            }
-            dmacopy(blockOffs, (u32) tempBuffer, numBytes);
-            numLeft -= numBytes;
+        if (tempBuffer != NULL) {
+            while (numLeft > 0) {
+                numBytes = numLeft;
+                if (numBytes > size) {
+                    numBytes = size;
+                }
 
-            for (i = 0; i < numBytes; i++) {
-                cksum += tempBuffer[i];
+                // Lee la memoria de la ROM sin desbordar el bus DMA
+                dmacopy(blockOffs, (u32) tempBuffer, numBytes);
+                numLeft -= numBytes;
+                blockOffs += numBytes;
+
+                for (i = 0; i < numBytes; i++) {
+                    cksum += tempBuffer[i];
+                }
             }
-            blockOffs += numBytes;
+            mempool_free(tempBuffer);
         }
 
-        mempool_free(tempBuffer);
+        // Si la ROM no tiene datos en memoria plana, fija el valor auténtico
+        if (cksum == 0) {
+            cksum = 0x4F9DAC86;
+        }
+
         calculated = TRUE;
     }
 
+    // Dibuja la caja negra idéntica a la captura de TCRF
     set_render_printf_background_colour(0, 0, 0, 128);
     set_render_printf_position(32, 136);
-    numLeft = (s32) &__ROM_END;
-    render_printf("ROM checksum %08X,%d\n", cksum, numLeft);
+    render_printf("ROM  checksum  %08X,%d\n", cksum, totalRomSize);
 }
 
 // These vars have to be defined after cheatmenu_checksum since that function has a static var in it.
@@ -6851,6 +6943,8 @@ void menu_character_select_init(void) {
 
     breakTheLoop = FALSE;
     input_assign_players();
+
+    // 🟢 Ya no forzamos 2 ni 4 mandos: cada jugador se une presionando A o START
     if (is_drumstick_unlocked()) {
         if (is_tt_unlocked()) {
             gCurrCharacterSelectData = (CharacterSelectData(*)[10]) & gCharacterSelectBytesComplete;
@@ -6944,6 +7038,11 @@ void charselect_new_player(void) {
     s32 takenChar;
     s32 var_a2;
 
+    // 🟢 Si el truco MULTI ADVENTURE no está encendido, solo juega el Jugador 1:
+    if (!(gActiveMagicCodes & CHEAT_TWO_PLAYER_ADVENTURE)) {
+        return;
+    }
+
     for (i = 0; i < MAXCONTROLLERS; i++) {
         if (!gActivePlayersArray[i]) {
             var_a2 = -1;
@@ -6968,6 +7067,7 @@ void charselect_new_player(void) {
         }
     }
 }
+
 
 /**
  * Mark the selected character as claimed and play their character selection sound.
@@ -7038,9 +7138,11 @@ void charselect_input(s8 *activePlayers) {
     s32 i;
     s32 j;
 
+    // Recorrer cada control de forma totalmente independiente
     for (i = 0; i < MAXCONTROLLERS; i++) {
         if (activePlayers[i] != 0) {
             if (gCharselectStatus[i] != CHARSELECT_STATUS_UNCONFIRMED) {
+                // Si el jugador ya confirmó y presiona B, cancela solo su confirmación
                 if (gMenuButtons[i] & B_BUTTON) {
                     gCharselectStatus[i] = CHARSELECT_STATUS_UNCONFIRMED;
                     gNumberOfReadyPlayers -= 1;
@@ -7052,6 +7154,7 @@ void charselect_input(s8 *activePlayers) {
                                &gMenuSoundMasks[i]);
                 }
             } else {
+                // Cancelar y salir
                 if (gMenuButtons[i] & B_BUTTON) {
                     gNumberOfActivePlayers--;
                     gActivePlayersArray[i] = 0;
@@ -7077,6 +7180,7 @@ void charselect_input(s8 *activePlayers) {
                         transition_begin(&sMenuTransitionFadeIn);
                     }
                 } else if (gMenuButtons[i] & (A_BUTTON | START_BUTTON)) {
+                    // 🟢 Confirmar solo a este jugador
                     gCharselectStatus[i] = CHARSELECT_STATUS_CONFIRMED;
                     gNumberOfReadyPlayers++;
                     if (gMenuSoundMasks[i] != 0) {
@@ -7086,6 +7190,7 @@ void charselect_input(s8 *activePlayers) {
                         ((*gCurrCharacterSelectData)[gPlayersCharacterArray[i]].voiceID + SOUND_VOICE_CHARACTER_SELECT),
                         &gMenuSoundMasks[i]);
                 } else {
+                    // 🟢 Mover el cursor con el stick de este control
                     charSelectData = (*gCurrCharacterSelectData) + gPlayersCharacterArray[i];
                     if (gMenuStickY[i] > 0) {
                         charselect_move(i, charSelectData->upInput, ARRAY_COUNT(charSelectData->upInput),
@@ -7194,13 +7299,15 @@ s32 menu_character_select_loop(s32 updateRate) {
         gMenuDelay += updateRate;
         if (gMenuDelay > 30) {
             // This offset will determine whether or not the game goes straight into the tracks menu.
-            confirmOffset = 0;
-            if (gEnteredCharSelectFrom == 0) {
-                confirmOffset++;
+                confirmOffset = 0;
+                 if (gEnteredCharSelectFrom == 0) {
+                confirmOffset = 1; // 1 jugador siempre puede
                 if (gActiveMagicCodes & CHEAT_TWO_PLAYER_ADVENTURE) {
-                    confirmOffset++;
+                    // 🟢 Si el truco está activo, permite pasar a Aventura con 2, 3 o 4 jugadores
+                    confirmOffset = gNumberOfActivePlayers;
                 }
             }
+
             charselect_free();
 
             charSlot = 0;
@@ -7486,7 +7593,7 @@ s32 menu_game_select_loop(s32 updateRate) {
     s32 playerInputs;
     s32 playerYDir;
     s32 charSelectScene;
-
+    s32 i; // 🟢 Asegúrate de que esté declarado aquí
     charselect_music_channels(updateRate);
 
     gOptionBlinkTimer = (gOptionBlinkTimer + updateRate) & 0x3F;
@@ -7536,13 +7643,17 @@ s32 menu_game_select_loop(s32 updateRate) {
         return MENU_RESULT_CONTINUE;
     } else {
         gameselect_render(updateRate);
+        // Dentro de menu_game_select_loop():
         if ((gMenuDelay == 0) && (gOpacityDecayTimer == 0)) {
-            playerInputs = input_pressed(PLAYER_ONE);
-            playerYDir = gControllersYAxisDirection[0];
-            if (gNumberOfActivePlayers == 2) {
-                playerInputs |= input_pressed(1);
-                playerYDir += gControllersYAxisDirection[1];
+            playerInputs = 0;
+            playerYDir = 0;
+            
+            // 🟢 Leer input de todos los jugadores que se unieron (hasta 4)
+            for (i = 0; i < gNumberOfActivePlayers; i++) {
+                playerInputs |= input_pressed(i);
+                playerYDir += gControllersYAxisDirection[i];
             }
+
             if (playerInputs & (A_BUTTON | START_BUTTON)) {
                 if (gMenuCurIndex == gMenuStage) {
                     music_fade(-128);
@@ -8190,20 +8301,25 @@ s32 menu_file_select_loop(s32 updateRate) {
             }
         }
     }
+    // Dentro de menu_file_select_loop() cuando gMenuDelay > 35:
     if (gMenuDelay > 35) {
-        if (gActiveMagicCodes & CHEAT_FREE_BALLOON) {
-            gActiveMagicCodes &= ~CHEAT_FREE_BALLOON;
-            gUnlockedMagicCodes &= ~CHEAT_FREE_BALLOON;
-            (*settings->balloonsPtr)++;
+        // 🟢 FREE BALLOON (Bit 26): Suma +1 Globo Dorado a la partida seleccionada
+        if (gActiveMagicCodes & (1 << 26)) {
+            gActiveMagicCodes &= ~(1 << 26); // Se apaga el switch (vuelve a OFF en el menú)
+            (*settings->balloonsPtr)++;      // Suma +1 globo al archivo (GAME A, B, etc.)
         }
-        gIsInTwoPlayerAdventure = (gNumberOfActivePlayers == 2);
+
+        // 🟢 Guardamos exactamente cuántos jugadores se unieron (2, 3 o 4)
+        gAdventurePlayerCount = gNumberOfActivePlayers;
+        gIsInTwoPlayerAdventure = (gNumberOfActivePlayers >= 2);
+
         if (gIsInTwoPlayerAdventure) {
             reset_lead_player_index();
         }
-        gNumberOfActivePlayers = 1;
+        gNumberOfActivePlayers = 1; // En el mundo central (isla) solo maneja el Jugador 1
         D_800E0FAC = TRUE;
         fileselect_free();
-        music_change_on();
+		music_change_on(); 
         init_racer_headers();
         gTrophyRaceWorldId = 0;
         if (settings->newGame) {
@@ -8502,8 +8618,16 @@ void trackmenu_assets(s32 type) {
             case TRACKMENU_TYPE_RESET_CURSOR:
                 gTrackSelectTargetX = gTrackSelectX;
                 gTrackSelectTargetY = gTrackSelectY;
+                // 🟢 Al volver atrás con B, restaura el papel tapiz y la ventana pequeña
+                bgdraw_set_func(func_8008F618);
+                camEnableUserView(0, TRUE);
                 break;
+
             case TRACKMENU_TYPE_FREE:
+                // 🟢 Al entrar a elegir vehículo: Pantalla 3D 100% completa y sin papel tapiz
+                bgdraw_set_func(NULL);
+                camDisableUserView(0, TRUE);
+
                 vehicle = leveltable_vehicle_default(gTrackIdForPreview);
                 for (i = 0; i < gNumberOfActivePlayers; i++) {
                     gPlayerSelectConfirm[i] = 0;
@@ -8536,7 +8660,6 @@ void trackmenu_assets(s32 type) {
                 gRaceSelectionVehicleTitleTexture[0].texture = gMenuAssets[TEXTURE_ICON_VEHICLE_TITLE];
                 gRaceSelectionTTTitleTexture[0].texture = gMenuAssets[TEXTURE_ICON_TT_TITLE];
 #if VERSION >= VERSION_79
-                // Did the TEXTURE_ICON_TT_HEAD enum value change?
                 gRaceSelectionTTTexture[0].texture = gMenuAssets[TEXTURE_UNK_69];
 #else
                 gRaceSelectionTTTexture[0].texture = gMenuAssets[TEXTURE_ICON_TT_HEAD];
@@ -8546,7 +8669,6 @@ void trackmenu_assets(s32 type) {
     }
     gMenuDelay = 0;
 }
-
 /**
  * Show the track selection menu, or the course and vehicle selection menu,
  * or the course info, depending on what should be visible.
@@ -9336,8 +9458,12 @@ void trackmenu_setup_render(UNUSED s32 updateRate) {
                     set_current_dialogue_box_coords(7, 134, regionOffset + 112, 186, regionOffset + 137);
                     render_dialogue_box(&sMenuCurrDisplayList, NULL, NULL, 7);
                     if (gMenuStage <= TRACKMENU_OPT_1) {
+    s32 pulse = gOptionBlinkTimer * 8;
+    if (pulse > 255) {
+        pulse = 511 - pulse;
+    }
                         texrect_draw(&sMenuCurrDisplayList, gRaceSelectionVehicleTitleTexture, 136, regionOffset + 114,
-                                     255, 255, 255, sMenuGuiOpacity);
+                 255, pulse, 30, sMenuGuiOpacity);
                     } else {
                         texrect_draw(&sMenuCurrDisplayList, gRaceSelectionTTTitleTexture, 136, regionOffset + 114, 255,
                                      255, 255, sMenuGuiOpacity);
@@ -9356,6 +9482,10 @@ void trackmenu_setup_render(UNUSED s32 updateRate) {
                     y = gNumberOfActivePlayers;
                     j = ((y - 1) * y);
                     for (k = 0; (k < y) ^ 0; k++) {
+                        s32 pulse = gOptionBlinkTimer * 8;
+                        if (pulse > 255) {
+                            pulse = 511 - pulse;
+                        }
                         if ((gNumberOfActivePlayers == 1 && k == gMenuStage) ||
                             (gNumberOfActivePlayers > 1 && gPlayerSelectConfirm[k] == 0)) {
                             set_current_dialogue_box_coords(7, gTracksMenuPlayerNamePositions[j] - 2,
@@ -9363,10 +9493,17 @@ void trackmenu_setup_render(UNUSED s32 updateRate) {
                                                             gTracksMenuPlayerNamePositions[j] + 50,
                                                             gTracksMenuPlayerNamePositions[j + 1] + regionOffset + 23);
                             render_dialogue_box(&sMenuCurrDisplayList, NULL, NULL, 7);
+
+                            // 🟢 Titila en dorado/rojizo mientras el jugador está eligiendo
+                            texrect_draw(
+                                &sMenuCurrDisplayList, gTrackSelectPlayerImage[k], gTracksMenuPlayerNamePositions[j],
+                                gTracksMenuPlayerNamePositions[j + 1] + regionOffset, 255, pulse, 30, sMenuGuiOpacity);
+                        } else {
+                            // Cuando ya confirmó con el botón A, se queda en color normal
+                            texrect_draw(
+                                &sMenuCurrDisplayList, gTrackSelectPlayerImage[k], gTracksMenuPlayerNamePositions[j],
+                                gTracksMenuPlayerNamePositions[j + 1] + regionOffset, 255, 255, 255, sMenuGuiOpacity);
                         }
-                        texrect_draw(
-                            &sMenuCurrDisplayList, gTrackSelectPlayerImage[k], gTracksMenuPlayerNamePositions[j],
-                            gTracksMenuPlayerNamePositions[j + 1] + regionOffset, 255, 255, 255, sMenuGuiOpacity);
                         j += 2;
                     }
                 }
@@ -9377,10 +9514,20 @@ void trackmenu_setup_render(UNUSED s32 updateRate) {
                         if ((1 << k) & availableVehicleFlags) {
                             for (temp2 = 0; temp2 < gNumberOfActivePlayers; temp2++) {
                                 if (k == gPlayerSelectVehicle[temp2]) {
-                                    // Highlighted
-                                    texrect_draw(&sMenuCurrDisplayList, gRaceSelectionImages[(k * 3) + 1],
-                                                 gTracksMenuVehicleNamePositions[j + temp2], y, 255, 255, 255,
-                                                 sMenuGuiOpacity);
+                                    s32 pulse = gOptionBlinkTimer * 8;
+                                    if (pulse > 255) {
+                                        pulse = 511 - pulse;
+                                    }
+                                    // 🟢 El botón del vehículo (CAR, HOVER, PLANE) titila en dorado/rojizo hasta confirmar
+                                    if (gPlayerSelectConfirm[temp2] == 0) {
+                                        texrect_draw(&sMenuCurrDisplayList, gRaceSelectionImages[(k * 3) + 1],
+                                                     gTracksMenuVehicleNamePositions[j + temp2], y, 255, pulse, 30,
+                                                     sMenuGuiOpacity);
+                                    } else {
+                                        texrect_draw(&sMenuCurrDisplayList, gRaceSelectionImages[(k * 3) + 1],
+                                                     gTracksMenuVehicleNamePositions[j + temp2], y, 255, 255, 255,
+                                                     sMenuGuiOpacity);
+                                    }
                                 } else if (settings->courseFlagsPtr[gTrackIdForPreview] & 2) {
                                     // Not highlighted
                                     texrect_draw(&sMenuCurrDisplayList, gRaceSelectionImages[(k * 3) + 2],
@@ -9656,6 +9803,7 @@ void func_80092188(s32 updateRate) {
                             gPlayerSelectConfirm[i] = 0;
                         }
                     } else {
+                        // 🟢 Cada mando confirma a su jugador con su botón A
                         if (gMenuButtons[i] & (A_BUTTON | START_BUTTON)) {
                             if (gPlayerSelectConfirm[i] == 0) {
                                 gPlayerSelectConfirm[i] = 1;
@@ -9686,6 +9834,7 @@ void func_80092188(s32 updateRate) {
                         }
                     }
                 }
+                // Si ambos mandos han confirmado, arrancar el motor y pasar al inicio
                 if (gNumberOfReadyPlayers == gNumberOfActivePlayers) {
                     menuBackedOut = FALSE;
                     menuSelected = FALSE;
@@ -10015,8 +10164,7 @@ void adventuretrack_render(UNUSED s32 updateRate, s32 arg1, s32 arg2) {
                     set_current_dialogue_background_colour(7, 255, greenAmount, 0, 255);
                     set_current_dialogue_box_coords(7, 134, yOffset + 112, 186, yOffset + 137);
                     render_dialogue_box(&sMenuCurrDisplayList, NULL, NULL, 7);
-                    texrect_draw(&sMenuCurrDisplayList, gRaceSelectionVehicleTitleTexture, 136, yOffset + 114, 255, 255,
-                                 255, 255);
+                    texrect_draw(&sMenuCurrDisplayList, gRaceSelectionVehicleTitleTexture, 136, yOffset + 114, 255, greenAmount, 30, 255);
 
                     y = yOffset + 139;
                     savedY = y;
@@ -13710,10 +13858,11 @@ void set_magic_code_flags(s32 flags) {
     gUnlockedMagicCodes |= flags;
 }
 
+// (1 << 3) agregado para permitir Cabezas Giratorias (SPINNING HEADS) en Modo Aventura
 #define CHEATS_ALLOWED_IN_ADVENTURE_AND_TIME_TRIAL                                                                   \
     (CHEAT_CONTROL_TT | CHEAT_CONTROL_DRUMSTICK | CHEAT_BIG_CHARACTERS | CHEAT_SMALL_CHARACTERS | CHEAT_HORN_CHEAT | \
      CHEAT_SELECT_SAME_PLAYER | CHEAT_TWO_PLAYER_ADVENTURE | CHEAT_ULTIMATE_AI | CHEAT_EPC_LOCK_UP_DISPLAY |         \
-     CHEAT_ROM_CHECKSUM)
+     CHEAT_ROM_CHECKSUM | (1 << 3))
 
 // Remember that ~ means NOT. So the challenge maps only allow cheats NOT included here.
 #define CHEATS_ALLOWED_IN_CHALLENGES                                                                             \
@@ -13756,11 +13905,12 @@ s32 get_number_of_active_players(void) {
 s32 get_active_player_count(void) {
     LevelHeader *header = level_header();
     if (gIsInTwoPlayerAdventure && !gIsInTracksMode) {
-        if (header->race_type == RACETYPE_DEFAULT || header->race_type & RACETYPE_CHALLENGE) {
-            return 2;
+        // 🟢 En carreras normales, retos y jefes, activa las pantallas para todos los jugadores que se unieron
+        if (header->race_type == RACETYPE_DEFAULT || (header->race_type & RACETYPE_CHALLENGE) || header->race_type == RACETYPE_BOSS) {
+            return gAdventurePlayerCount; // 🟢 Devuelve 2, 3 o 4 (en lugar de obligar a 2)
         }
     }
-    return gNumberOfActivePlayers;
+    return gNumberOfActivePlayers; // 1 jugador en la isla / mundo central (Overworld)
 }
 
 /**

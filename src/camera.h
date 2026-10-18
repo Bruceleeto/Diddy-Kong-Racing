@@ -147,4 +147,6 @@ void mtx_shear_push(Gfx **dList, Mtx **mtx, Object *obj, Object *objBase, f32 sh
 void cam_init(void);
 void viewport_main(Gfx **dlist, Mtx **mats);
 
+extern s8 gIsRacingOnTrack;
+
 #endif

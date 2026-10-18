@@ -74,7 +74,7 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--verify", action="store_true")
     args = parser.parse_args()
-    assets = args.root.resolve() / "assets/.vanilla/us.v77/audio/unknown"
+    assets = args.root.resolve() / "assets/.vanilla/us.v80/audio/unknown"
     control, samples, output = assets / "asset_audio_2.bin", assets / "asset_audio_3.bin", args.output.resolve()
     count = sound_count(control)
     if args.verify:

@@ -14,6 +14,10 @@
 
 #define MODEL_LOADED_MAX 70
 
+#ifdef TARGET_DC
+extern u32 pc_object_model_override(s32 modelID, void *out);
+#endif
+
 /************ .data ************/
 
 s32 gRenderSceneChecksum = TractionTableChecksum;
@@ -156,6 +160,7 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 #endif
     u32 compressedData;
     s32 modelSize;
+    u32 overrideSize = 0;
 
     if (modelID >= gNumModelIDs) {
         stubbed_printf("Error: Model no. out of range on load. !!\n");
@@ -194,6 +199,12 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 
     temp_s0 = gObjectModelTable[modelID];
     sp48 = gObjectModelTable[modelID + 1] - temp_s0;
+    #ifdef TARGET_DC
+    overrideSize = pc_object_model_override(modelID, NULL);
+    if (overrideSize != 0) {
+        modelSize = overrideSize + sizeof(ObjectModel);
+    } else
+#endif
     modelSize = gzip_size_uncompressed(ASSET_OBJECT_MODELS, temp_s0) + sizeof(ObjectModel);
     objMdl = (ObjectModel *) mempool_alloc(modelSize, COLOUR_TAG_RED);
     if (objMdl == NULL) {
@@ -207,9 +218,17 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 #endif
         return NULL;
     }
+#ifdef TARGET_DC
+    if (overrideSize != 0) {
+        pc_object_model_override(modelID, objMdl);
+    } else {
+#endif
     compressedData = (u32) ((u8 *) objMdl + modelSize) - sp48;
     asset_load(ASSET_OBJECT_MODELS, compressedData, temp_s0, sp48);
     gzip_inflate((u8 *) compressedData, (u8 *) objMdl);
+#ifdef TARGET_DC
+    }
+#endif
 #ifdef TARGET_PC
     pc_swap_object_model(objMdl);
 #endif

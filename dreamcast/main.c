@@ -6,6 +6,9 @@
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
+#include "save.h"
+#include "vmu_anim.h"
+#include "swirl.h"
 
 
 extern u64 pc_uptime_ns(void);
@@ -18,43 +21,60 @@ extern OSThread *__osRunningThread;
 static OSThread sHostThread;
 
 #define PC_RETRACE_NSEC (1000000000ll / 60)
-#define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
+// 🟢 Variable dinámica de framerate (2 = 30 FPS, 1 = 60 FPS)
+int gPcLogicUpdateRate = 2;
+//#define PC_LOGIC_UPDATE_RATE 1 // LOGIC_30FPS — what gVideoDeltaTime commits to
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
 
+// Ritmo de fotogramas por la interrupcion de vblank (como hace el fork de dfchil):
+// cada vblank incrementa un contador y da una senal a un semaforo; el hilo del juego
+// duerme en el semaforo hasta que han pasado los vblanks que toca. No usa nanosleep.
+static volatile u32 sPacerVbl = 0;
+static semaphore_t sPacerSem;
+
+static void pacer_vblank(uint32_t code, void *data) {
+    (void) code;
+    (void) data;
+    sPacerVbl++;
+    sem_signal(&sPacerSem);
+}
+
 s32 pc_retrace_wait(void) {
-    static u64 sLastNs = 0;
-    u64 targetNs;
-    u64 nowNs;
+    static s32 sStarted = 0;
+    static u32 sLastVbl = 0;
     s32 periods;
 
-    nowNs = pc_uptime_ns();
+    extern s32 cam_get_viewport_layout(void);
+    int currentRate = gPcLogicUpdateRate;
 
-    if (sLastNs == 0) {
-        sLastNs = nowNs;
-        return PC_LOGIC_UPDATE_RATE;
+    if (cam_get_viewport_layout() > 0) {
+        currentRate = 2; // 30 FPS solidos en 2P, 3P y 4P
     }
 
-    // Sleep until this frame has covered its full committed cadence. This is
-    // the stand-in for retail's blocking osRecvMesg on the vblank queue.
-    targetNs = sLastNs + (PC_LOGIC_UPDATE_RATE * PC_RETRACE_NSEC);
-    if (nowNs < targetNs) {
-        struct timespec req;
-        req.tv_sec = (targetNs - nowNs) / 1000000000ll;
-        req.tv_nsec = (targetNs - nowNs) % 1000000000ll;
-        nanosleep(&req, NULL);
-        nowNs = targetNs;
+    if (!sStarted) {
+        sStarted = 1;
+        sem_init(&sPacerSem, 0);
+        vblank_handler_add(&pacer_vblank, NULL);
+        sLastVbl = sPacerVbl;
+        return currentRate;
     }
 
-    periods = (s32) ((nowNs - sLastNs) / PC_RETRACE_NSEC);
-    if (periods < PC_LOGIC_UPDATE_RATE) {
-        periods = PC_LOGIC_UPDATE_RATE;
+    // Las senales sobrantes de frames lentos se consumen aqui sin esperar.
+    while ((u32) (sPacerVbl - sLastVbl) < (u32) currentRate) {
+        sem_wait(&sPacerSem);
     }
+
+    periods = (s32) (sPacerVbl - sLastVbl);
     if (periods > PC_MAX_UPDATE_RATE) {
-        periods = PC_MAX_UPDATE_RATE;
+        // Mucho mas tiempo del que cabe en un frame (lectura de disco, menu): no cuenta.
+        sLastVbl = sPacerVbl;
+        periods = currentRate;
+    } else {
+        sLastVbl += (u32) periods;
     }
 
-    // Advance by whole periods so rounding doesn't accumulate into drift.
-    sLastNs += (long long) periods * PC_RETRACE_NSEC;
+    eeprom_update();
+    vmu_anim_update();
     return periods;
 }
 
@@ -99,7 +119,9 @@ typedef struct {
 // Which screen-space winding is a front face. Screen y runs downwards, so this is
 // the opposite sign from the y-up convention. Flip if the world renders
 // inside-out (outer surfaces gone, inner ones visible).
-#define GFX_FRONT_FACE_SIGN (-1.0f)
+//#define GFX_FRONT_FACE_SIGN (-1.0f)
+// 🟢 Detecta automáticamente si la pantalla está invertida o en modo espejo
+#define GFX_FRONT_FACE_SIGN ((sVpScaleX * sVpScaleY < 0.0f) ? 1.0f : -1.0f)
 
 static u32 sGfxFrameCount = 0;
 
@@ -290,6 +312,24 @@ static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
     dst->a = v->a;
 
     project_into(dst);
+}
+
+const f32 *pc_current_matrix(void) {
+    return (const f32 *) &sMatrices[sCurMatrix];
+}
+
+void pc_project_points(const f32 *xyz, int stride, int count, f32 (*out)[3]) {
+    int i;
+
+    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
+    for (i = 0; i < count; i++, xyz += stride) {
+        shz_vec4_t clip = shz_xmtrx_transform_vec4(shz_vec4_init(xyz[0], xyz[1], xyz[2], 1.0f));
+        f32 invW = shz_invf_fsrra(clip.w);
+
+        out[i][0] = clip.x * invW * sVpScaleX + sVpTransX;
+        out[i][1] = sVpTransY - clip.y * invW * sVpScaleY;
+        out[i][2] = clip.w;
+    }
 }
 
 static void handle_vertex(u32 w0, u32 w1) {
@@ -613,7 +653,9 @@ static void project_geom(const GfxVertex *v, f32 *sx, f32 *sy, f32 *sz, f32 *sw,
     // geometry mode gates it — material_set() sets and clears G_FOG per material,
     // and clears it whenever a material wants vertex alpha instead, because the
     // RSP keeps the fog factor in the shade-alpha slot.
-    if (sGeometryMode & G_FOG) {
+    // 🟢 FIX NIEBLA: No aplicar niebla a los sprites/billboards (sBillboard) 
+    // para evitar que se saturen de color celeste en pantalla dividida (P2)
+     if ((sGeometryMode & G_FOG) && !sBillboard) {
         f32 fog = (ndcZ * (f32) sFogMul) + (f32) sFogOfs;
 
         if (fog < 0.0f) {
@@ -914,9 +956,17 @@ static void handle_polygon(u32 w0, u32 w1) {
 
 
 /** Render a blast batch through the emulated path, as the DL would have. */
-static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                           s32 texEnabled) {
+static void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+                           const Triangle *tris, s32 numTris, s32 texEnabled) {
     handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts);
+    if (numVerts2 > 0) {
+        s32 matrix = sCurMatrix;
+        sCurMatrix = matrix2;
+        handle_vertex(((u32) G_VTX << 24) |
+                          ((u32) (((numVerts2 - 1) << 3) | G_VTX_APPEND) << 16),
+                      (u32) verts2);
+        sCurMatrix = matrix;
+    }
     handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
                    (u32) tris);
 }
@@ -1020,8 +1070,8 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
-static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                         s32 texEnabled) {
+static void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+                         const Triangle *tris, s32 numTris, s32 texEnabled) {
     f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
     u32 argb[GFX_BLAST_MAX_VERTS];
     shz_vec4_t cp[GFX_BLAST_MAX_VERTS];
@@ -1034,7 +1084,8 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     if (verts == NULL || tris == NULL || numTris <= 0 || numVerts <= 0) {
         return;
     }
-    if (numVerts > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
+    s32 total = numVerts + numVerts2;
+    if (total > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
         // Can't occur in a valid asset (the DL macros can't encode it).
         printf("blast: oversized batch %dv/%dt\n", (int) numVerts, (int) numTris);
         return;
@@ -1043,7 +1094,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // The color must be per-batch trivial: shade byte or constant per channel.
     combiner_classify();
     if (!sCcFast || sBillboard) {
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
 
@@ -1063,16 +1114,20 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // fallback's handle_polygon redoes this state, so these state calls are safe
     // to have run.
     if (!gfx_blast_viable()) {
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
 
     // Transform + project every vertex. A vertex behind the near plane just marks
     // its bit; the triangles touching it go through the in-path clipper below.
     shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
-    for (i = 0; i < numVerts; i++) {
-        const Vertex *v = &verts[i];
-        shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+    for (i = 0; i < total; i++) {
+        const Vertex *v = (i < numVerts) ? &verts[i] : &verts2[i - numVerts];
+        shz_vec4_t c;
+        if (i == numVerts) {
+            shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[matrix2]);
+        }
+        c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
         f32 invW;
 
         cp[i] = c;
@@ -1092,7 +1147,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
 
     if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY)) {
         // handle_polygon redoes this state, so falling back here is safe.
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
     if (texture != 0) {
@@ -1104,7 +1159,7 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
         const Triangle *t = &tris[i];
         s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
 
-        if (i0 >= numVerts || i1 >= numVerts || i2 >= numVerts) {
+        if (i0 >= total || i1 >= total || i2 >= total) {
             continue;
         }
         if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
@@ -1521,7 +1576,6 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     apply_texture_filter();
     gfx_draw_tris(q, 6);
 }
-
 /**
  * G_TEXRECT / G_TEXRECTFLIP — the whole 2D layer: every glyph, HUD sprite and
  * menu image. `w2`/`w3` are the two G_RDPHALF words that follow the opcode and
@@ -1622,6 +1676,11 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
         // G_IMMFIRST-7 = -72), so every case has to be masked to the byte the
         // display list actually holds.
         switch (cmd) {
+            case (u8) G_NOOP:
+                if (w1 == PC_SWIRL_TAG) {
+                    pc_swirl_draw();
+                }
+                break;
             case G_MTX: {
                 s32 slot = (((w0 >> 16) & 0xFF) >> 6) & 3;
                 if (w1 != 0 && slot < 3) {
@@ -1687,16 +1746,47 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // every fallback is exactly the unfused behaviour.
                 u32 params = (w0 >> 16) & 0xFF;
 
-                if (!(params & G_VTX_APPEND) && !sBillboard && (count == 0 || i + 1 < count) &&
-                    ((dl[i + 1].words.w0 >> 24) & 0xFF) == G_TRIN &&
-                    ((dl[i + 2].words.w0 >> 24) & 0xFF) != G_TRIN) {
-                    u32 tw0 = dl[i + 1].words.w0;
+                if (!(params & G_VTX_APPEND) && !sBillboard) {
+#define DL_HAS(k) (count == 0 || i + (k) < count)
+#define DL_OP(k) ((dl[i + (k)].words.w0 >> 24) & 0xFF)
+#define DL_SELECT(k) (DL_OP(k) == (u8) G_MOVEWORD && (dl[i + (k)].words.w0 & 0xFF) == G_MW_MVPMATRIX)
+#define DL_LAST_TRIN(k) (DL_OP(k) == G_TRIN && !(DL_HAS((k) + 1) && DL_OP((k) + 1) == G_TRIN))
+                    s32 numVerts = (s32) ((params >> 3) & 0x1F) + 1;
+                    const Vertex *verts2 = NULL;
+                    s32 numVerts2 = 0, matrix2 = 0, trin = 0, select = 0;
 
-                    blast_render((const Vertex *) w1, (s32) ((params >> 3) & 0x1F) + 1,
-                                 (const Triangle *) dl[i + 1].words.w1,
-                                 (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1, (s32) ((tw0 >> 16) & 1));
-                    i++;
-                    break;
+                    if (DL_HAS(1) && DL_LAST_TRIN(1)) {
+                        trin = 1;
+                    } else if (DL_HAS(2) && DL_SELECT(1) && DL_LAST_TRIN(2)) {
+                        trin = 2;
+                        select = 1;
+                    } else if (DL_HAS(4) && DL_SELECT(1) && DL_OP(2) == G_VTX &&
+                               ((dl[i + 2].words.w0 >> 16) & G_VTX_APPEND) && DL_SELECT(3) && DL_LAST_TRIN(4)) {
+                        u32 params2 = (dl[i + 2].words.w0 >> 16) & 0xFF;
+                        numVerts2 = (s32) ((params2 >> 3) & 0x1F) + 1;
+                        if (numVerts + numVerts2 <= GFX_BLAST_MAX_VERTS && dl[i + 2].words.w1 != 0) {
+                            verts2 = (const Vertex *) dl[i + 2].words.w1;
+                            matrix2 = (dl[i + 1].words.w1 >> 6) & 3;
+                            trin = 4;
+                            select = 3;
+                        }
+                    }
+#undef DL_HAS
+#undef DL_OP
+#undef DL_SELECT
+#undef DL_LAST_TRIN
+                    if (trin) {
+                        u32 tw0 = dl[i + trin].words.w0;
+                        blast_render((const Vertex *) w1, numVerts, verts2, numVerts2, matrix2,
+                                     (const Triangle *) dl[i + trin].words.w1,
+                                     (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1,
+                                     (s32) ((tw0 >> 16) & 1));
+                        if (select) {
+                            sCurMatrix = (dl[i + select].words.w1 >> 6) & 3;
+                        }
+                        i += trin;
+                        break;
+                    }
                 }
                 handle_vertex(w0, w1);
                 break;
@@ -1713,8 +1803,13 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             case G_DMADL:
                 run_dl((const Gfx *) w1, (w0 >> 16) & 0xFF, depth + 1);
                 break;
-            case (u8) G_SETTIMG:
+           case (u8) G_SETTIMG:
                 sTimgAddr = w1;
+                // 🟢 Solo actualizar si es una imagen real (ancho > 1) y no una paleta TLUT (ancho == 1).
+                // Esto hace aparecer el logo de la consola N64 en Save sin corromper el demo.
+                if ((w0 & 0xFFF) > 0 && w1 != 0) {
+                    sTexAddr = w1;
+                }
                 break;
             case (u8) G_SETTILE: {
                 // Only the tile the triangles actually render with matters.
@@ -1908,6 +2003,7 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
     (void)addr;
     (void)btns;
+	eeprom_flush_to_vmu(); // 💾 Si el jugador presiona A+B+X+Y+Start, guarda antes de salir
     arch_exit();
 }
 

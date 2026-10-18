@@ -150,7 +150,7 @@ def main():
     if args.verify:
         verify(output, count, masks, banks, scene_ids)
         return
-    assets = root / "assets/.vanilla/us.v77/audio/unknown"
+    assets = root / "assets/.vanilla/us.v80/audio/unknown"
     control, samples = assets / "asset_audio_2.bin", assets / "asset_audio_3.bin"
     output.mkdir(parents=True, exist_ok=True)
     write_pack(output / "core.afb", banks["core"], control, samples, args.author, args.merger)

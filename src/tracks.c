@@ -281,14 +281,15 @@ void init_track(u32 geometry, u32 skybox, s32 numberOfPlayers, Vehicle vehicle, 
     gShadowHeapFlip = 0;
     stubbed_printf("post shadow_update\n");
     if (gCurrentLevelHeader2->useVoid) {
-        gVoidColourR = gCurrentLevelHeader2->voidColour.red;
-        gVoidColourG = gCurrentLevelHeader2->voidColour.green;
-        gVoidColourB = gCurrentLevelHeader2->voidColour.blue;
-        void_init(numberOfPlayers + 1);
-        stubbed_printf("post void_init\n");
+            gVoidColourR = gCurrentLevelHeader2->voidColour.red;
+            gVoidColourG = gCurrentLevelHeader2->voidColour.green;
+            gVoidColourB = gCurrentLevelHeader2->voidColour.blue;
+            void_init(numberOfPlayers + 1);
+            stubbed_printf("post void_init\n");
+        }
+        gIsRacingOnTrack = TRUE; // 🟢 Pista activa: permite voltear la cámara solo durante la carrera (Bit 30)
+        stubbed_printf("init_track end\n");
     }
-    stubbed_printf("init_track end\n");
-}
 
 /**
  * The root function for rendering the entire scene.
@@ -375,35 +376,70 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
                 gSceneCurrentPlayerID = PLAYER_TWO;
             }
         }
+
+        // 🟢 1. Limpieza de texturas y colores para cada jugador
+        gDPPipeSync(gTrackDL++);
+        gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
+        gDPSetEnvColor(gTrackDL++, 255, 255, 255, 0);
+        gSPTexture(gTrackDL++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
+        gDkrDisableBillboard(gTrackDL++);
+
         if (flip) {
             gSPSetGeometryMode(gTrackDL++, G_CULL_FRONT);
         }
         apply_fog(gSceneCurrentPlayerID);
-        gDPPipeSync(gTrackDL++);
         set_active_camera(gSceneCurrentPlayerID);
         viewport_main(&gTrackDL, &gTrackMtxPtr);
         func_8002A31C();
-        // Show detailed skydome in single player.
-        if (numViewports < 2) {
+
+               // 🟢 2. Cielo: 3D en 1 Jugador, degradado limpio original en Multijugador (2-4P)
+            if (1) {
+            if (gSkydomeSegment != NULL) {
+                Camera *currentCam = cam_get_active_camera();
+                // 🟢 Centrar el Skydome en la cámara actual
+                gSkydomeSegment->trans.x_position = currentCam->trans.x_position;
+                gSkydomeSegment->trans.y_position = currentCam->trans.y_position;
+                gSkydomeSegment->trans.z_position = currentCam->trans.z_position;
+                gSkydomeSegment->trans.flags &= ~OBJ_FLAGS_UNK_0080;
+                gSkydomeSegment->unk34 = 15000.0f;
+            }
+
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
             if (gCurrentLevelHeader2->skyDome == -1) {
                 trackbg_render_flashy();
-            } else {
-                skydome_render();
+            } else if (gSkydomeSegment != NULL) {
+                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, gSkydomeSegment);
             }
         } else {
+            // CORRECCIÓN RADICAL MULTIJUGADOR:
+            // Forzamos el guardado y activación del Viewport del jugador actual (j) 
+            // ANTES de renderizar el degradado. Esto obliga a que el degradado del Jugador 2 
+            // se quede encerrado en la mitad de abajo y NO tape los objetos del Jugador 1 arriba.
+            viewport_main(&gTrackDL, &gTrackMtxPtr);
+            gDPPipeSync(gTrackDL++);
+
             mtx_perspective(&gTrackDL, &gTrackMtxPtr);
             trackbg_render_gradient();
             func_80067D3C(&gTrackDL, &gTrackMtxPtr);
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
         }
         gDPPipeSync(gTrackDL++);
+
+        // 🟢 3. Restaurar Viewport y dibujar pista/objetos
+        viewport_main(&gTrackDL, &gTrackMtxPtr);
+        gDkrDisableBillboard(gTrackDL++);
+        gDPPipeSync(gTrackDL++);
+
+        level_header()->unk3 = 1; 
+
         initialise_player_viewport_vars(updateRate);
         weather_clip_planes(-1, -512);
-        // Show weather effects in single player.
-        if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2) {
+
+        // 🟢 4. Clima activo en multijugador
+        if (gCurrentLevelHeader2->weatherEnable > 0) {
             weather_update(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, &gTrackTriPtr, tempUpdateRate);
         }
+
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
         hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, get_racer_object_by_port(gSceneCurrentPlayerID),
@@ -413,6 +449,13 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
     if (numViewports == 3 && level_type() != RACETYPE_CHALLENGE_EGGS && level_type() != RACETYPE_CHALLENGE_BATTLE &&
         level_type() != RACETYPE_CHALLENGE_BANANAS) {
         if (hud_setting() == 0) {
+            // 🟢 1. Limpieza y preparación de texturas y colores
+            gDPPipeSync(gTrackDL++);
+            gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, 255);
+            gDPSetEnvColor(gTrackDL++, 255, 255, 255, 0);
+            gSPTexture(gTrackDL++, 0xFFFF, 0xFFFF, 0, G_TX_RENDERTILE, G_ON);
+            gDkrDisableBillboard(gTrackDL++);
+
             if (flip) {
                 gSPSetGeometryMode(gTrackDL++, G_CULL_FRONT);
             }
@@ -423,11 +466,37 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
             ttcam_update(updateRate);
             viewport_main(&gTrackDL, &gTrackMtxPtr);
             func_8002A31C();
-            mtx_perspective(&gTrackDL, &gTrackMtxPtr);
-            trackbg_render_gradient();
-            func_80067D3C(&gTrackDL, &gTrackMtxPtr);
+
+            // 🟢 2. Centrar el Skydome (cúpula de nubes) en la cámara de la TT CAM
+            if (gSkydomeSegment != NULL) {
+                Camera *currentCam = cam_get_active_camera();
+                gSkydomeSegment->trans.x_position = currentCam->trans.x_position;
+                gSkydomeSegment->trans.y_position = currentCam->trans.y_position;
+                gSkydomeSegment->trans.z_position = currentCam->trans.z_position;
+                gSkydomeSegment->trans.flags &= ~OBJ_FLAGS_UNK_0080;
+                gSkydomeSegment->unk34 = 15000.0f;
+            }
+
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
+
+            // 🟢 3. Renderizar las nubes 3D idénticas a los jugadores 1, 2 y 3
+            if (gCurrentLevelHeader2->skyDome == -1) {
+                trackbg_render_flashy();
+            } else if (gSkydomeSegment != NULL) {
+                render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, gSkydomeSegment);
+            } else {
+                mtx_perspective(&gTrackDL, &gTrackMtxPtr);
+                trackbg_render_gradient();
+                func_80067D3C(&gTrackDL, &gTrackMtxPtr);
+                mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
+            }
+
+            // 🟢 4. Restaurar el Viewport del 4º cuadrante
             gDPPipeSync(gTrackDL++);
+            viewport_main(&gTrackDL, &gTrackMtxPtr);
+            gDkrDisableBillboard(gTrackDL++);
+            gDPPipeSync(gTrackDL++);
+
             initialise_player_viewport_vars(updateRate);
             weather_clip_planes(-1, -512);
             lensflare_override(cam_get_active_camera());
@@ -3059,6 +3128,7 @@ LevelModel *get_current_level_model(void) {
 void free_track(void) {
     s32 i;
 
+    gIsRacingOnTrack = FALSE; // 🟢 Salida de pista: desactiva el volteo para que los menús queden al derecho
     racerfx_free();
     if (gWaveBlockCount != 0) {
         waves_free();
