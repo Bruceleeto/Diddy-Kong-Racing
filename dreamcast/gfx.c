@@ -1121,3 +1121,28 @@ void gfx_frame_end(void) {
         pvr_mem_free(sPendingFree[--sPendingFreeCount]);
     }
 }
+
+int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count) {
+    int i;
+    if (!sInScene) return 0;
+    if (hdr) {
+        shz_sq_memcpy32_1(pvr_ta_sq_addr, hdr);
+    }
+    for (i = 0; i < count; i++) {
+        pvr_vertex_t *v = (pvr_vertex_t *) pvr_dr_target(sDrState);
+        v->flags = verts[i].flags;
+        v->x = verts[i].x * sScaleX;
+        v->y = verts[i].y * sScaleY;
+        v->z = verts[i].z;
+        v->u = verts[i].u;
+        v->v = verts[i].v;
+        v->argb = verts[i].argb;
+        v->oargb = verts[i].oargb;
+        pvr_dr_commit(v);
+    }
+    return 1;
+}
+
+int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count) {
+    return gfx_tr_native(hdr, verts, count);
+}

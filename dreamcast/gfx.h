@@ -103,4 +103,13 @@ void gfx_disable_scissor(void);
 // Presents the frame and pumps the event queue (exits the process on quit).
 void gfx_frame_end(void);
 
+
+#include <dc/pvr.h>
+
+
+#include <dc/pvr.h>
+int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
+int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
+
 #endif
+

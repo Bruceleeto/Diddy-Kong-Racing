@@ -40,6 +40,10 @@
 #include "waves.h"
 #include "weather.h"
 #include "pc_swap.h"
+#ifdef TARGET_DC
+#   include <sh4zam/shz_sh4zam.h>
+extern int pc_swirl_render(Object *obj, ObjectModel *model, Gfx **dl, s32 opacity);
+#endif
 
 #ifdef TARGET_DC
 #   include <sh4zam/shz_sh4zam.h>
@@ -3806,6 +3810,11 @@ void render_3d_model(Object *obj) {
         } else {
             gDPSetPrimColor(gObjectCurrDisplayList++, 0, 0, 255, 255, 255, 255);
         }
+        #ifdef TARGET_DC
+        if (pc_swirl_render(obj, objModel, &gObjectCurrDisplayList, opacity)) {
+            meshBatch = -1;
+        } else
+#endif
         if (opacity < 255) {
             meshBatch = render_mesh(objModel, obj, 0, RENDER_SEMI_TRANSPARENT, vertOffset);
         } else {
