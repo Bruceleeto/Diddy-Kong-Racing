@@ -26,6 +26,10 @@
 #include "waves.h"
 #include "weather.h"
 #include "pc_swap.h"
+#include "../dreamcast/prof.h"
+#ifdef TARGET_DC
+#include "../dreamcast/scrawl.h"
+#endif
 
 // Maximum size for a level model is 522.5 KiB
 #define LEVEL_MODEL_MAX_SIZE 0x82A00
@@ -318,9 +322,9 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         tempUpdateRate = updateRate;
     }
     if (gWaveBlockCount) {
-        waves_update(tempUpdateRate);
+        PC_PROF(PC_PROF_WAVES, waves_update(tempUpdateRate));
     }
-    shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, updateRate);
+    PC_PROF(PC_PROF_SHADOWS, shadow_update(SHADOW_ACTORS, SHADOW_ACTORS, updateRate));
     for (i = 0; i < 7; i++) {
         if ((s32) gCurrentLevelHeader2->unk74[i] != -1) {
             update_colour_cycle(gCurrentLevelHeader2->unk74[i], tempUpdateRate);
@@ -398,7 +402,7 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
         }
         gDPPipeSync(gTrackDL++);
-        initialise_player_viewport_vars(updateRate);
+        PC_PROF(PC_PROF_VIEWPORT, initialise_player_viewport_vars(updateRate));
         weather_clip_planes(-1, -512);
         // Show weather effects in single player.
         if (gCurrentLevelHeader2->weatherEnable > 0 && numViewports < 2) {
@@ -406,8 +410,10 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
         }
         lensflare_override(cam_get_active_camera());
         lensflare_render(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, cam_get_active_camera());
-        hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, get_racer_object_by_port(gSceneCurrentPlayerID),
-                          updateRate);
+        PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_HUD);
+        PC_PROF(PC_PROF_HUD, hud_render_player(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr,
+                                               get_racer_object_by_port(gSceneCurrentPlayerID), updateRate));
+        PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OTHER);
     }
     // Show TT Cam toggle for the fourth viewport when playing 3 player.
     if (numViewports == 3 && level_type() != RACETYPE_CHALLENGE_EGGS && level_type() != RACETYPE_CHALLENGE_BATTLE &&
@@ -1723,6 +1729,119 @@ void set_anti_aliasing(s32 setting) {
     gAntiAliasing = setting;
 }
 
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
+/*
+ * Per-batch frustum culling of the level geometry. The game only drops whole
+ * segments it cannot see; inside a visible segment it draws every batch, and in
+ * races 63-93% of those triangles lie outside the view. Each batch's bounding
+ * box is computed once per level from its vertices and tested against the
+ * camera's view-projection matrix: a batch is dropped only when all eight
+ * corners are outside the same side. LEVEL_CULL=0 draws everything again; the
+ * GFX_PROFILE build counts what the test drops either way (SCENE PROF).
+ */
+extern MtxF gViewProjMatrixF;
+extern void *malloc(__SIZE_TYPE__ size);
+extern void free(void *ptr);
+#if DKR_GFX_PROFILE
+extern void pc_prof_level_batch(s32 tris, s32 culled);
+#endif
+static s16 (*sBatchBox)[6];
+static s32 sBatchBoxBase[LEVEL_SEGMENT_MAX + 1];
+static LevelModel *sBatchBoxModel; // the level the boxes were computed for; NULL when a level loads
+// The view-projection the level is drawn with, taken before any object is
+// drawn: drawing objects can change gViewProjMatrixF, while the level's
+// translucent batches still use the matrix set before them.
+static MtxF sCullMatrix;
+#if DKR_GFX_PROFILE
+extern void pc_prof_cull_matrix_changed(void);
+extern void pc_prof_cull_matrix(const float m[4][4]);
+extern void pc_prof_false_cull(void);
+#endif
+
+static void level_batch_boxes(void) {
+    s32 seg, batch, total = 0;
+
+    free(sBatchBox);
+    sBatchBox = NULL;
+    sBatchBoxModel = gCurrentLevelModel;
+    for (seg = 0; seg < gCurrentLevelModel->numberOfSegments && seg < LEVEL_SEGMENT_MAX; seg++) {
+        sBatchBoxBase[seg] = total;
+        total += gCurrentLevelModel->segments[seg].numberOfBatches;
+    }
+    sBatchBox = malloc(total * sizeof(*sBatchBox) + 1);
+    if (sBatchBox == NULL) {
+        return;
+    }
+    for (seg = 0; seg < gCurrentLevelModel->numberOfSegments && seg < LEVEL_SEGMENT_MAX; seg++) {
+        LevelModelSegment *segment = &gCurrentLevelModel->segments[seg];
+        for (batch = 0; batch < segment->numberOfBatches; batch++) {
+            s16 *box = sBatchBox[sBatchBoxBase[seg] + batch];
+            s32 v = segment->batches[batch].verticesOffset;
+            s32 end = segment->batches[batch + 1].verticesOffset;
+            box[0] = box[1] = box[2] = 0x7FFF;
+            box[3] = box[4] = box[5] = -0x8000;
+            for (; v < end; v++) {
+                Vertex *vtx = &segment->vertices[v];
+                if (vtx->x < box[0]) box[0] = vtx->x;
+                if (vtx->y < box[1]) box[1] = vtx->y;
+                if (vtx->z < box[2]) box[2] = vtx->z;
+                if (vtx->x > box[3]) box[3] = vtx->x;
+                if (vtx->y > box[4]) box[4] = vtx->y;
+                if (vtx->z > box[5]) box[5] = vtx->z;
+            }
+        }
+    }
+}
+
+/** Whether all eight corners of a batch's box lie outside one side of the view. */
+static s32 level_batch_outside(s32 segmentId, s32 batch) {
+    s16 *box;
+    s32 corner, outside = 0x1F;
+
+    if (sBatchBoxModel != gCurrentLevelModel) {
+        level_batch_boxes();
+    }
+    if (sBatchBox == NULL || segmentId >= LEVEL_SEGMENT_MAX) {
+        return FALSE;
+    }
+    box = sBatchBox[sBatchBoxBase[segmentId] + batch];
+    for (corner = 0; corner < 8 && outside; corner++) {
+        f32 x = box[(corner & 1) ? 3 : 0];
+        f32 y = box[(corner & 2) ? 4 : 1];
+        f32 z = box[(corner & 4) ? 5 : 2];
+        f32 cx = x * sCullMatrix[0][0] + y * sCullMatrix[1][0] + z * sCullMatrix[2][0] + sCullMatrix[3][0];
+        f32 cy = x * sCullMatrix[0][1] + y * sCullMatrix[1][1] + z * sCullMatrix[2][1] + sCullMatrix[3][1];
+        f32 cw = x * sCullMatrix[0][3] + y * sCullMatrix[1][3] + z * sCullMatrix[2][3] + sCullMatrix[3][3];
+        s32 code = 0;
+        if (cx < -cw) code |= 1;
+        if (cx > cw) code |= 2;
+        if (cy < -cw) code |= 4;
+        if (cy > cw) code |= 8;
+        if (cw <= 0.0f) code |= 16;
+        outside &= code;
+    }
+#if DKR_GFX_PROFILE
+    if (outside) {
+        // Check the box against the batch's own vertices: none may be in view.
+        LevelModelSegment *segment = &gCurrentLevelModel->segments[segmentId];
+        s32 v = segment->batches[batch].verticesOffset;
+        s32 end = segment->batches[batch + 1].verticesOffset;
+        for (; v < end; v++) {
+            Vertex *vtx = &segment->vertices[v];
+            f32 cx = vtx->x * sCullMatrix[0][0] + vtx->y * sCullMatrix[1][0] + vtx->z * sCullMatrix[2][0] + sCullMatrix[3][0];
+            f32 cy = vtx->x * sCullMatrix[0][1] + vtx->y * sCullMatrix[1][1] + vtx->z * sCullMatrix[2][1] + sCullMatrix[3][1];
+            f32 cw = vtx->x * sCullMatrix[0][3] + vtx->y * sCullMatrix[1][3] + vtx->z * sCullMatrix[2][3] + sCullMatrix[3][3];
+            if (cw > 0.0f && cx >= -cw && cx <= cw && cy >= -cw && cy <= cw) {
+                pc_prof_false_cull();
+                break;
+            }
+        }
+    }
+#endif
+    return outside != 0;
+}
+#endif
+
 /**
  * Find which segments can and should be rendered, then render their opaque geometry.
  * Render all objects inside visible segments then render the level's semitransparent geometry.
@@ -1762,6 +1881,13 @@ void render_level_geometry_and_objects(void) {
 
     objectsVisible[0] = TRUE;
 
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
+    __builtin_memcpy(&sCullMatrix, &gViewProjMatrixF, sizeof(sCullMatrix));
+#if DKR_GFX_PROFILE
+    pc_prof_cull_matrix(sCullMatrix); // the DL walk checks the level is drawn with it
+#endif
+#endif
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL);
     if (gDrawLevelSegments) {
         for (i = 0; i < numberOfSegments; i++) {
             render_level_segment(segmentIds[i], FALSE); // Render opaque segments
@@ -1773,6 +1899,7 @@ void render_level_geometry_and_objects(void) {
         objectsVisible[1] = TRUE;
     }
 
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OBJECTS);
     rendermode_reset(&gTrackDL);
     sort_objects_by_dist(sp160, objCount - 1);
     visibleFlags = OBJ_FLAGS_INVIS_PLAYER1 << (get_current_viewport() & 1);
@@ -1795,6 +1922,7 @@ void render_level_geometry_and_objects(void) {
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                 continue;
             } else if (obj->shadow != NULL) {
+                PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_SHADOWS);
                 shadow_render(obj, obj->shadow);
             }
             render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
@@ -1818,6 +1946,7 @@ void render_level_geometry_and_objects(void) {
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                 continue;
             } else if (obj->shadow != NULL) {
+                PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_SHADOWS);
                 shadow_render(obj, obj->shadow);
             }
             render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
@@ -1827,12 +1956,19 @@ void render_level_geometry_and_objects(void) {
         }
     }
 
+#if defined(TARGET_DC) && DKR_GFX_PROFILE
+    if (__builtin_memcmp(&gViewProjMatrixF, &sCullMatrix, sizeof(sCullMatrix)) != 0) {
+        pc_prof_cull_matrix_changed();
+    }
+#endif
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_LEVEL_TR);
     if (gDrawLevelSegments) {
         for (i = numberOfSegments - 1; i >= 0; i--) {
             render_level_segment(segmentIds[i], TRUE); // Render transparent segments
         }
     }
 
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_WATER);
     if (gWaveBlockCount != 0) {
         waves_render(&gTrackDL, &gTrackMtxPtr, get_current_viewport());
     }
@@ -1842,6 +1978,7 @@ void render_level_geometry_and_objects(void) {
     func_80012C3C(&gTrackDL);
 
     // Particles and FX
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_PARTICLES);
     for (i = objCount - 1; i >= sp160; i--) {
         obj = get_object(i);
         visible = 255;
@@ -1863,6 +2000,7 @@ void render_level_geometry_and_objects(void) {
                     render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
                     goto skip;
                 } else if (obj->shadow != NULL) {
+                    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_SHADOWS);
                     shadow_render(obj, obj->shadow);
                 }
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, obj);
@@ -1882,7 +2020,9 @@ void render_level_geometry_and_objects(void) {
         void_check(segmentIds, numberOfSegments, get_current_viewport());
     }
     gAntiAliasing = FALSE;
+    PC_PROF_CATEGORY(gTrackDL, PC_PROF_CAT_OTHER);
 }
+
 
 /**
  * Render a batch of level geometry.
@@ -1957,6 +2097,19 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             vertices = (s32) &segment->vertices[batchInfo->verticesOffset];
         } while (0);
         triangles = (s32) &segment->triangles[batchInfo->facesOffset];
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
+        {
+            s32 outside = level_batch_outside(segmentId, i);
+#if DKR_GFX_PROFILE
+            pc_prof_level_batch(numberTriangles, outside);
+#endif
+#if DKR_LEVEL_CULL
+            if (outside) {
+                continue;
+            }
+#endif
+        }
+#endif
         texOffset = batchInfo->texOffset << 14;
         levelHeaderIndex = (batchFlags >> 28) & 7;
         if (levelHeaderIndex != (batchInfo->verticesOffset * 0)) {
@@ -1986,6 +2139,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vertices), numberVertices, 0);
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }
+#ifdef TARGET_DC
+        pc_scrawl_after_batch(segmentId, i, &gTrackDL); // "Nintendon't" (dreamcast/scrawl.c)
+#endif
     }
 }
 
@@ -2921,6 +3077,11 @@ void generate_track(s32 modelId) {
     set_texture_colour_tag(COLOUR_TAG_GREEN);
     gTrackModelHeap = mempool_alloc_safe(LEVEL_MODEL_MAX_SIZE, COLOUR_TAG_YELLOW);
     gCurrentLevelModel = gTrackModelHeap;
+#if defined(TARGET_DC) && (DKR_LEVEL_CULL || DKR_GFX_PROFILE)
+    // Every level is loaded into the same heap, so the model pointer does not
+    // tell levels apart: the batch boxes are recomputed for this one.
+    sBatchBoxModel = NULL;
+#endif
     gCollisionCandidates = mempool_alloc_safe(MAX_COLLISION_CANDIDATES * 4, COLOUR_TAG_YELLOW);
     gCollisionSurfaces = mempool_alloc_safe(MAX_COLLISION_CANDIDATES, COLOUR_TAG_YELLOW);
     gNumCollisionCandidates = 0;

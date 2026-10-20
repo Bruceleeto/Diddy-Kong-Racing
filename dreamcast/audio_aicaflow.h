@@ -5,6 +5,8 @@
 
 int dkr_afx_init(void);
 void dkr_afx_update(void);
+/* The game thread, once a frame, holding no lock: loads requested unplanned sounds. */
+void dkr_afx_frame(void);
 /* Call while the DKR audio mutex is held, before a level fills the heap. */
 int dkr_afx_music_prepare(uint8_t sequence);
 void dkr_afx_music_prefetch(uint8_t sequence);
@@ -19,6 +21,8 @@ void dkr_afx_music_lane_volume(uint8_t lane, uint8_t volume);
 void dkr_afx_music_lane_fade(uint8_t lane, uint8_t fade);
 void dkr_afx_scene_reverb(uint8_t enabled);
 int dkr_afx_sfx_scene_prepare(uint16_t level);
+/* Called by the scene gate (dreamcast/scene_gate.c): hold back new sounds and music. */
+void dkr_afx_scene_hold(int held);
 /* Call after dkr_afx_music_prepare(), while the DKR audio mutex is held. */
 void dkr_afx_voices_prepare(const uint8_t *characters, unsigned count);
 int dkr_afx_sfx_stop_all(void);
@@ -31,5 +35,9 @@ void dkr_afx_sfx_volume(void *owner, uint8_t gain);
 void dkr_afx_sfx_pitch(void *owner, float pitch);
 void dkr_afx_sfx_pan(void *owner, uint8_t pan);
 void dkr_afx_sfx_fx(void *owner, uint8_t fx);
+/* Plays the chime for the Dreamcast swirl once, when the scene gate opens.
+ * Any thread, no lock: it only asks. Only the boot screen has it loaded, and
+ * only a build given one (SWIRL_CHIME_LEFT in Makefile.dc) has one. */
+void dkr_afx_chime_play(void);
 
 #endif

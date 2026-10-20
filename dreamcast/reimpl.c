@@ -63,8 +63,50 @@ u8 *main_BSS_START[1] = { 0 };
 
 static u8 *sAssetLut = NULL;
 static u32 sAssetLutSize = 0;
-static u8 *sAssetsBin = NULL;
 static u32 sAssetsBinSize = 0;
+#if DKR_ASSET_RESIDENT
+// ASSET_RESIDENT=1: the whole image in RAM, as a cart is to the N64.
+static u8 *sAssetsBin = NULL;
+#else
+// assets.bin stays on disc and each "DMA" reads it there. What a scene needs
+// while it plays should come from its bundle, so reads in that window are
+// counted (pc_asset_play_report).
+#include "scene_gate.h"
+
+static file_t sAssetsFile = FILEHND_INVALID;
+static mutex_t sAssetsLock = MUTEX_INITIALIZER; // audio and loader threads share the handle
+
+// Regions bnkf.c asked to have byte-swapped (RAW16 samples), applied to every
+// read that overlaps them, since there is no resident image to swap once.
+#define SWAP16_MAX 512
+static u32 sSwap16Lo[SWAP16_MAX], sSwap16Hi[SWAP16_MAX];
+static u32 sSwap16Count;
+
+static u32 sPlayReads, sPlayBytes, sPlayMaxUs;
+
+// Sections kept in RAM from boot, because scenes read them while they play:
+// every small one (tables, headers, text: about 0.4 MB) and the 2D textures
+// (0.9 MB: HUD, menu and sprite images, loaded and freed as screens change).
+// The large sections are read only while a scene loads: level and object
+// models, animations and 3D textures, which the scene bundles hold; the N64
+// sound banks are never read, since AICAflow has its own.
+#include "asset_enums.h"
+#define RESIDENT_SMALL_MAX (128u * 1024u)
+#define RESIDENT_RANGES_MAX 16
+
+// The scene's pack (build/dc/assetscenes/LEVEL.dsp, dreamcast/build_asset_scenes.py):
+// the ranges of assets.bin the scene reads, found from its level and recorded
+// in dreamcast/assets.scenes. The gate reads it in one pass when the scene
+// starts loading; it is dropped when the next one does.
+#define SCENE_PACK_MAGIC 0x4B505344u /* DSPK */
+static u8 *sScenePack;
+static const u32 *sScenePackTable; // offset, size, file position per range
+static u32 sScenePackRanges;
+
+static u8 *sResidentBuf;
+static u32 sResidentLo[RESIDENT_RANGES_MAX], sResidentHi[RESIDENT_RANGES_MAX], sResidentAt[RESIDENT_RANGES_MAX];
+static u32 sResidentRanges;
+#endif
 
 static u8 *pc_load_file(const char *path, u32 *sizeOut) {
     FILE *f = fopen(path, "rb");
@@ -105,6 +147,164 @@ static u8 *pc_load_file(const char *path, u32 *sizeOut) {
     return buf;
 }
 
+#if !DKR_ASSET_RESIDENT
+static void assets_read(u32 offset, u8 *dst, u32 numBytes);
+
+/** Reads the resident sections into RAM, adjacent ones as one range. */
+static void assets_resident_init(void) {
+    const u32 *lut = (const u32 *) sAssetLut;
+    u32 sections = sAssetLutSize / 4u - 2u; // the count, then each section's start and the end
+    u32 total = 0, s, i;
+
+    for (s = 0; s < sections; s++) {
+        u32 lo = lut[s + 1], hi = lut[s + 2];
+
+        if (hi <= lo || (hi - lo > RESIDENT_SMALL_MAX && s != ASSET_TEXTURES_2D)) {
+            continue;
+        }
+        if (sResidentRanges > 0 && sResidentHi[sResidentRanges - 1] == lo) {
+            sResidentHi[sResidentRanges - 1] = hi;
+        } else if (sResidentRanges < RESIDENT_RANGES_MAX) {
+            sResidentLo[sResidentRanges] = lo;
+            sResidentHi[sResidentRanges] = hi;
+            sResidentRanges++;
+        } else {
+            continue;
+        }
+        total += hi - lo;
+    }
+    sResidentBuf = malloc(total);
+    if (sResidentBuf == NULL) {
+        printf("ASSETS: no room for the resident sections (%lu KB)\n", (unsigned long) (total / 1024u));
+        sResidentRanges = 0;
+        return;
+    }
+    for (i = 0, total = 0; i < sResidentRanges; i++) {
+        sResidentAt[i] = total;
+        total += sResidentHi[i] - sResidentLo[i];
+    }
+    // Published only once filled, so a read meanwhile goes to the file.
+    s = sResidentRanges;
+    sResidentRanges = 0;
+    for (i = 0; i < s; i++) {
+        assets_read(sResidentLo[i], sResidentBuf + sResidentAt[i], sResidentHi[i] - sResidentLo[i]);
+    }
+    sResidentRanges = s;
+    printf("ASSETS: %lu KB resident in %lu ranges, the rest read from disc\n", (unsigned long) (total / 1024u),
+           (unsigned long) s);
+}
+
+/** Copies a read the resident sections cover; 0 if they do not cover all of it. */
+static int resident_read(u32 offset, u8 *dst, u32 numBytes) {
+    u32 i;
+
+    for (i = 0; i < sResidentRanges; i++) {
+        if (offset >= sResidentLo[i] && offset + numBytes <= sResidentHi[i]) {
+            shz_memcpy(dst, sResidentBuf + sResidentAt[i] + (offset - sResidentLo[i]), numBytes);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/** Copies a read the scene's pack covers; 0 if it does not cover all of it. */
+static int scene_pack_read(u32 offset, u8 *dst, u32 numBytes) {
+    u32 lo = 0, hi;
+    int covered = 0;
+
+    mutex_lock(&sAssetsLock); // the audio thread reads too
+    hi = sScenePackRanges;
+    // The last range starting at or before offset.
+    while (hi - lo > 1) {
+        u32 mid = (lo + hi) / 2;
+
+        if (sScenePackTable[mid * 3] <= offset) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if (sScenePackRanges != 0) {
+        const u32 *r = &sScenePackTable[lo * 3];
+
+        if (r[0] <= offset && offset + numBytes <= r[0] + r[1]) {
+            shz_memcpy(dst, sScenePack + r[2] + (offset - r[0]), numBytes);
+            covered = 1;
+        }
+    }
+    mutex_unlock(&sAssetsLock);
+    return covered;
+}
+
+void pc_asset_scene_release(void) {
+    u8 *pack;
+
+    mutex_lock(&sAssetsLock);
+    pack = sScenePack;
+    sScenePack = NULL;
+    sScenePackTable = NULL;
+    sScenePackRanges = 0;
+    mutex_unlock(&sAssetsLock);
+    free(pack);
+}
+
+void pc_asset_scene_load(int level) {
+    char path[96];
+    u64 started = timer_us_gettime64();
+    file_t file;
+    u32 size, done = 0;
+    u8 *pack;
+
+    pc_asset_scene_release();
+    if (level < 0) {
+        return;
+    }
+    snprintf(path, sizeof(path), DKR_ASSET_MOUNT "/build/dc/assetscenes/%d.dsp", level);
+    file = fs_open(path, O_RDONLY);
+    if (file == FILEHND_INVALID) {
+        return;
+    }
+    size = (u32) fs_total(file);
+    pack = memalign(32, size);
+    if (pack == NULL) {
+        printf("ASSETS: no room for scene %d's pack (%lu KB)\n", level, (unsigned long) (size / 1024u));
+        fs_close(file);
+        return;
+    }
+    // Bounded transactions, as /pc wants them.
+    while (done < size) {
+        u32 count = size - done > 32768u ? 32768u : size - done;
+        ssize_t got = fs_read(file, pack + done, count);
+
+        if (got <= 0) {
+            break;
+        }
+        done += (u32) got;
+    }
+    fs_close(file);
+    if (done != size || size < 16u || ((u32 *) pack)[0] != SCENE_PACK_MAGIC || ((u32 *) pack)[1] != 1u ||
+        16u + 12u * ((u32 *) pack)[2] > size) {
+        printf("ASSETS: %s is not a version 1 scene pack\n", path);
+        free(pack);
+        return;
+    }
+    mutex_lock(&sAssetsLock);
+    sScenePack = pack;
+    sScenePackTable = (const u32 *) (pack + 16);
+    sScenePackRanges = ((u32 *) pack)[2];
+    mutex_unlock(&sAssetsLock);
+    printf("ASSETS: scene %d pack, %lu ranges, %lu KB, read in %lu ms\n", level, (unsigned long) sScenePackRanges,
+           (unsigned long) (size / 1024u), (unsigned long) ((timer_us_gettime64() - started) / 1000u));
+}
+#else
+void pc_asset_scene_release(void) {
+}
+
+void pc_asset_scene_load(int level) {
+    (void) level;
+}
+#endif
+
 static void pc_assets_init(void) {
     u32 i;
 
@@ -112,7 +312,16 @@ static void pc_assets_init(void) {
         return;
     }
     sAssetLut = pc_load_file(ASSET_DIR "assets.lut.bin", &sAssetLutSize);
+#if DKR_ASSET_RESIDENT
     sAssetsBin = pc_load_file(ASSET_DIR "assets.bin", &sAssetsBinSize);
+#else
+    sAssetsFile = fs_open(ASSET_DIR "assets.bin", O_RDONLY);
+    if (sAssetsFile == FILEHND_INVALID) {
+        printf("ASSETS: cannot open %s\n", ASSET_DIR "assets.bin");
+        exit(1);
+    }
+    sAssetsBinSize = (u32) fs_total(sAssetsFile);
+#endif
 
     // LUT: entry count followed by offsets, all big-endian u32 — swap in place.
     for (i = 0; i + 3 < sAssetLutSize; i += 4) {
@@ -124,6 +333,9 @@ static void pc_assets_init(void) {
         p[3] = t0;
     }
     printf("ASSETS: lut %u bytes, data %u bytes\n", sAssetLutSize, sAssetsBinSize);
+#if !DKR_ASSET_RESIDENT
+    assets_resident_init();
+#endif
 }
 
 u32 pc_asset_lut_size(void) {
@@ -178,8 +390,170 @@ void pc_asset_swap16_region(u32 romOffset, u32 numBytes) {
         fprintf(stderr, "AUDIO: raw16 swap past end of assets (0x%X + 0x%X) — skipped\n", offset, numBytes);
         return;
     }
+#if DKR_ASSET_RESIDENT
     pc_swap16_buf(sAssetsBin + offset, numBytes);
+#else
+    {
+        u32 i;
+
+        for (i = 0; i < sSwap16Count; i++) {
+            if (sSwap16Lo[i] == offset) {
+                return; // the same wave, from a bank loaded again
+            }
+        }
+        if (sSwap16Count == SWAP16_MAX) {
+            fprintf(stderr, "AUDIO: too many raw16 regions — 0x%X left unswapped\n", offset);
+            return;
+        }
+        sSwap16Lo[sSwap16Count] = offset;
+        sSwap16Hi[sSwap16Count] = offset + numBytes;
+        sSwap16Count++;
+    }
+#endif
 }
+
+#if !DKR_ASSET_RESIDENT
+/** Read [offset, offset + numBytes) of assets.bin into dst. */
+static void assets_read(u32 offset, u8 *dst, u32 numBytes) {
+    u64 t0 = timer_us_gettime64();
+    u32 done = 0;
+    u32 i;
+
+    mutex_lock(&sAssetsLock);
+    if (fs_seek(sAssetsFile, (off_t) offset, SEEK_SET) != (off_t) offset) {
+        fprintf(stderr, "ASSETS: seek to 0x%X failed\n", offset);
+    }
+    // Bounded transactions, as /pc wants them.
+    while (done < numBytes) {
+        u32 count = numBytes - done;
+        ssize_t got;
+
+        if (count > 32768u) count = 32768u;
+        got = fs_read(sAssetsFile, dst + done, count);
+        if (got <= 0) {
+            fprintf(stderr, "ASSETS: short read at 0x%X\n", offset + done);
+            memset(dst + done, 0, numBytes - done);
+            break;
+        }
+        done += (u32) got;
+    }
+    mutex_unlock(&sAssetsLock);
+
+    for (i = 0; i < sSwap16Count; i++) {
+        u32 lo = sSwap16Lo[i] > offset ? sSwap16Lo[i] : offset;
+        u32 hi = sSwap16Hi[i] < offset + numBytes ? sSwap16Hi[i] : offset + numBytes;
+
+        if (((lo - sSwap16Lo[i]) & 1u) != 0) {
+            lo++; // keep the pairs the wave's own
+        }
+        if (hi > lo) {
+            pc_swap16_buf(dst + (lo - offset), (hi - lo) & ~1u);
+        }
+    }
+
+    if (pc_scene_is_ready() && pc_scene_level() >= 0) { // not before the first scene
+        u32 us = (u32) (timer_us_gettime64() - t0);
+
+        sPlayReads++;
+        sPlayBytes += numBytes;
+        if (us > sPlayMaxUs) sPlayMaxUs = us;
+    }
+#if DKR_TEX_TRACE
+    // What the scene's pack missed, loading or playing, for
+    // dreamcast/record_scenes.py to merge into dreamcast/assets.scenes.
+    if (pc_scene_level() >= 0) {
+        printf("ASSETUSE level=%d id=%lx:%lx\n", pc_scene_level(), (unsigned long) offset, (unsigned long) numBytes);
+    }
+#endif
+}
+#endif
+
+/** Reads of assets.bin made while a scene was playing, since the last report. */
+void pc_asset_play_report(void) {
+#if !DKR_ASSET_RESIDENT
+    if (sPlayReads > 0) {
+        printf("ASSET PLAY %lu reads from disc while playing, %lu KB, longest %lu us\n",
+               (unsigned long) sPlayReads, (unsigned long) (sPlayBytes / 1024u), (unsigned long) sPlayMaxUs);
+    }
+    sPlayReads = sPlayBytes = sPlayMaxUs = 0;
+#endif
+}
+
+#if DKR_ASSET_TRACE
+// ASSET_TRACE=1: which parts of assets.bin a run reads, per asset section, and
+// how much of it while a scene is playing rather than loading. Answers how much
+// of the image has to be resident and what could be read from disc on demand.
+#include "scene_gate.h"
+
+#define TRACE_PAGE 4096u
+#define TRACE_PAGES ((12u * 1024u * 1024u) / TRACE_PAGE)
+#define TRACE_SECTIONS 64
+
+static u8 sTracePage[TRACE_PAGES / 8];   // read at all
+static u8 sTracePlay[TRACE_PAGES / 8];   // read while a scene was playing
+static u32 sTraceCalls[TRACE_SECTIONS][2], sTraceBytes[TRACE_SECTIONS][2];
+
+static s32 trace_section(u32 offset) {
+    // The LUT is an entry count, then each section's start in assets.bin.
+    const u32 *lut = (const u32 *) sAssetLut;
+    u32 count = sAssetLutSize / 4u - 1u;
+    u32 i;
+
+    for (i = 1; i < count; i++) {
+        if (offset < lut[i + 1]) {
+            return (s32) (i - 1) < TRACE_SECTIONS ? (s32) (i - 1) : TRACE_SECTIONS - 1;
+        }
+    }
+    return TRACE_SECTIONS - 1;
+}
+
+static void trace_read(u32 offset, u32 numBytes) {
+    int playing = pc_scene_is_ready();
+    s32 section = trace_section(offset);
+    u32 p;
+
+    sTraceCalls[section][playing]++;
+    sTraceBytes[section][playing] += numBytes;
+    for (p = offset / TRACE_PAGE; p <= (offset + numBytes - 1u) / TRACE_PAGE && p < TRACE_PAGES; p++) {
+        sTracePage[p >> 3] |= (u8) (1u << (p & 7u));
+        if (playing) {
+            sTracePlay[p >> 3] |= (u8) (1u << (p & 7u));
+        }
+    }
+}
+
+void pc_asset_trace_report(void) {
+    const u32 *lut = (const u32 *) sAssetLut;
+    u32 count = sAssetLutSize / 4u - 1u;
+    u32 i, p, all = 0, play = 0;
+
+    if (lut == NULL) {
+        return;
+    }
+    for (i = 1; i < count; i++) {
+        u32 lo = lut[i], hi = lut[i + 1], s = i - 1;
+        u32 pages = 0, playPages = 0;
+
+        for (p = lo / TRACE_PAGE; p < (hi + TRACE_PAGE - 1u) / TRACE_PAGE && p < TRACE_PAGES; p++) {
+            pages += (sTracePage[p >> 3] >> (p & 7u)) & 1u;
+            playPages += (sTracePlay[p >> 3] >> (p & 7u)) & 1u;
+        }
+        if (hi > lo) {
+            printf("ASSET TRACE section %lu size %lu KB touched %lu KB (playing %lu KB) | loading %lu calls %lu KB, "
+                   "playing %lu calls %lu KB\n", (unsigned long) s, (unsigned long) ((hi - lo) / 1024u),
+                   (unsigned long) (pages * 4u), (unsigned long) (playPages * 4u),
+                   (unsigned long) sTraceCalls[s][0], (unsigned long) (sTraceBytes[s][0] / 1024u),
+                   (unsigned long) sTraceCalls[s][1], (unsigned long) (sTraceBytes[s][1] / 1024u));
+        }
+    }
+    for (p = 0; p < TRACE_PAGES; p++) {
+        all += (sTracePage[p >> 3] >> (p & 7u)) & 1u;
+        play += (sTracePlay[p >> 3] >> (p & 7u)) & 1u;
+    }
+    printf("ASSET TRACE total %lu KB of %lu KB touched, %lu KB while playing\n", (unsigned long) (all * 4u),
+           (unsigned long) (sAssetsBinSize / 1024u), (unsigned long) (play * 4u));
+}
+#endif
 
 void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
     pc_assets_init();
@@ -200,7 +574,19 @@ void pc_dmacopy(u32 romOffset, u32 ramAddress, s32 numBytes) {
                         sAssetsBinSize);
                 numBytes = sAssetsBinSize - offset;
             }
+#if DKR_ASSET_TRACE
+            if (numBytes > 0) {
+                trace_read(offset, (u32) numBytes);
+            }
+#endif
+#if DKR_ASSET_RESIDENT
             shz_memcpy((void *) (uintptr_t) ramAddress, sAssetsBin + offset, numBytes);
+#else
+            if (numBytes > 0 && !resident_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes) &&
+                !scene_pack_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes)) {
+                assets_read(offset, (u8 *) (uintptr_t) ramAddress, (u32) numBytes);
+            }
+#endif
             return;
         }
     }
@@ -259,12 +645,32 @@ extern s32 osSendMesg(void *mq, void *msg, s32 flags);
 s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
     s32 i;
 
+#if DKR_ENJ_INPUT
+    // Every port with a pad in it, as the PIF would report (ENJ_INPUT=1).
+    input_host_poll();
+    *bitpattern = 0;
+    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
+        unsigned short button;
+        signed char x, y;
+        s32 present = input_host_read(i, &button, &x, &y);
+
+        *bitpattern |= present ? (1 << i) : 0;
+        status[i].type = present ? PC_CONT_TYPE_NORMAL : 0;
+        status[i].status = 0;
+        status[i].error = present ? 0 : PC_CONT_NO_RESPONSE;
+    }
+    // The game counts port 0 as its controller; keep it so with none plugged in.
+    *bitpattern |= 1;
+    status[0].type = PC_CONT_TYPE_NORMAL;
+    status[0].error = 0;
+#else
     *bitpattern = 1; // controller in port 0 only
     for (i = 0; i < PC_MAXCONTROLLERS; i++) {
         status[i].type = (i == 0) ? PC_CONT_TYPE_NORMAL : 0;
         status[i].status = 0;
         status[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
     }
+#endif
     return 0;
 }
 
@@ -284,7 +690,17 @@ void osContGetReadData(PCContPad *pads) {
         pads[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
     }
 
-    input_host_read(&pads[0].button, &pads[0].stick_x, &pads[0].stick_y);
+#if DKR_ENJ_INPUT
+    input_host_poll();
+    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
+        if (input_host_read(i, &pads[i].button, &pads[i].stick_x, &pads[i].stick_y)) {
+            pads[i].error = 0;
+        }
+    }
+    pads[0].error = 0;
+#else
+    input_host_read(0, &pads[0].button, &pads[0].stick_x, &pads[0].stick_y);
+#endif
 }
 
 // EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks. Backed by RAM, so writes
@@ -399,6 +815,20 @@ s32 osMotorStop(void *pfs) {
 void isv_printf(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
+#if DKR_GFX_PROFILE
+    {
+        // A profile run counts late frames, and a printf over dcload is a
+        // round trip to the host: while a scene plays, into the profile's log.
+        extern int pc_scene_is_ready(void);
+        extern void pc_prof_vlog(const char *format, va_list args);
+
+        if (pc_scene_is_ready()) {
+            pc_prof_vlog(fmt, args);
+            va_end(args);
+            return;
+        }
+    }
+#endif
     vprintf(fmt, args);
     va_end(args);
     // Flush every line: this is the port's only debug channel, and on a crash or

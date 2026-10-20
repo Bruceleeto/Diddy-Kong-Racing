@@ -41,9 +41,11 @@
 #include "waves.h"
 #include "weather.h"
 #include "pc_swap.h"
+#include "../dreamcast/prof.h"
 
 #ifdef TARGET_DC
 #   include <sh4zam/shz_sh4zam.h>
+extern int pc_swirl_render(Object *obj, ObjectModel *model, Gfx **dl, s32 opacity); // dreamcast/swirl.c
 #endif
 
 #define OBJECT_MAP_SIZE 0x3000
@@ -3809,6 +3811,12 @@ void render_3d_model(Object *obj) {
         } else {
             gDPSetPrimColor(gObjectCurrDisplayList++, 0, 0, 255, 255, 255, 255);
         }
+#ifdef TARGET_DC
+        // The port lights and draws the Dreamcast swirl itself.
+        if (pc_swirl_render(obj, objModel, &gObjectCurrDisplayList, opacity)) {
+            meshBatch = -1;
+        } else
+#endif
         if (opacity < 255) {
             meshBatch = render_mesh(objModel, obj, 0, RENDER_SEMI_TRANSPARENT, vertOffset);
         } else {
@@ -3961,6 +3969,9 @@ void render_object(Gfx **dList, Mtx **mtx, Vertex **verts, Object *obj) {
         return;
     }
     update_object_stack_trace(OBJECT_DRAW, obj->objectID);
+    PC_PROF_CATEGORY(*dList, obj->behaviorId == BHV_RACER                ? PC_PROF_CAT_RACERS
+                             : (obj->trans.flags & OBJ_FLAGS_PARTICLE) ? PC_PROF_CAT_PARTICLES
+                                                                         : PC_PROF_CAT_OBJECTS);
     gObjectCurrDisplayList = *dList;
     gObjectCurrMatrix = *mtx;
     gObjectCurrVertexList = *verts;

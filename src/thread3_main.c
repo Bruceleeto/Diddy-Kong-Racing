@@ -46,6 +46,11 @@
 #include <PR/gu.h>
 #include <PR/os_cont.h>
 #include <PR/os_time.h>
+#include "../dreamcast/prof.h"
+#include "../dreamcast/scene_gate.h"
+#ifdef DKR_AICAFLOW
+#include "../dreamcast/audio_aicaflow.h"
+#endif
 
 /************ .rodata ************/
 
@@ -151,11 +156,46 @@ UNUSED s32 D_80123568[3]; // BSS Padding
  * Main looping function for the main thread.
  * Official Name: mainThread
  */
+#ifdef TARGET_PC
+/** One iteration of the game loop: one frame. */
+static void thread3_frame(UNUSED void *data) {
+    if (is_reset_pressed()) {
+        rumble_kill();
+        audioStopThread();
+        bgload_kill();
+        __osSpSetStatus(SP_SET_HALT | SP_CLR_INTR_BREAK | SP_CLR_YIELD | SP_CLR_YIELDED | SP_CLR_TASKDONE |
+                        SP_CLR_RSPSIGNAL | SP_CLR_CPUSIGNAL | SP_CLR_SIG5 | SP_CLR_SIG6 | SP_CLR_SIG7);
+        osDpSetStatus(DPC_SET_XBUS_DMEM_DMA | DPC_CLR_FREEZE | DPC_CLR_FLUSH | DPC_CLR_TMEM_CTR | DPC_CLR_PIPE_CTR |
+                      DPC_CLR_CMD_CTR | DPC_CLR_CMD_CTR);
+        while (1) {
+            ; // Infinite loop
+        }
+    }
+#ifdef DKR_AICAFLOW
+    dkr_afx_frame(); // unplanned sounds, on this thread and outside any lock
+#endif
+    main_game_loop();
+    thread3_verify_stack();
+}
+#endif
+
 void thread3_main(UNUSED void *unused) {
     init_game();
     gSaveDataFlags = input_update(gSaveDataFlags, 0);
     sBootDelayTimer = 0;
     gGameMode = GAMEMODE_INTRO;
+#if defined(TARGET_PC) && DKR_ENJ_LOOP
+    // enDjinn runs the loop (ENJ_LOOP=1): each of its frames calls
+    // thread3_frame, then submits the display list the frame built.
+    {
+        extern void pc_enj_loop_run(void (*frame)(void *));
+        pc_enj_loop_run(thread3_frame);
+    }
+#elif defined(TARGET_PC)
+    while (1) {
+        thread3_frame(NULL);
+    }
+#else
     while (1) {
         if (is_reset_pressed()) {
             rumble_kill();
@@ -169,9 +209,13 @@ void thread3_main(UNUSED void *unused) {
                 ; // Infinite loop
             }
         }
+#ifdef DKR_AICAFLOW
+        dkr_afx_frame(); // unplanned sounds, on this thread and outside any lock
+#endif
         main_game_loop();
         thread3_verify_stack();
     }
+#endif
 }
 
 /**
@@ -260,11 +304,13 @@ void main_game_loop(void) {
         rsp_segment(&gCurrDisplayList, SEGMENT_ZBUFFER, (s32) gVideoLastDepthBuffer);
         rsp_segment(&gCurrDisplayList, SEGMENT_FRAMEBUFFER_OFFSET, (s32) gVideoCurrFramebuffer - VI_OFFSET); // Unused
     }
+#if !(defined(TARGET_PC) && DKR_ENJ_LOOP)
     if (gDrawFrameTimer == 0) {
         gfxtask_run_xbus(gDisplayLists[gSPTaskNum], gCurrDisplayList, 0);
         gSPTaskNum += 1;
         gSPTaskNum &= 1;
     }
+#endif
     if (gDrawFrameTimer) {
         gDrawFrameTimer--;
     }
@@ -313,17 +359,6 @@ void main_game_loop(void) {
 
     // This is a good spot to place custom text if you want it to overlay it over ALL the
     // menus & gameplay.
-#ifdef TARGET_DC
-    // Profiler: FPS readout in the center-left, drawn with the debug small font.
-    // pc_get_fps() lives in dreamcast/gfx.c and reflects real rendered-frame cadence.
-    {
-        extern float pc_get_fps(void);
-        s32 fps10 = (s32) (pc_get_fps() * 10.0f + 0.5f);
-        set_render_printf_position(16, 108);
-        set_render_printf_colour(255, 255, 0, 255);
-        render_printf("FPS %d.%d", fps10 / 10, fps10 % 10);
-    }
-#endif
 
     sound_update_queue(sLogicUpdateRate);
     debug_text_print(&gCurrDisplayList);
@@ -374,6 +409,17 @@ void main_game_loop(void) {
 #if REGION == REGION_JP
     func_800C78E0_C84E0();
 #endif
+#if defined(TARGET_PC) && DKR_ENJ_LOOP
+    // Under enDjinn's loop the frame's own display list is queued here and
+    // drawn as soon as this iteration returns, after the pacer's wait: the
+    // same place in time as at the top of the next iteration, where the plain
+    // loop draws it. Nothing changes gDrawFrameTimer in between.
+    if (gDrawFrameTimer == 0) {
+        gfxtask_run_xbus(gDisplayLists[gSPTaskNum], gCurrDisplayList, 0);
+        gSPTaskNum += 1;
+        gSPTaskNum &= 1;
+    }
+#endif
 }
 
 /**
@@ -395,6 +441,9 @@ void load_next_ingame_level(s32 numPlayers, s32 trackID, Vehicle vehicle) {
  * Used when ingame.
  */
 void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId) {
+#ifdef TARGET_PC
+    pc_scene_loading(levelId);
+#endif
     alloc_displaylist_heap(numberOfPlayers);
     mempool_free_timer(0);
     cam_init();
@@ -406,6 +455,9 @@ void load_level_game(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle v
     osSetTime(0);
     mempool_free_timer(2);
     rumble_init(TRUE);
+#ifdef TARGET_PC
+    pc_scene_ready();
+#endif
 }
 
 /**
@@ -436,6 +488,44 @@ void unload_level_game(void) {
  * The main behaviour function involving all of the ingame stuff.
  * Involves the updating of all objects and setting up the render scene.
  */
+#ifdef TARGET_PC
+extern s32 frame_interp_step(s32 fields);
+extern void frame_interp_before_step(void);
+extern void frame_interp_after_step(void);
+extern void frame_interp_skipped(void);
+extern void frame_interp_draw_begin(void);
+extern void frame_interp_draw_end(void);
+
+/**
+ * Steps the objects. The logic keeps the two-field step its physics is tuned
+ * for; on a faster display every other frame draws between two steps instead.
+ * See dreamcast/frame_interp.c.
+ */
+static void game_logic_step(s32 updateRate) {
+    s32 step = frame_interp_step(updateRate);
+
+    if (step == 0) {
+        frame_interp_skipped();
+        return;
+    }
+    frame_interp_before_step();
+    PC_PROF(PC_PROF_LOGIC, obj_update(step));
+    frame_interp_after_step();
+    pc_scene_step_done();
+}
+
+static void game_scene_draw(s32 updateRate) {
+    frame_interp_draw_begin();
+    PC_PROF(PC_PROF_SCENE,
+            render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate));
+    frame_interp_draw_end();
+}
+#else
+#define game_logic_step(updateRate) obj_update(updateRate)
+#define game_scene_draw(updateRate) \
+    render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate)
+#endif
+
 void mode_game(s32 updateRate) {
     s32 buttonPressedInputs, buttonHeldInputs, i, loadContext, sp3C;
 
@@ -456,7 +546,7 @@ void mode_game(s32 updateRate) {
 #endif
     // Update all objects
     if (!gIsPaused) {
-        obj_update(updateRate);
+        game_logic_step(updateRate);
         if (check_if_showing_cutscene_camera() == 0 || get_race_countdown()) {
             if (buttonPressedInputs & START_BUTTON && level_properties_get() == 0 && gDrumstickSceneLoadTimer == 0 &&
                 gGameMode == GAMEMODE_INGAME && gPostRaceViewPort == FALSE && gLevelLoadTimer == 0 &&
@@ -478,7 +568,7 @@ void mode_game(s32 updateRate) {
     }
     gParticlePtrList_flush();
     ainode_update();
-    render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+    game_scene_draw(updateRate);
     if (gGameMode == GAMEMODE_INGAME) {
         // Ignore the user's L/R/Z buttons.
         buttonHeldInputs &= ~(L_TRIG | R_TRIG | Z_TRIG);
@@ -889,6 +979,9 @@ Vehicle get_level_default_vehicle(void) {
  * Used for menus.
  */
 void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle vehicleId, s32 cutsceneId) {
+#ifdef TARGET_PC
+    pc_scene_loading(levelId);
+#endif
     mempool_free_timer(0);
     cam_init();
     load_game_text_table();
@@ -900,6 +993,9 @@ void load_level_menu(s32 levelId, s32 numberOfPlayers, s32 entranceId, Vehicle v
     ainode_update();
     osSetTime(0);
     mempool_free_timer(2);
+#ifdef TARGET_PC
+    pc_scene_ready();
+#endif
 }
 
 /**
@@ -926,10 +1022,10 @@ void unload_level_menu(void) {
  */
 void update_menu_scene(s32 updateRate) {
     if (bgload_active() == FALSE) {
-        obj_update(updateRate);
+        game_logic_step(updateRate);
         gParticlePtrList_flush();
         ainode_update();
-        render_scene(&gCurrDisplayList, &gGameCurrMatrix, &gGameCurrVertexList, &gGameCurrTriList, updateRate);
+        game_scene_draw(updateRate);
         process_onscreen_textbox(updateRate);
         rdp_init(&gCurrDisplayList);
         divider_draw(&gCurrDisplayList);

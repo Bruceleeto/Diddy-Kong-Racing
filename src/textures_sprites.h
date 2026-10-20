@@ -153,6 +153,10 @@ s32 tex_palette_id(s16 paletteID);
 void material_set(Gfx **dList, TextureHeader *texhead, s32 flags, s32 texOffset);
 void sprite_free(Sprite *sprite);
 void tex_free(TextureHeader *tex);
+#ifdef TARGET_DC
+void tex_free_held(TextureHeader *tex);
+int pc_textures_release_held(void);
+#endif
 void material_load_simple(Gfx **dList, s32 flags);
 
 // There might be a file boundary here.

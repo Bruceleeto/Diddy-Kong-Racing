@@ -1002,6 +1002,9 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
         viewportID = 2;
     }
 
+#if defined(DKR_SKIP_WATER) && DKR_SKIP_WATER
+    return; // measurement builds only: what the water costs
+#endif
     if (gVisibleWaveTiles > 0) {
         gWaveDL = *dList;
         gWaveMtx = *mtx;

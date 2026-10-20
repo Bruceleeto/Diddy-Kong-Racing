@@ -14,6 +14,13 @@
 
 #define MODEL_LOADED_MAX 70
 
+#ifdef TARGET_PC
+extern void pc_model_loaded(s32 modelID); // dreamcast/main.c: traces and counts disc loads
+#ifdef TARGET_DC
+extern u32 pc_object_model_override(s32 modelID, void *out); // dreamcast/swirl.c
+#endif
+#endif
+
 /************ .data ************/
 
 s32 gRenderSceneChecksum = TractionTableChecksum;
@@ -156,6 +163,9 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 #endif
     u32 compressedData;
     s32 modelSize;
+#ifdef TARGET_DC
+    u32 overrideSize;
+#endif
 
     if (modelID >= gNumModelIDs) {
         stubbed_printf("Error: Model no. out of range on load. !!\n");
@@ -194,6 +204,13 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 
     temp_s0 = gObjectModelTable[modelID];
     sp48 = gObjectModelTable[modelID + 1] - temp_s0;
+#ifdef TARGET_DC
+    // The port may supply a model of its own (dreamcast/swirl.c).
+    overrideSize = pc_object_model_override(modelID, NULL);
+    if (overrideSize != 0) {
+        modelSize = overrideSize + sizeof(ObjectModel);
+    } else
+#endif
     modelSize = gzip_size_uncompressed(ASSET_OBJECT_MODELS, temp_s0) + sizeof(ObjectModel);
     objMdl = (ObjectModel *) mempool_alloc(modelSize, COLOUR_TAG_RED);
     if (objMdl == NULL) {
@@ -207,9 +224,20 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
 #endif
         return NULL;
     }
+#ifdef TARGET_DC
+    if (overrideSize != 0) {
+        pc_object_model_override(modelID, objMdl);
+    } else {
+#endif
     compressedData = (u32) ((u8 *) objMdl + modelSize) - sp48;
+#ifdef TARGET_PC
+    pc_model_loaded(modelID);
+#endif
     asset_load(ASSET_OBJECT_MODELS, compressedData, temp_s0, sp48);
     gzip_inflate((u8 *) compressedData, (u8 *) objMdl);
+#ifdef TARGET_DC
+    }
+#endif
 #ifdef TARGET_PC
     pc_swap_object_model(objMdl);
 #endif
@@ -1066,3 +1094,46 @@ void func_80061C0C(Object *obj) {
         }
     }
 }
+
+#ifdef TARGET_PC
+// Models the scene gate loads before a scene starts and holds until the next
+// one loads, so objects that spawn later find them in the cache.
+#define MODEL_HELD_MAX 32
+static ModelInstance *sHeldModels[MODEL_HELD_MAX];
+static s32 sHeldModelCount;
+
+/** Loads a model and keeps a reference to it; FALSE once the cache has no room to spare. */
+s32 pc_model_hold(s32 modelID) {
+    ModelInstance *instance;
+
+    // Leave the scene's own objects most of the model table.
+    if (sHeldModelCount >= MODEL_HELD_MAX || gModelCacheCount - D_8011D634 >= MODEL_LOADED_MAX - 24) {
+        return FALSE;
+    }
+    instance = object_model_init(modelID, 0);
+    if (instance == NULL) {
+        return FALSE;
+    }
+    sHeldModels[sHeldModelCount++] = instance;
+    return TRUE;
+}
+
+/**
+ * Drops the held models as the next scene starts loading. The previous frame
+ * is drawn by then, so nothing still reads them: free at once instead of
+ * through the deferred-free queue, which a whole scene's models would overflow.
+ */
+void pc_model_release_held(void) {
+    extern s32 gFreeQueueTimer;
+    s32 delay = gFreeQueueTimer;
+
+    if (sHeldModelCount == 0) {
+        return;
+    }
+    mempool_free_timer(0);
+    while (sHeldModelCount > 0) {
+        free_3d_model(sHeldModels[--sHeldModelCount]);
+    }
+    mempool_free_timer(delay);
+}
+#endif

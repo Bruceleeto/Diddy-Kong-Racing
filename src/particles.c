@@ -1,4 +1,11 @@
 #include "particles.h"
+
+#ifdef TARGET_DC
+// Held for the rest of the scene rather than freed (src/textures_sprites.c).
+#define PARTICLE_TEX_FREE tex_free_held
+#else
+#define PARTICLE_TEX_FREE tex_free
+#endif
 #include "asset_loading.h"
 #include "camera.h"
 #include "libc/math.h"
@@ -8,6 +15,9 @@
 #include "tracks.h"
 #include <ultra64.h>
 #include "pc_swap.h"
+#if defined(DKR_FSAA) && DKR_FSAA && defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE
+#include <stdio.h>
+#endif
 
 /************ .rodata ************/
 
@@ -1966,7 +1976,7 @@ void particle_deallocate(Particle *particle) {
             if (gNumTriangleParticles > 0) {
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumTriangleParticles--;
                 particle->kind = PARTICLE_KIND_NONE;
@@ -1976,7 +1986,7 @@ void particle_deallocate(Particle *particle) {
             if (gNumRectangleParticles > 0) {
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumRectangleParticles--;
                 particle->kind = PARTICLE_KIND_NONE;
@@ -1986,7 +1996,7 @@ void particle_deallocate(Particle *particle) {
             if (gNumLineParticles > 0) {
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumLineParticles--;
                 particle->kind = PARTICLE_KIND_NONE;
@@ -1997,7 +2007,7 @@ void particle_deallocate(Particle *particle) {
                 delete_point_particle_from_sequence((PointParticle *) particle);
                 tex = particle->model->texture;
                 if (tex != NULL) {
-                    tex_free(tex);
+                    PARTICLE_TEX_FREE(tex);
                 }
                 gNumPointParticles--;
                 particle->kind = PARTICLE_KIND_NONE;
@@ -2514,6 +2524,66 @@ UNUSED void render_active_particles(Gfx **dList, Mtx **mtx, Vertex **vtx) {
     }
 }
 
+#if defined(DKR_FSAA) && DKR_FSAA
+/**
+ * With FSAA every blended pixel is filled twice over, and smoke and dust are
+ * where it shows: big translucent billboards stacked in front of the camera.
+ * Returns the alpha to draw a translucent particle with, or 0 to skip it.
+ *
+ * FSAA_PARTICLE_THIN draws every other particle (by address, so the same ones
+ * each frame) and gives each the coverage two layers would have had.
+ * FSAA_PARTICLE_NEAR fades out sprites as their size over their distance from
+ * the camera grows from FSAA_PARTICLE_NEAR_FADE to FSAA_PARTICLE_NEAR_CULL
+ * (percent), and skips them beyond it: the ones that cover most of the screen.
+ */
+static s32 fsaa_particle_alpha(Particle *particle, s32 alpha) {
+#if DKR_FSAA_PARTICLE_THIN
+    u32 slot = (u32) particle >> 4;
+
+    if ((slot ^ (slot >> 5)) & 1) {
+        return 0;
+    }
+    alpha = alpha * (510 - alpha) / 255; // 1 - (1 - a)^2
+#endif
+#if DKR_FSAA_PARTICLE_NEAR
+    if (particle->kind == PARTICLE_KIND_SPRITE && particle->sprite != NULL && particle->sprite->textures != NULL &&
+        particle->sprite->textures[0] != NULL) {
+        Camera *cam = cam_get_active_camera();
+        f32 dx = particle->trans.x_position - cam->trans.x_position;
+        f32 dy = particle->trans.y_position - cam->trans.y_position;
+        f32 dz = particle->trans.z_position - cam->trans.z_position;
+        f32 size = particle->trans.scale * particle->sprite->textures[0]->width;
+        f32 d2 = dx * dx + dy * dy + dz * dz;
+        f32 cull = DKR_FSAA_PARTICLE_NEAR_CULL / 100.0f, fade = DKR_FSAA_PARTICLE_NEAR_FADE / 100.0f;
+        f32 ratio;
+
+        ratio = size * size >= cull * cull * d2 ? cull : sqrtf(size * size / (d2 > 1.0f ? d2 : 1.0f));
+#if DKR_GFX_PROFILE
+        {
+            // Sizes seen, to tune the thresholds: percent buckets 10/25/50/100/200/more.
+            static u32 sSeen[6], sCalls;
+            f32 r = d2 > 1.0f ? sqrtf(size * size / d2) : 100.0f;
+            sSeen[r < 0.1f ? 0 : r < 0.25f ? 1 : r < 0.5f ? 2 : r < 1.0f ? 3 : r < 2.0f ? 4 : 5]++;
+            if (++sCalls == 20000) {
+                printf("FSAA PARTICLES size/dist <10%% %lu, <25%% %lu, <50%% %lu, <100%% %lu, <200%% %lu, more %lu\n",
+                       (unsigned long) sSeen[0], (unsigned long) sSeen[1], (unsigned long) sSeen[2],
+                       (unsigned long) sSeen[3], (unsigned long) sSeen[4], (unsigned long) sSeen[5]);
+                sCalls = sSeen[0] = sSeen[1] = sSeen[2] = sSeen[3] = sSeen[4] = sSeen[5] = 0;
+            }
+        }
+#endif
+        if (ratio >= cull) {
+            return 0;
+        }
+        if (ratio > fade) {
+            alpha = (s32) (alpha * (cull - ratio) / (cull - fade));
+        }
+    }
+#endif
+    return alpha;
+}
+#endif
+
 /**
  * Load a texture then render a sprite or a billboard.
  */
@@ -2526,11 +2596,22 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
 
     renderFlags = (RENDER_FOG_ACTIVE | RENDER_Z_COMPARE);
 
+#if defined(DKR_SKIP_PARTICLES) && DKR_SKIP_PARTICLES
+    return; // measurement builds only: what smoke, dust and sparks cost
+#endif
     // Never true
     if ((particle->descFlags & flags) && D_800E2CDC < 512) {
         return;
     }
     alpha = (particle->opacity >> 8) & 0xFF;
+#if defined(DKR_FSAA) && DKR_FSAA
+    if (alpha != 255 && particle->kind != PARTICLE_KIND_POINT && particle->kind != PARTICLE_KIND_LINE) {
+        alpha = fsaa_particle_alpha(particle, alpha);
+        if (alpha >= 255) {
+            alpha = 254; // stay in the blended path
+        }
+    }
+#endif
     if (alpha <= 0) {
         return;
     }

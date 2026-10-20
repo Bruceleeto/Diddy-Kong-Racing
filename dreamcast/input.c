@@ -28,49 +28,123 @@
 // take over that axis. Covers centering drift without eating real input.
 #define STICK_IDLE 8
 
-void input_host_read(unsigned short *button, signed char *stickX, signed char *stickY) {
-    maple_device_t *cont;
-    cont_state_t *st;
+#if DKR_ENJ_INPUT
+#include <enDjinn/enj_ctrl.h>
+#include <enDjinn/enj_state.h>
+
+// enDjinn's controller layer (ENJ_INPUT=1): one snapshot of every port a
+// frame, taken by enDjinn's loop (ENJ_LOOP=1) or by input_host_poll.
+extern void enj_ctrl_init_local_devices(void);
+static int sEnjInputReady;
+
+void input_host_poll(void) {
+    enj_state_t *state = enj_state_get();
+
+    if (!sEnjInputReady) {
+        sEnjInputReady = 1;
+        // enj_state_startup set the controllers up unless told not to.
+        if (!state->flags.started || state->flags.no_input_init) {
+            enj_ctrl_init_local_devices();
+        }
+    }
+#if !DKR_ENJ_LOOP
+    enj_ctrl_map_states();
+#endif
+}
+
+#define HELD(s, b) (((s)->button.b) & ENJ_BUTTON_DOWN)
+#else
+void input_host_poll(void) {
+}
+#endif
+
+int input_host_read(int port, unsigned short *button, signed char *stickX, signed char *stickY) {
     unsigned short buttons = 0;
     int x, y;
+    int a, b, start, ltrig, rtrig, bx, by, up, down, left, right, joyx, joyy;
 
     *button = 0;
     *stickX = 0;
     *stickY = 0;
 
-    cont = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-    if (cont == NULL) {
-        return; // no pad plugged in — report neutral
+#if DKR_ENJ_INPUT
+    {
+        const enj_ctrlr_state_t *st;
+
+        if (port < 0 || port >= (int) enj_ctrl_states_length() || !sEnjInputReady) {
+            return 0;
+        }
+        st = enj_ctrl_get_states()[port];
+        if (st == NULL) {
+            return 0; // no pad plugged in - report neutral
+        }
+        a = HELD(st, A);
+        b = HELD(st, B);
+        start = HELD(st, START);
+        bx = HELD(st, X);
+        by = HELD(st, Y);
+        up = HELD(st, UP);
+        down = HELD(st, DOWN);
+        left = HELD(st, LEFT);
+        right = HELD(st, RIGHT);
+        ltrig = st->ltrigger;
+        rtrig = st->rtrigger;
+        joyx = st->joyx;
+        joyy = st->joyy;
     }
-    st = (cont_state_t *) maple_dev_status(cont);
-    if (st == NULL) {
-        return;
+#else
+    {
+        maple_device_t *cont;
+        cont_state_t *st;
+
+        cont = maple_enum_type(port, MAPLE_FUNC_CONTROLLER);
+        if (cont == NULL) {
+            return 0; // no pad plugged in - report neutral
+        }
+        st = (cont_state_t *) maple_dev_status(cont);
+        if (st == NULL) {
+            return 0;
+        }
+        a = (st->buttons & CONT_A) != 0;
+        b = (st->buttons & CONT_B) != 0;
+        start = (st->buttons & CONT_START) != 0;
+        bx = (st->buttons & CONT_X) != 0;
+        by = (st->buttons & CONT_Y) != 0;
+        up = (st->buttons & CONT_DPAD_UP) != 0;
+        down = (st->buttons & CONT_DPAD_DOWN) != 0;
+        left = (st->buttons & CONT_DPAD_LEFT) != 0;
+        right = (st->buttons & CONT_DPAD_RIGHT) != 0;
+        ltrig = st->ltrig;
+        rtrig = st->rtrig;
+        joyx = st->joyx;
+        joyy = st->joyy;
     }
+#endif
 
     // Face buttons and start.
-    if (st->buttons & CONT_A) buttons |= BTN_A;         // accelerate
-    if (st->buttons & CONT_B) buttons |= BTN_B;         // brake / reverse
-    if (st->buttons & CONT_START) buttons |= BTN_START;
+    if (a) buttons |= BTN_A;         // accelerate
+    if (b) buttons |= BTN_B;         // brake / reverse
+    if (start) buttons |= BTN_START;
 
     // Triggers: N64 Z (fire) on the left, N64 R (hop / powerslide) on the right.
-    if (st->ltrig > TRIG_THRESHOLD) buttons |= BTN_Z;
-    if (st->rtrig > TRIG_THRESHOLD) buttons |= BTN_R;
+    if (ltrig > TRIG_THRESHOLD) buttons |= BTN_Z;
+    if (rtrig > TRIG_THRESHOLD) buttons |= BTN_R;
 
     // The DC pad has no C-cluster; put camera on the X/Y face buttons, and let
     // X double as the N64 L (only used in a couple of debug spots).
-    if (st->buttons & CONT_Y) buttons |= BTN_CUP;
-    if (st->buttons & CONT_X) buttons |= BTN_CDOWN | BTN_L;
+    if (by) buttons |= BTN_CUP;
+    if (bx) buttons |= BTN_CDOWN | BTN_L;
 
     // D-pad drives the N64 D-pad (menu navigation).
-    if (st->buttons & CONT_DPAD_UP) buttons |= BTN_UP;
-    if (st->buttons & CONT_DPAD_DOWN) buttons |= BTN_DOWN;
-    if (st->buttons & CONT_DPAD_LEFT) buttons |= BTN_LEFT;
-    if (st->buttons & CONT_DPAD_RIGHT) buttons |= BTN_RIGHT;
+    if (up) buttons |= BTN_UP;
+    if (down) buttons |= BTN_DOWN;
+    if (left) buttons |= BTN_LEFT;
+    if (right) buttons |= BTN_RIGHT;
 
     // Analog stick: DC joyx/joyy are -128..127. Scale to the N64's -80..80, and
     // flip Y — the DC reports up as negative, the N64 as positive.
-    x = (st->joyx * STICK_MAX) / 128;
-    y = (-st->joyy * STICK_MAX) / 128;
+    x = (joyx * STICK_MAX) / 128;
+    y = (-joyy * STICK_MAX) / 128;
 
     if (x < -STICK_MAX) x = -STICK_MAX;
     if (x > STICK_MAX) x = STICK_MAX;
@@ -80,15 +154,16 @@ void input_host_read(unsigned short *button, signed char *stickX, signed char *s
     // The game only reads the stick for steering/pitch, so the D-pad also
     // synthesizes full stick deflection on any axis the stick leaves idle.
     if (x > -STICK_IDLE && x < STICK_IDLE) {
-        if (st->buttons & CONT_DPAD_LEFT) x = -STICK_MAX;
-        if (st->buttons & CONT_DPAD_RIGHT) x = STICK_MAX;
+        if (left) x = -STICK_MAX;
+        if (right) x = STICK_MAX;
     }
     if (y > -STICK_IDLE && y < STICK_IDLE) {
-        if (st->buttons & CONT_DPAD_UP) y = STICK_MAX;
-        if (st->buttons & CONT_DPAD_DOWN) y = -STICK_MAX;
+        if (up) y = STICK_MAX;
+        if (down) y = -STICK_MAX;
     }
 
     *button = buttons;
     *stickX = (signed char) x;
     *stickY = (signed char) y;
+    return 1;
 }

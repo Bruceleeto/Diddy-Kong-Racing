@@ -1,4 +1,6 @@
+#include "dkr_asset_mount.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <ultra64.h>
 #include <structs.h>
 #include <f3ddkr.h>
@@ -6,9 +8,24 @@
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
+#include <enDjinn/enj_texture.h>
 
 
 extern u64 pc_uptime_ns(void);
+#include "prof.h"
+#include "scene_gate.h"
+#include "scrawl.h"
+#include "swirl.h"
+#include "cover.h"
+
+#define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
+#ifndef DKR_TEX_TRACE
+#define DKR_TEX_TRACE 0 // log why textures are decoded instead of prebuilt
+#endif
+static u32 sTexDecodes, sTexPrebuiltHits; // what texture lookups did, for the profile
+static u32 sTexLoadsInFrame;  // prebuilt textures read since the last frame
+static u32 sModelLoadsInFrame; // object models read from disc since the last frame
+static u64 sTexLoadNsInFrame;
 
 // The game's main-thread entry (src/thread3_main.c): init_game() + the
 // main_game_loop() forever-loop. Called directly on the host thread.
@@ -18,9 +35,599 @@ extern OSThread *__osRunningThread;
 static OSThread sHostThread;
 
 #define PC_RETRACE_NSEC (1000000000ll / 60)
+#ifndef PC_LOGIC_UPDATE_RATE
 #define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
+#endif
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
 
+// ---------------------------------------------------------------------------
+// Frame profile (GFX_PROFILE=1): where a frame's time goes and how much
+// geometry it submits. GFX_PROFILE_SKIP=1 transforms and culls but sends no
+// vertices; =2 only resolves each batch's state; =3 skips batches that take the
+// emulated path. These draw incomplete frames and exist to split the
+// display-list time by subtraction.
+// ---------------------------------------------------------------------------
+#ifndef DKR_GFX_PROFILE
+#define DKR_GFX_PROFILE 0
+#endif
+#ifndef DKR_GFX_PROFILE_SKIP
+#define DKR_GFX_PROFILE_SKIP 0
+#endif
+#ifndef DKR_AUTO_EXIT_SECONDS
+#define DKR_AUTO_EXIT_SECONDS 0
+#endif
+#if DKR_GFX_PROFILE
+// The profile's lines wait in RAM and go out while a scene loads (or at exit).
+// A printf over dcload is a round trip to the host: printed mid-scene, the
+// lines about a long frame made the next frames long too.
+#include <stdarg.h>
+static char sProfLog[64 * 1024];
+static u32 sProfLogLength, sProfLogDropped;
+
+void pc_prof_vlog(const char *format, va_list args) {
+    u32 room = sizeof(sProfLog) - sProfLogLength;
+    int n = vsnprintf(sProfLog + sProfLogLength, room, format, args);
+
+    if (n < 0 || (u32) n >= room) {
+        sProfLog[sProfLogLength] = '\0';
+        sProfLogDropped++;
+        return;
+    }
+    sProfLogLength += (u32) n;
+}
+
+void pc_prof_log(const char *format, ...) __attribute__((format(printf, 1, 2)));
+void pc_prof_log(const char *format, ...) {
+    va_list args;
+
+    va_start(args, format);
+    pc_prof_vlog(format, args);
+    va_end(args);
+}
+
+/** Prints what the profile logged; between scenes, where it costs no frame. */
+void pc_prof_log_flush(void) {
+    if (sProfLogLength > 0) {
+        fwrite(sProfLog, 1, sProfLogLength, stdout);
+        fflush(stdout);
+    }
+    if (sProfLogDropped > 0) {
+        printf("PROF LOG full: %lu lines dropped\n", (unsigned long) sProfLogDropped);
+    }
+    sProfLogLength = sProfLogDropped = 0;
+}
+
+enum { PROF_FRAMES = 60 };
+static struct {
+    u64 last, wait, waitFrame, begin, dl, end;
+    u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
+    u32 slowBatches;
+    u32 trStats[10]; // see gfx_tr_stats
+    u32 noDepth[4];  // see gfx_nodepth_stats
+    u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
+    u32 workMax; // the longest frame, start to start, less the pacer's sleep
+    u32 missed;  // frames that took more video fields than the target
+    // Why a batch missed the fast path, in triangles.
+    u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
+    u32 whyStateKind[6]; // no scene, texenv blend, alpha test, no depth test, depth offset, scissor
+    u64 pvrRender, pvrRegister;
+    u32 pvrBytes, ptWords, trWords;
+    u64 tBlast, tFallback, tVtx, tPoly, tRect, tMtx;
+    u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
+} sProf DKR_HOT; // touched by every batch in a profile build, so with the hot state
+#define PROF_ADD(field, n) (sProf.field += (n))
+
+// ---------------------------------------------------------------------------
+// Per-scene profile (SCENE PROF), printed as the next scene starts loading:
+// - late frames counted on the PVR's vblank counter, not the frame's own time;
+// - how long the pacer overslept its target;
+// - display-list time and triangles by category, as the game marks them
+//   (PC_PROF_CATEGORY in prof.h);
+// - how much level geometry a per-batch frustum test would drop (src/tracks.c).
+// ---------------------------------------------------------------------------
+static const char *const sCatNames[PC_PROF_CAT_COUNT] = {
+    "other", "level", "objects", "level-tr", "water", "particles", "hud", "racers", "shadows",
+};
+static struct {
+    u32 frames, lateFrames, lateFields, maxFields;
+    u64 overNs, maxOverNs;
+    u64 catNs[PC_PROF_CAT_COUNT];
+    u32 catTris[PC_PROF_CAT_COUNT];
+    u32 levelBatches, levelTris, cullBatches, cullTris;
+    u32 cullMatrixChanged; // frames where objects changed gViewProjMatrixF before the translucent level
+    u32 falseCulls;        // culled batches with a vertex in view
+    u32 levelVtx, levelVtxOtherMatrix; // level G_VTX loads, and those not drawn with the cull matrix
+    // CPU cycles the display-list walk stood still on operand-cache and on
+    // instruction-cache misses, each counted on every other frame.
+    u64 walkStall[2];
+    u32 texLookups, texScans; // texture_lookup calls, and those that fell through to the linear scan
+    // PVR render time of each frame shown: sum, longest, and how many took
+    // longer than one field (a frame the PVR alone makes late at 60 fps).
+    u64 pvrNs, pvrMaxNs;
+    u32 pvrFrames, pvrOver;
+    s32 map; // gMapId while the scene ran
+    u32 fadeFrames; // frames drawn darkened for a fade (dreamcast/cover.h)
+#if DKR_PROF_SKIP == 999
+    // PVR render time by what was left out (see sSkipCodes).
+    u64 skipNs[32];
+    u32 skipFrames[32], skipOver[32];
+#endif
+} sScene DKR_HOT;
+static u32 sProfWalkSp; // where the walk's stack is, for the cache layout
+// The frame just finished, for a LATE line about it: its work and display-list
+// time, and the PVR's last three render times (the one read at a frame's end is
+// that of a frame or two before).
+static u32 sLastWorkUs, sLastDlUs, sLastPvrUs[3];
+
+
+#if DKR_PROF_SKIP == 999
+// PROF_SKIP=999: every other block of frames leaves one part of the frame out
+// (the PROF_SKIP codes in dreamcast/gfx.c), the blocks between leave nothing
+// out, so one run measures what each part costs the PVR on the same content.
+// The first frames of a block are not counted: the render time read at a
+// frame's end is that of a frame or two before.
+#define SKIP_BLOCK 10
+#define SKIP_SETTLE 3
+static const s16 sSkipCodes[] = { 0,   1,   2,   100, 101, 102, 103, 104, 105, 107, 108,
+                                  200, 201, 202, 203, 205, 207, 208, 300, 301, 302, 303, 304, 305,
+                                  400, 401, 402, 407 };
+#define SKIP_CODES ((s32) (sizeof(sSkipCodes) / sizeof(sSkipCodes[0])))
+static u32 sSkipFrame;
+static s32 sSkipIdx, sSkipPhase;
+
+static void prof_skip_next_frame(void) {
+    u32 block = sSkipFrame / SKIP_BLOCK;
+
+    sSkipPhase = (s32) (sSkipFrame % SKIP_BLOCK);
+    sSkipIdx = (block & 1) ? 1 + (s32) ((block >> 1) % (u32) (SKIP_CODES - 1)) : 0;
+    sSkipFrame++;
+    gfx_prof_set_skip(sSkipCodes[sSkipIdx]);
+}
+#endif
+static const float (*sLevelCullMatrix)[4];
+
+// Vertices that ran the combiner per vertex (not passthrough or constant), by
+// combiner, for the scene's report.
+#define PROF_SLOW_CC 16
+static struct {
+    u32 w0, w1, cyc, prim, env, verts;
+} sSlowCc[PROF_SLOW_CC];
+
+static __attribute__((noinline)) void prof_slow_cc(u32 verts);
+static DKR_HOT u32 sCcClassified, sCcProbed; // combiner_classify calls, and those that ran the probes
+
+// What the display-list walk spends on racers (PC_PROF_CAT_RACERS), by
+// handler: the timers need GFX_PROFILE=2, the counts work at 1 too.
+#define RACER_PROF_FIELDS(X)                                                                                         \
+    X(blast) X(fallback) X(verts) X(tris) X(culled) X(clipped) X(sent) X(slowTris) X(rects) X(slowBatches)           \
+    X(whyCombiner) X(whyBillboard) X(whyState) X(whyFull) X(whyAppend) X(whyShared) X(whyLoose) X(tBlast)           \
+    X(tFallback) X(tVtx) X(tPoly) X(tRect) X(tMtx) X(tState) X(tXform) X(tEmit) X(tPolyState) X(tPolyEmit)          \
+    X(tPolyDraw)
+#define RACER_PROF_DECLARE(f) u64 f;
+static struct { RACER_PROF_FIELDS(RACER_PROF_DECLARE) } sRacerProf, sRacerStart;
+#define RACER_PROF_SNAP(f) sRacerStart.f = sProf.f;
+#define RACER_PROF_ADD(f) sRacerProf.f += sProf.f - sRacerStart.f;
+#define RACER_PROF_PRINT(f) printf(" %s=%llu", #f, (unsigned long long) (sRacerProf.f / n));
+static DKR_HOT s32 sCatCur;
+static u64 sCatStart;
+static u32 sCatTrisStart;
+static u32 sSceneVbl; // vblank count at the previous frame's start; 0 after a load
+
+/** Closes the current display-list stretch and starts one of `cat`. */
+static void scene_category(s32 cat) {
+    u64 now = pc_uptime_ns();
+
+    if (sCatCur == PC_PROF_CAT_RACERS) {
+        RACER_PROF_FIELDS(RACER_PROF_ADD)
+    }
+    if (cat == PC_PROF_CAT_RACERS) {
+        RACER_PROF_FIELDS(RACER_PROF_SNAP)
+    }
+
+    sScene.catNs[sCatCur] += now - sCatStart;
+    sScene.catTris[sCatCur] += sProf.tris - sCatTrisStart;
+    sCatCur = (cat >= 0 && cat < PC_PROF_CAT_COUNT) ? cat : PC_PROF_CAT_OTHER;
+    gfx_prof_set_category(sCatCur);
+    sCatStart = now;
+    sCatTrisStart = sProf.tris;
+}
+
+void pc_prof_cull_matrix_changed(void) {
+    sScene.cullMatrixChanged++;
+}
+
+void pc_prof_cull_matrix(const float m[4][4]) {
+    sLevelCullMatrix = m;
+}
+
+void pc_prof_false_cull(void) {
+    sScene.falseCulls++;
+}
+
+/** src/tracks.c: one level batch drawn, and whether a frustum test would drop it. */
+void pc_prof_level_batch(s32 tris, s32 culled) {
+    sScene.levelBatches++;
+    sScene.levelTris += tris;
+    if (culled) {
+        sScene.cullBatches++;
+        sScene.cullTris += tris;
+    }
+}
+
+/** Prints the scene that just ended and starts counting the next one. */
+void pc_scene_prof_report(void) {
+    u32 n = sScene.frames ? sScene.frames : 1;
+    s32 c;
+
+    pc_prof_log_flush();
+
+    if (sScene.frames > 0) {
+        printf("SCENE PROF %lu frames: late %lu (%lu fields, max %lu), pacer oversleep %lu us max %lu us | "
+               "level %lu batches %lu tris/frame, frustum would drop %lu batches %lu tris (%lu%%) |",
+               (unsigned long) sScene.frames, (unsigned long) sScene.lateFrames, (unsigned long) sScene.lateFields,
+               (unsigned long) sScene.maxFields, (unsigned long) (sScene.overNs / n / 1000u),
+               (unsigned long) (sScene.maxOverNs / 1000u), (unsigned long) (sScene.levelBatches / n),
+               (unsigned long) (sScene.levelTris / n), (unsigned long) (sScene.cullBatches / n),
+               (unsigned long) (sScene.cullTris / n),
+               (unsigned long) (sScene.levelTris ? sScene.cullTris * 100u / sScene.levelTris : 0));
+        for (c = 0; c < PC_PROF_CAT_COUNT; c++) {
+            printf(" %s %lu us %lu tris", sCatNames[c], (unsigned long) (sScene.catNs[c] / n / 1000u),
+                   (unsigned long) (sScene.catTris[c] / n));
+        }
+        printf(" | walk stall data %lu us code %lu us | tex lookups %lu scans %lu",
+               (unsigned long) (sScene.walkStall[0] * 2u / n / 200u), (unsigned long) (sScene.walkStall[1] * 2u / n / 200u),
+               (unsigned long) (sScene.texLookups / n), (unsigned long) (sScene.texScans / n));
+        printf(" | walk stack %08lx", (unsigned long) sProfWalkSp);
+        printf("\nSCENE CC classify %lu/frame, probed %lu/frame", (unsigned long) (sCcClassified / n),
+               (unsigned long) (sCcProbed / n));
+        sCcClassified = sCcProbed = 0;
+        for (c = 0; c < PROF_SLOW_CC; c++) {
+            if (sSlowCc[c].verts != 0) {
+                printf("\nSCENE SLOWCC %lu verts/frame cc=%08lx/%08lx cyc=%lu prim=%08lx env=%08lx",
+                       (unsigned long) (sSlowCc[c].verts / n), (unsigned long) sSlowCc[c].w0,
+                       (unsigned long) sSlowCc[c].w1, (unsigned long) (sSlowCc[c].cyc >> G_MDSFT_CYCLETYPE),
+                       (unsigned long) sSlowCc[c].prim, (unsigned long) sSlowCc[c].env);
+            }
+            sSlowCc[c].verts = 0;
+        }
+        printf(" | view matrix changed under the level in %lu frames, %lu false culls, %lu of %lu level vertex loads "
+               "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
+               (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
+               (unsigned long) sScene.levelVtx);
+        if (sScene.pvrFrames > 0) {
+            printf("SCENE PVR map %ld render avg %lu us max %lu us, %lu of %lu frames over 16.7 ms, %lu faded\n",
+                   (long) sScene.map, (unsigned long) (sScene.pvrNs / sScene.pvrFrames / 1000u),
+                   (unsigned long) (sScene.pvrMaxNs / 1000u), (unsigned long) sScene.pvrOver,
+                   (unsigned long) sScene.pvrFrames, (unsigned long) sScene.fadeFrames);
+        }
+        gfx_fill_report();
+#if DKR_PROF_SKIP == 999
+        for (c = 0; c < SKIP_CODES; c++) {
+            if (sScene.skipFrames[c] > 0) {
+                printf("SCENE SKIP %d: %lu frames, render avg %lu us, %lu over 16.7 ms\n", (int) sSkipCodes[c],
+                       (unsigned long) sScene.skipFrames[c],
+                       (unsigned long) (sScene.skipNs[c] / sScene.skipFrames[c] / 1000u),
+                       (unsigned long) sScene.skipOver[c]);
+            }
+        }
+#endif
+        {
+            extern void pc_asset_play_report(void);
+            pc_asset_play_report();
+        }
+        if (sRacerProf.tris > 0) {
+            printf("RACER PROF per frame (ns for t*):");
+            RACER_PROF_FIELDS(RACER_PROF_PRINT)
+            printf("\n");
+        }
+    }
+    memset(&sScene, 0, sizeof(sScene));
+    memset(&sRacerProf, 0, sizeof(sRacerProf));
+    sSceneVbl = 0;
+}
+void pc_prof_add(int part, unsigned long long ns) {
+    sProf.part[part] += ns;
+}
+static DKR_HOT s32 sProfVtxWhy; // how the vertices an unfused G_TRIN draws were loaded
+// Time of one handler call. A fallback is inside tBlast as well. These read
+// the clock a few hundred times a frame, which costs a millisecond or two, so
+// they need GFX_PROFILE=2; the frame totals stay honest at 1 and 3.
+#if DKR_GFX_PROFILE == 2
+#define PROF_TIME(field, call) \
+    do { \
+        u64 profStart = pc_uptime_ns(); \
+        call; \
+        sProf.field += pc_uptime_ns() - profStart; \
+    } while (0)
+// Splits one function into consecutive parts.
+#define PROF_LAP_START() u64 profLap = pc_uptime_ns()
+#define PROF_LAP(field) \
+    do { \
+        u64 profNow = pc_uptime_ns(); \
+        sProf.field += profNow - profLap; \
+        profLap = profNow; \
+    } while (0)
+#else
+#define PROF_TIME(field, call) call
+#define PROF_LAP_START() ((void) 0)
+#define PROF_LAP(field) ((void) 0)
+#endif
+
+// What the blended batches are: triangles by render mode, combiner, texture
+// kind and where their alpha comes from. Printed with the frame profile.
+#define PROF_BLEND_KINDS 48
+static struct {
+    u32 modeL, cc0, cc1;
+    u8 texKind, vtxAlphaFull, outAlphaFull, fog, primA, envA, used;
+    u32 tris;
+} sProfBlend[PROF_BLEND_KINDS];
+
+static __attribute__((noinline)) void prof_blend(u32 modeL, u32 cc0, u32 cc1, s32 texKind, s32 vtxAlphaFull,
+                                                 s32 outAlphaFull, s32 fog, s32 primA, s32 envA, s32 tris) {
+    s32 i;
+
+    for (i = 0; i < PROF_BLEND_KINDS; i++) {
+        if (!sProfBlend[i].used) {
+            sProfBlend[i].modeL = modeL;
+            sProfBlend[i].cc0 = cc0;
+            sProfBlend[i].cc1 = cc1;
+            sProfBlend[i].texKind = (u8) texKind;
+            sProfBlend[i].vtxAlphaFull = (u8) vtxAlphaFull;
+            sProfBlend[i].outAlphaFull = (u8) outAlphaFull;
+            sProfBlend[i].fog = (u8) fog;
+            sProfBlend[i].primA = (u8) primA;
+            sProfBlend[i].envA = (u8) envA;
+            sProfBlend[i].used = 1;
+        }
+        if (sProfBlend[i].modeL == modeL && sProfBlend[i].cc0 == cc0 && sProfBlend[i].cc1 == cc1 &&
+            sProfBlend[i].texKind == texKind && sProfBlend[i].vtxAlphaFull == vtxAlphaFull &&
+            sProfBlend[i].outAlphaFull == outAlphaFull && sProfBlend[i].fog == fog && sProfBlend[i].primA == primA &&
+            sProfBlend[i].envA == envA) {
+            sProfBlend[i].tris += (u32) tris;
+            return;
+        }
+    }
+}
+
+static void prof_blend_print(u32 frames) {
+    s32 n, i;
+
+    for (n = 0; n < 8; n++) {
+        s32 best = -1;
+
+        for (i = 0; i < PROF_BLEND_KINDS; i++) {
+            if (sProfBlend[i].used && sProfBlend[i].tris && (best < 0 || sProfBlend[i].tris > sProfBlend[best].tris)) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        pc_prof_log("GFX BLEND: tris=%lu modeL=%08lx cc=%08lx/%08lx tex=%d vtxA255=%d outA255=%d fog=%d primA=%d envA=%d\n",
+               (unsigned long) (sProfBlend[best].tris / frames), (unsigned long) sProfBlend[best].modeL,
+               (unsigned long) sProfBlend[best].cc0, (unsigned long) sProfBlend[best].cc1, sProfBlend[best].texKind,
+               sProfBlend[best].vtxAlphaFull, sProfBlend[best].outAlphaFull, sProfBlend[best].fog,
+               sProfBlend[best].primA, sProfBlend[best].envA);
+        sProfBlend[best].tris = 0;
+    }
+    memset(sProfBlend, 0, sizeof(sProfBlend));
+}
+
+#define PROF_SINCE(now, last) ((now) >= (last) ? (now) - (last) : (now))
+static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
+    sProf.begin += t1 - t0;
+    sProf.dl += t2 - t1;
+    sProf.end += t3 - t2;
+    {
+        static u64 sFrameStart;
+        u32 work = sFrameStart ? (u32) ((t3 - sFrameStart - sProf.waitFrame) / 1000u) : 0;
+
+        if (work > sProf.workMax) sProf.workMax = work;
+        sLastWorkUs = work;
+        sLastDlUs = (u32) ((t2 - t1) / 1000u);
+        // What each frame was made of, so a long one can say why.
+        static u64 sLastPart[PC_PROF_COUNT], sLastAfxLoad;
+        static u32 sLastTris;
+        extern volatile u64 dkr_afx_load_ns;
+        extern s32 sTransitionStatus;
+        u64 afxLoad = dkr_afx_load_ns;
+        // The frame that opened the scene gate carries the scene's first logic
+        // step, which is part of the load (see scene_gate.c).
+        int opening = pc_scene_take_opening_frame();
+
+        if (work > 20000 && pc_scene_is_ready() && !opening) {
+            pc_prof_log("GFX LONG FRAME %lu us: dl %lu us, %lu texture loads in %lu us, %lu model loads | logic %lu "
+                   "scene %lu us, %lu tris, transition %ld, audio loads %lu us\n",
+                   (unsigned long) work, (unsigned long) ((t2 - t1) / 1000u), (unsigned long) sTexLoadsInFrame,
+                   (unsigned long) (sTexLoadNsInFrame / 1000u), (unsigned long) sModelLoadsInFrame,
+                   // The profile restarts its sums every PROF_FRAMES frames.
+                   (unsigned long) (PROF_SINCE(sProf.part[PC_PROF_LOGIC], sLastPart[PC_PROF_LOGIC]) / 1000u),
+                   (unsigned long) (PROF_SINCE(sProf.part[PC_PROF_SCENE], sLastPart[PC_PROF_SCENE]) / 1000u),
+                   (unsigned long) PROF_SINCE(sProf.tris, sLastTris), (long) sTransitionStatus,
+                   (unsigned long) ((afxLoad - sLastAfxLoad) / 1000u));
+        }
+        memcpy(sLastPart, sProf.part, sizeof(sLastPart));
+        sLastTris = sProf.tris;
+        sLastAfxLoad = afxLoad;
+        sTexLoadsInFrame = 0;
+        sTexLoadNsInFrame = 0;
+        sModelLoadsInFrame = 0;
+        sFrameStart = t3;
+        sProf.waitFrame = 0;
+    }
+    if (sProf.sentFrame > sProf.maxSent) sProf.maxSent = sProf.sentFrame;
+    sProf.sentFrame = 0;
+    {
+        pvr_stats_t stats;
+        if (!pvr_get_stats(&stats)) {
+            sProf.pvrRender += stats.rnd_last_time;
+            sLastPvrUs[2] = sLastPvrUs[1];
+            sLastPvrUs[1] = sLastPvrUs[0];
+            sLastPvrUs[0] = (u32) (stats.rnd_last_time / 1000u);
+            gfx_fill_frame_done((unsigned int) (stats.rnd_last_time / 1000u));
+            if (pc_scene_is_ready() && sSceneVbl != 0) {
+                sScene.pvrNs += stats.rnd_last_time;
+                sScene.pvrFrames++;
+                if (stats.rnd_last_time > sScene.pvrMaxNs) sScene.pvrMaxNs = stats.rnd_last_time;
+                if (stats.rnd_last_time > 16683000u) sScene.pvrOver++;
+#if DKR_PROF_SKIP == 999
+                if (sSkipPhase >= SKIP_SETTLE) {
+                    sScene.skipNs[sSkipIdx] += stats.rnd_last_time;
+                    sScene.skipFrames[sSkipIdx]++;
+                    sScene.skipOver[sSkipIdx] += stats.rnd_last_time > 16683000u;
+                }
+#endif
+            }
+            sProf.pvrRegister += stats.reg_last_time;
+            if (stats.vtx_buffer_used > sProf.pvrBytes) sProf.pvrBytes = (u32) stats.vtx_buffer_used;
+        }
+    }
+    if (++sProf.frames < PROF_FRAMES) return;
+    if (sProf.last) {
+        u32 n = sProf.frames;
+        u32 period = (u32) ((t3 - sProf.last) / 1000u / n), wait = (u32) (sProf.wait / 1000u / n);
+        u32 begin = (u32) (sProf.begin / 1000u / n), dl = (u32) (sProf.dl / 1000u / n);
+        u32 end = (u32) (sProf.end / 1000u / n);
+        pc_prof_log("GFX PROF: frame=%lu us wait=%lu game=%lu dl=%lu begin=%lu end=%lu | batches=%lu+%lu verts=%lu "
+               "tris=%lu culled=%lu clipped=%lu sent=%lu max=%lu slow=%lu rects=%lu | "
+               "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu | "
+               "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
+               "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
+               "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
+               "workmax=%lu missed=%lu vramfree=%lu texdecodes=%lu texprebuilt=%lu | "
+               "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
+               "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
+               "nodepth toop=%lu afterdepth=%lu afterrecorded=%lu notopaque=%lu | "
+               "trbatches 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu "
+               "trroom 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu\n",
+               (unsigned long) period, (unsigned long) wait,
+               (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
+               (unsigned long) begin, (unsigned long) end,
+               (unsigned long) (sProf.blast / n), (unsigned long) (sProf.fallback / n),
+               (unsigned long) (sProf.verts / n), (unsigned long) (sProf.tris / n),
+               (unsigned long) (sProf.culled / n), (unsigned long) (sProf.clipped / n),
+               (unsigned long) (sProf.sent / n), (unsigned long) sProf.maxSent,
+               (unsigned long) (sProf.slowTris / n), (unsigned long) (sProf.rects / n),
+               (unsigned long) (sProf.pvrRender / 1000u / n), (unsigned long) (sProf.pvrRegister / 1000u / n),
+               (unsigned long) sProf.pvrBytes, (unsigned long) sProf.ptWords,
+               (unsigned long) sProf.trWords,
+               (unsigned long) (sProf.tBlast / 1000u / n), (unsigned long) (sProf.tFallback / 1000u / n),
+               (unsigned long) (sProf.tVtx / 1000u / n), (unsigned long) (sProf.tPoly / 1000u / n),
+               (unsigned long) (sProf.tRect / 1000u / n), (unsigned long) (sProf.tMtx / 1000u / n),
+               (unsigned long) (sProf.tState / 1000u / n), (unsigned long) (sProf.tXform / 1000u / n),
+               (unsigned long) (sProf.tEmit / 1000u / n), (unsigned long) (sProf.tPolyState / 1000u / n),
+               (unsigned long) (sProf.tPolyEmit / 1000u / n), (unsigned long) (sProf.tPolyDraw / 1000u / n),
+               (unsigned long) (sProf.slowBatches / n),
+               (unsigned long) (sProf.whyCombiner / n), (unsigned long) (sProf.whyBillboard / n),
+               (unsigned long) (sProf.whyState / n), (unsigned long) (sProf.whyFull / n),
+               (unsigned long) (sProf.whyAppend / n), (unsigned long) (sProf.whyShared / n),
+               (unsigned long) (sProf.whyLoose / n),
+               (unsigned long) sProf.workMax, (unsigned long) sProf.missed,
+               (unsigned long) pvr_mem_available(),
+               (unsigned long) sTexDecodes, (unsigned long) sTexPrebuiltHits,
+               (unsigned long) (sProf.part[PC_PROF_LOGIC] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_SCENE] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_WAVES] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_SHADOWS] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_VIEWPORT] / 1000u / n),
+               (unsigned long) (sProf.part[PC_PROF_HUD] / 1000u / n),
+               (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
+               (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
+               (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n),
+               (unsigned long) (sProf.noDepth[0] / n), (unsigned long) (sProf.noDepth[1] / n),
+               (unsigned long) (sProf.noDepth[2] / n), (unsigned long) (sProf.noDepth[3] / n),
+               (unsigned long) (sProf.trStats[0] / n), (unsigned long) (sProf.trStats[1] / n),
+               (unsigned long) (sProf.trStats[2] / n), (unsigned long) (sProf.trStats[3] / n),
+               (unsigned long) (sProf.trStats[4] / n), (unsigned long) (sProf.trStats[5] / n),
+               (unsigned long) (sProf.trStats[6] / n), (unsigned long) (sProf.trStats[7] / n),
+               (unsigned long) (sProf.trStats[8] / n), (unsigned long) (sProf.trStats[9] / n));
+    }
+    prof_blend_print(sProf.frames);
+    sTexDecodes = sTexPrebuiltHits = 0;
+    memset(&sProf, 0, sizeof(sProf));
+    sProf.last = pc_uptime_ns(); // after the print, so console time is in no bucket
+}
+#else
+#define PROF_ADD(field, n) ((void) 0)
+#define PROF_TIME(field, call) call
+#define PROF_LAP_START() ((void) 0)
+#define PROF_LAP(field) ((void) 0)
+#endif
+
+static s32 sRetraceReset;
+
+/**
+ * Makes the next frame start the pacer's clock afresh. The scene gate calls this
+ * when a scene has loaded (dreamcast/scene_gate.c): the time a load took is not
+ * game time, and counting it would have the game pay it back by running the
+ * first frames of the new scene too fast.
+ */
+void pc_retrace_reset(void) {
+    sRetraceReset = TRUE;
+}
+
+#if DKR_VBL_PACER
+// The vblank pacer (VBL_PACER=1): waits for the video interrupt itself instead
+// of sleeping until a clock time. nanosleep overshot its target by up to 5 ms,
+// which pushed frames that were close to the limit a whole field late. Game
+// speed then follows the real refresh rate (59.94 Hz on NTSC, as on the N64).
+static volatile u32 sPacerVbl;
+static semaphore_t sPacerSem = SEM_INITIALIZER(0);
+
+static void pacer_vblank(u32 code, void *data) {
+    (void) code;
+    (void) data;
+    sPacerVbl++;
+    sem_signal(&sPacerSem);
+}
+
+s32 pc_retrace_wait(void) {
+    static s32 sStarted;
+    static u32 sLastVbl;
+    s32 periods;
+
+    if (!sStarted) {
+        sStarted = TRUE;
+        vblank_handler_add(&pacer_vblank, NULL);
+        sLastVbl = sPacerVbl;
+        sRetraceReset = FALSE;
+        return PC_LOGIC_UPDATE_RATE;
+    }
+    if (sRetraceReset) {
+        sRetraceReset = FALSE;
+        sLastVbl = sPacerVbl;
+        return PC_LOGIC_UPDATE_RATE;
+    }
+#if DKR_GFX_PROFILE
+    {
+        u64 slept = pc_uptime_ns();
+#endif
+        // Every vblank signals the semaphore, so none is lost between the test
+        // and the wait; signals left over from busy frames just drain here.
+        while ((u32) (sPacerVbl - sLastVbl) < (u32) PC_LOGIC_UPDATE_RATE) {
+            sem_wait(&sPacerSem);
+        }
+#if DKR_GFX_PROFILE
+        slept = pc_uptime_ns() - slept;
+        sProf.wait += slept;
+        sProf.waitFrame += slept;
+    }
+#endif
+    periods = (s32) (sPacerVbl - sLastVbl);
+    if (periods > PC_MAX_UPDATE_RATE) {
+        // A disc read in a menu or a paused debugger: not the game's time.
+        sLastVbl = sPacerVbl;
+        return PC_LOGIC_UPDATE_RATE;
+    }
+#if DKR_GFX_PROFILE
+    if (periods > PC_LOGIC_UPDATE_RATE) {
+        sProf.missed++;
+    }
+#endif
+    sLastVbl += (u32) periods;
+    return periods;
+}
+#else
 s32 pc_retrace_wait(void) {
     static u64 sLastNs = 0;
     u64 targetNs;
@@ -29,7 +636,8 @@ s32 pc_retrace_wait(void) {
 
     nowNs = pc_uptime_ns();
 
-    if (sLastNs == 0) {
+    if (sLastNs == 0 || sRetraceReset) {
+        sRetraceReset = FALSE;
         sLastNs = nowNs;
         return PC_LOGIC_UPDATE_RATE;
     }
@@ -42,6 +650,18 @@ s32 pc_retrace_wait(void) {
         req.tv_sec = (targetNs - nowNs) / 1000000000ll;
         req.tv_nsec = (targetNs - nowNs) % 1000000000ll;
         nanosleep(&req, NULL);
+#if DKR_GFX_PROFILE
+        {
+            u64 woke = pc_uptime_ns();
+            u64 slept = woke - nowNs;
+            sProf.wait += slept;
+            sProf.waitFrame += slept;
+            if (woke > targetNs) {
+                sScene.overNs += woke - targetNs;
+                if (woke - targetNs > sScene.maxOverNs) sScene.maxOverNs = woke - targetNs;
+            }
+        }
+#endif
         nowNs = targetNs;
     }
 
@@ -50,13 +670,27 @@ s32 pc_retrace_wait(void) {
         periods = PC_LOGIC_UPDATE_RATE;
     }
     if (periods > PC_MAX_UPDATE_RATE) {
-        periods = PC_MAX_UPDATE_RATE;
+        // Far more time went by than a frame can account for, outside a scene
+        // change: a disc read in a menu, or a paused debugger. That time is not
+        // the game's either. Start counting again from now; advancing by the cap
+        // alone would leave the rest owed, and every following frame would run
+        // at the cap until it was repaid.
+        sLastNs = nowNs;
+        return PC_LOGIC_UPDATE_RATE;
     }
 
+#if DKR_GFX_PROFILE
+    // Counted here because only the pacer knows: a frame's own time includes
+    // waiting for the PVR, so comparing it with 16.7 ms says nothing.
+    if (periods > PC_LOGIC_UPDATE_RATE) {
+        sProf.missed++;
+    }
+#endif
     // Advance by whole periods so rounding doesn't accumulate into drift.
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
     return periods;
 }
+#endif
 
 #define N64_SCREEN_W 320
 #define N64_SCREEN_H 240
@@ -64,7 +698,9 @@ s32 pc_retrace_wait(void) {
 
 #define GFX_MAX_VERTS 64    // the RSP's internal vertex array
 #define GFX_MAX_DEPTH 16    // display-list recursion guard
-#define GFX_MAX_TRI_VERTS 8192
+// One G_TRIN is at most 16 triangles, each at most two after the near clip, so
+// a batch never stages more than 96 corners; the memory matters more here.
+#define GFX_MAX_TRI_VERTS 1024
 
 // A vertex in clip space: post-matrix, pre-divide. Kept unprojected because
 // near-plane clipping interpolates here, before the divide by w (a vertex behind
@@ -101,22 +737,27 @@ typedef struct {
 // inside-out (outer surfaces gone, inner ones visible).
 #define GFX_FRONT_FACE_SIGN (-1.0f)
 
-static u32 sGfxFrameCount = 0;
+static DKR_HOT u32 sGfxFrameCount = 0;
 
-alignas(32) static f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
-static s32 sCurMatrix = 0;
-static s32 sBillboard = FALSE;
+// Aligns the hot data section (DKR_HOT) to the operand cache's size, so its
+// lines land on the same cache sets whatever else grows or shrinks, and an A/B
+// of an unrelated change does not move them onto something else.
+static DKR_HOT __attribute__((used, aligned(16384))) u32 sHotDataAnchor;
+
+alignas(32) static DKR_HOT f32 sMatrices[3][4][4]; // G_MTX_DKR_INDEX_0..2
+static DKR_HOT s32 sCurMatrix = 0;
+static DKR_HOT s32 sBillboard = FALSE;
 
 _Static_assert(sizeof(GfxTriVert) == 32, "GfxTriVert must be exactly one SH4 cache line");
 _Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields must fit one cache line");
 
 static GfxVertex sVerts[GFX_MAX_VERTS];
-static s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
+static DKR_HOT s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
 
-static f32 sVpScaleX = N64_SCREEN_W / 2.0f;
-static f32 sVpScaleY = N64_SCREEN_H / 2.0f;
-static f32 sVpTransX = N64_SCREEN_W / 2.0f;
-static f32 sVpTransY = N64_SCREEN_H / 2.0f;
+static DKR_HOT f32 sVpScaleX = N64_SCREEN_W / 2.0f;
+static DKR_HOT f32 sVpScaleY = N64_SCREEN_H / 2.0f;
+static DKR_HOT f32 sVpTransX = N64_SCREEN_W / 2.0f;
+static DKR_HOT f32 sVpTransY = N64_SCREEN_H / 2.0f;
 
 // ---------------------------------------------------------------------------
 // What gets clipped away, in screen pixels, x1/y1 exclusive.
@@ -147,41 +788,51 @@ static void apply_clip_rect(void) {
 }
 
 static GfxTriVert sTriVerts[GFX_MAX_TRI_VERTS];
-static s32 sTriVertCount = 0;
+static DKR_HOT s32 sTriVertCount = 0;
 
-static u32 sTimgAddr = 0;  // G_SETTIMG — wherever the DL last pointed
-static u32 sTexAddr = 0;   // the image a G_LOADBLOCK/G_LOADTILE actually loaded
-static s32 sTexSwapped = 0; // that load had dxt == 0 — see decode_texture()
-static u8 sTileFmt = 0;    // G_SETTILE — G_IM_FMT_*
-static u8 sTileSiz = 0;    //             G_IM_SIZ_*
-static u8 sTilePalette = 0;
-static u8 sTileCmS = 0; // the raw 2-bit clamp/mirror fields, not booleans
-static u8 sTileCmT = 0;
-static u16 sTileWidth = 0; // G_SETTILESIZE
-static u16 sTileHeight = 0;
-static u16 sTileUls = 0;   //               the tile's origin within the image
-static u16 sTileUlt = 0;
-static u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
+static DKR_HOT u32 sTimgAddr = 0;  // G_SETTIMG — wherever the DL last pointed
+static DKR_HOT u32 sTexAddr = 0;   // the image a G_LOADBLOCK/G_LOADTILE actually loaded
+static DKR_HOT s32 sTexSwapped = 0; // that load had dxt == 0 — see decode_texture()
+static DKR_HOT u8 sTileFmt = 0;    // G_SETTILE — G_IM_FMT_*
+static DKR_HOT u8 sTileSiz = 0;    //             G_IM_SIZ_*
+static DKR_HOT u8 sTilePalette = 0;
+static DKR_HOT u8 sTileCmS = 0; // the raw 2-bit clamp/mirror fields, not booleans
+static DKR_HOT u8 sTileCmT = 0;
+static DKR_HOT u16 sTileWidth = 0; // G_SETTILESIZE
+static DKR_HOT u16 sTileHeight = 0;
+static DKR_HOT u16 sTileUls = 0;   //               the tile's origin within the image
+static DKR_HOT u16 sTileUlt = 0;
+static DKR_HOT u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
 
 #define GFX_GEOMETRY_MODE_INIT (G_SHADE | G_SHADING_SMOOTH | G_ZBUFFER)
-static u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
+static DKR_HOT u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
 
-static u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
-static u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
-static u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
-static u32 sCombineW1 = 0;
-static u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
-static u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static DKR_HOT u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
+static DKR_HOT u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
+static DKR_HOT u32 sCombineW0 = 0;       // G_SETCOMBINE — the two mux words
+static DKR_HOT u32 sCombineW1 = 0;
+static DKR_HOT u8 sPrimColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+static DKR_HOT u8 sEnvColor[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
 static u8 sFillColor[4] = { 0x00, 0x00, 0x00, 0xFF };
-static u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
+static DKR_HOT u8 sBlendColor[4] = { 0x00, 0x00, 0x00, 0xFF }; // G_SETBLENDCOLOR
+
+// A fade to black this frame (dreamcast/cover.h): its alpha as announced while
+// the display list was built, or -1; the frame's walk takes it.
+static s32 sFadeAnnounced = -1;
+static s32 sFadeAlpha = -1;
+static s32 sFadeSkipRect; // between the fade's tags: its rect is not drawn
+
+void pc_fade_announce(int alpha) {
+    sFadeAnnounced = alpha;
+}
 
 // Fog. The game recomputes this every frame, per player (src/tracks.c), out of the
 // FogData system its fog-changer objects drive. gSPFogPosition packs a multiplier
 // and an offset into one G_MOVEWORD, and the RSP turns them into a per-vertex fade
 // factor; gDPSetFogColor is the colour that factor fades towards. 
-static u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
-static s16 sFogMul = 0;
-static s16 sFogOfs = 0;
+static DKR_HOT u8 sFogColor[4] = { 0x00, 0x00, 0x00, 0xFF };
+static DKR_HOT s16 sFogMul = 0;
+static DKR_HOT s16 sFogOfs = 0;
 
 #define GFX_MAX_TEXTURES 1024
 #define GFX_MAX_TEX_TEXELS (256 * 256)
@@ -194,25 +845,524 @@ typedef struct {
     u16 width, height;
     u32 handle;
     u32 lastUsed; // frame number, for eviction when the cache is full
+    u8 prebuilt;  // the handle belongs to the prebuilt table, not to this entry
 } GfxTexture;
 
 static GfxTexture sTexCache[GFX_MAX_TEXTURES];
-static s32 sTexCacheCount = 0;
+static DKR_HOT s32 sTexCacheCount = 0;
 
 // Hash hint over the cache: hash(timg, tlut) -> sTexCache index + 1 (0 = no
 // hint). Purely an accelerator: every hint is verified against the full key
 // before use, and a wrong one (hash collision, entry moved by eviction or
 // invalidation) just means one linear scan that re-teaches the slot. So the
 // eviction paths never need to maintain it.
-#define GFX_TEX_HINTS 1024
+//
+// A race level holds some 950 textures, so the table is sized well above that:
+// at 1024 it ran nearly full, the probes overflowed, and textures kept
+// knocking each other's hints out.
+#define GFX_TEX_HINTS 4096
 static u16 sTexHint[GFX_TEX_HINTS];
 
 static u32 tex_hint_slot(u32 timg, u32 tlut) {
     return ((timg >> 5) ^ (timg >> 15) ^ (tlut >> 5)) & (GFX_TEX_HINTS - 1);
 }
+
+#define GFX_TEX_HINT_PROBES 4
+
+/** Remember cache entry `index` near `slot`: in a free or stale hint if there is one. */
+static void tex_hint_store(u32 slot, s32 index) {
+    static u32 sNext;
+    s32 probe;
+
+    for (probe = 0; probe < GFX_TEX_HINT_PROBES; probe++) {
+        u32 at = (slot + probe) & (GFX_TEX_HINTS - 1);
+        s32 hi = (s32) sTexHint[at] - 1;
+
+        // Stale: the entry it names has moved, or it would not look for itself
+        // here. An entry from a neighbouring home slot that probed into this one
+        // is not stale; overwriting it only sends that texture to the scan.
+        if (hi < 0 || hi >= sTexCacheCount || hi == index ||
+            ((at - tex_hint_slot(sTexCache[hi].timg, sTexCache[hi].tlut)) & (GFX_TEX_HINTS - 1)) >=
+                GFX_TEX_HINT_PROBES) {
+            sTexHint[at] = (u16) (index + 1);
+            return;
+        }
+    }
+    sTexHint[(slot + (sNext++ % GFX_TEX_HINT_PROBES)) & (GFX_TEX_HINTS - 1)] = (u16) (index + 1);
+}
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
+
+static DKR_HOT s32 sTexStateDirty;
+
+// ---------------------------------------------------------------------------
+// Prebuilt textures
+//
+// dreamcast/build_pvr_textures.py converts every texture asset offline into
+// build/dc/textures.dtp. When the game loads a texture asset (load_texture,
+// during a scene's load), enDjinn loads its frames from that pack into video
+// memory, keyed by the address their texels have in RAM, which is the address
+// the display list will name. texture_lookup then finds them without decoding
+// anything; decoding stays only for what the pack does not cover.
+// ---------------------------------------------------------------------------
+#define PREBUILT_MAX 2048 // texture frames resident at once; a race level loads about 950
+static struct {
+    u32 timg;   // the frame's texels in RAM: the texture header plus one
+    u32 handle;
+    u16 width, height;
+    s16 bundle; // the sBundle entry that owns the handle, or -1 if this entry owns it
+} sPrebuilt[PREBUILT_MAX];
+
+// The current scene's bundle (build/dc/texscenes/LEVEL.dtb): every texture the
+// scene is known to use, loaded into video memory in one sequential read when
+// the scene starts loading. load_texture then claims its frames from here
+// instead of reading the pack. The bundle keeps its textures for the whole
+// scene: one the game frees goes back to the bundle, so loading it again (the
+// character demo swaps models) does not read the pack. The next scene's load
+// frees what is unclaimed and hands what is still in use to sPrebuilt.
+#define BUNDLE_MAX 2048
+static struct {
+    u16 id, frame;
+    u16 width, height;
+    u32 handle;
+    s16 claimed; // in use by an sPrebuilt entry
+} sBundle[BUNDLE_MAX];
+static s32 sBundleCount;
+static s32 sSceneLevel = -1;
+static u32 sBundleClaims; // textures taken from the bundle since the last report
+static u32 sModelHeld, sModelHeldMs; // scene models the gate loaded, see pc_model_scene_load
+static s32 sPrebuiltCount;
+static file_t sPackFile = FILEHND_INVALID;
+static u32 *sPackIndex;
+static u32 sPackCount2d, sPackCount3d, sPackSize;
+static s32 sPackTried;
+
+static s32 prebuilt_open(void) {
+    u32 header[4];
+
+    if (sPackTried) {
+        return sPackIndex != NULL;
+    }
+    sPackTried = TRUE;
+    sPackFile = fs_open(DKR_TEXTURE_PACK, O_RDONLY);
+    if (sPackFile == FILEHND_INVALID) {
+        printf("gfx: no %s; textures are decoded as they are drawn\n", DKR_TEXTURE_PACK);
+        return FALSE;
+    }
+    if (fs_read(sPackFile, header, sizeof(header)) != sizeof(header) || header[0] != 0x4B505444u /* DTPK */ ||
+        header[1] != 2) {
+        printf("gfx: %s is not a version 2 texture pack\n", DKR_TEXTURE_PACK);
+        return FALSE;
+    }
+    sPackCount2d = header[2];
+    sPackCount3d = header[3];
+    sPackSize = (u32) fs_total(sPackFile);
+    sPackIndex = malloc((sPackCount2d + sPackCount3d) * sizeof(u32));
+    if (sPackIndex == NULL || fs_read(sPackFile, sPackIndex, (sPackCount2d + sPackCount3d) * sizeof(u32)) !=
+                                  (ssize_t) ((sPackCount2d + sPackCount3d) * sizeof(u32))) {
+        free(sPackIndex);
+        sPackIndex = NULL;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/** Drop prebuilt frames whose texels lay in freed memory. */
+static void prebuilt_forget(u32 lo, u32 hi) {
+    s32 i;
+
+    for (i = 0; i < sPrebuiltCount;) {
+        if (sPrebuilt[i].timg >= lo && sPrebuilt[i].timg < hi) {
+            if (sPrebuilt[i].bundle >= 0) {
+                sBundle[sPrebuilt[i].bundle].claimed = FALSE;
+            } else {
+                gfx_delete_texture(sPrebuilt[i].handle);
+            }
+            sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
+        } else {
+            i++;
+        }
+    }
+}
+
+static s32 prebuilt_find(u32 timg) {
+    s32 i;
+
+    for (i = 0; i < sPrebuiltCount; i++) {
+        if (sPrebuilt[i].timg == timg) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * Called by load_texture once a texture asset is in RAM: puts its prebuilt
+ * frames in video memory. id is the asset ID (bit 15 set for the 3D table),
+ * first the first frame's header; frames follow textureSize bytes apart.
+ */
+/** Registers frame `i` of a texture whose header is at `frame`; returns FALSE if the table is full. */
+static s32 prebuilt_register(TextureHeader *frame, u32 handle, u16 width, u16 height, s16 bundle) {
+    u32 timg = (u32) (frame + 1);
+
+    if (sPrebuiltCount >= PREBUILT_MAX) {
+        return FALSE;
+    }
+    prebuilt_forget(timg, timg + 1); // memory reused for a new asset
+    sPrebuilt[sPrebuiltCount].timg = timg;
+    sPrebuilt[sPrebuiltCount].handle = handle;
+    sPrebuilt[sPrebuiltCount].width = width;
+    sPrebuilt[sPrebuiltCount].height = height;
+    sPrebuilt[sPrebuiltCount].bundle = bundle;
+    sPrebuiltCount++;
+    return TRUE;
+}
+
+/** Takes a texture's frames from the scene bundle if they are all there. */
+static s32 bundle_claim(void *first, s32 id, s32 frames) {
+    TextureHeader *frame = (TextureHeader *) first;
+    s32 found = 0, i, f;
+
+    for (i = 0; i < sBundleCount; i++) {
+        if (!sBundle[i].claimed && sBundle[i].id == (u16) id) {
+            found++;
+        }
+    }
+    if (found != frames) {
+        return FALSE;
+    }
+    for (f = 0; f < frames; f++) {
+        for (i = 0; i < sBundleCount; i++) {
+            if (!sBundle[i].claimed && sBundle[i].id == (u16) id && sBundle[i].frame == f) {
+                if (sBundle[i].width != frame->width || sBundle[i].height != frame->height ||
+                    !prebuilt_register(frame, sBundle[i].handle, sBundle[i].width, sBundle[i].height, (s16) i)) {
+                    return f > 0; // a partial claim keeps what it took
+                }
+                sBundle[i].claimed = TRUE;
+                break;
+            }
+        }
+        frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
+    }
+    sBundleClaims++;
+    return TRUE;
+}
+
+/**
+ * The scene gate calls this as a scene starts loading: frees what the previous
+ * scene's bundle has unclaimed, hands what is claimed to sPrebuilt, then reads
+ * this scene's bundle straight through and puts every texture in it into video
+ * memory.
+ */
+void pc_texture_scene_load(int level) {
+    char path[96];
+    u32 header[4];
+    u32 pos;
+    file_t file;
+    s32 i, n;
+
+    for (i = 0; i < sBundleCount; i++) {
+        if (!sBundle[i].claimed) {
+            gfx_delete_texture(sBundle[i].handle);
+        }
+    }
+    for (i = 0; i < sPrebuiltCount; i++) {
+        sPrebuilt[i].bundle = -1;
+    }
+    sBundleCount = 0;
+    sSceneLevel = level;
+    snprintf(path, sizeof(path), DKR_ASSET_MOUNT "/build/dc/texscenes/%ld.dtb", (long) level);
+    file = fs_open(path, O_RDONLY);
+    if (file == FILEHND_INVALID) {
+        return;
+    }
+    if (fs_read(file, header, sizeof(header)) != sizeof(header) || header[0] != 0x42535444u /* DTSB */ ||
+        header[1] != 1) {
+        fs_close(file);
+        return;
+    }
+    pos = sizeof(header);
+    for (n = 0; n < (s32) header[2] && sBundleCount < BUNDLE_MAX; n++) {
+        u32 entry[2];
+        u16 *record;
+        u32 *table;
+        u8 *block;
+
+        // Each entry header sits 8 bytes before a 32-byte boundary, so its
+        // record starts aligned for enDjinn's loader.
+        while ((pos + 8) % 32) {
+            u8 pad[32];
+            u32 skip = (32 - ((pos + 8) % 32)) % 32;
+            if (fs_read(file, pad, skip) != (ssize_t) skip) {
+                goto done;
+            }
+            pos += skip;
+        }
+        if (fs_read(file, entry, sizeof(entry)) != sizeof(entry)) {
+            break;
+        }
+        pos += sizeof(entry);
+        block = memalign(32, entry[1]);
+        if (block == NULL) {
+            break;
+        }
+        if (fs_read(file, block, entry[1]) != (ssize_t) entry[1]) {
+            free(block);
+            break;
+        }
+        pos += entry[1];
+        record = (u16 *) block;
+        table = (u32 *) (block + 8);
+        for (i = 0; i < record[2] && sBundleCount < BUNDLE_MAX; i++) {
+            enj_texture_info_t info;
+            u32 handle = 0;
+
+            if (table[2 * i] + table[2 * i + 1] <= entry[1] && enj_texture_load_blob(block + table[2 * i], &info)) {
+                handle = gfx_adopt_texture(info.ptr, record[0], record[1], info.width, info.height,
+                                           info.pvrformat & 0x7FFFFFFFu, info.flags.mipmapped, record[3]);
+                if (handle == 0) {
+                    pvr_mem_free(info.ptr);
+                }
+            }
+            if (handle == 0) {
+                printf("gfx: scene %ld bundle stopped at texture %04lx frame %ld, %lu bytes of video memory free\n",
+                       (long) level, (unsigned long) entry[0], (long) i, (unsigned long) pvr_mem_available());
+                break;
+            }
+            sBundle[sBundleCount].id = (u16) entry[0];
+            sBundle[sBundleCount].frame = (u16) i;
+            sBundle[sBundleCount].width = record[0];
+            sBundle[sBundleCount].height = record[1];
+            sBundle[sBundleCount].handle = handle;
+            sBundle[sBundleCount].claimed = FALSE;
+            sBundleCount++;
+        }
+        free(block);
+    }
+done:
+    fs_close(file);
+}
+
+// Time and reads spent loading prebuilt textures since the last scene report.
+static u64 sTexLoadNs;
+static u32 sTexLoadReads, sTexLoadCount;
+
+void pc_texture_loaded(void *first, s32 id, s32 frames) {
+    u16 *record;
+    u32 *table;
+    u32 offset, index, start, end, bytes;
+    u8 *chunk;
+    TextureHeader *frame = (TextureHeader *) first;
+    u64 started = timer_ns_gettime64();
+    s32 i;
+
+#if DKR_TEX_TRACE
+    printf("TEXUSE level=%ld id=%04lx\n", (long) sSceneLevel, (unsigned long) (id & 0xFFFF));
+#endif
+    if (bundle_claim(first, id, frames)) {
+        return;
+    }
+    if (!prebuilt_open()) {
+        return;
+    }
+    if ((id & 0x8000) ? (u32) (id & 0x7FFF) >= sPackCount3d : (u32) id >= sPackCount2d) {
+        return;
+    }
+    index = (id & 0x8000) ? sPackCount2d + (u32) (id & 0x7FFF) : (u32) id;
+    offset = sPackIndex[index];
+    if (offset == 0 || frames <= 0) {
+#if DKR_TEX_TRACE
+        printf("TEX LOAD id=%04lx frames=%ld at %08lx: %s\n", (unsigned long) id, (long) frames,
+               (unsigned long) (frame + 1), offset == 0 ? "not in the pack" : "no frames");
+#endif
+        return;
+    }
+    // A texture's record, frame table and frames lie together in the pack, and
+    // the next texture's record starts where they end (sPackIndex[index + 1],
+    // or the end of the file). Read all of it at once: a seek on disc costs far
+    // more than the bytes.
+    end = 0;
+    for (i = (s32) index + 1; i < (s32) (sPackCount2d + sPackCount3d) && end == 0; i++) {
+        end = sPackIndex[i];
+    }
+    if (end == 0) {
+        end = sPackSize;
+    }
+    start = offset;
+    bytes = end - start;
+    chunk = memalign(32, bytes);
+    if (chunk == NULL) {
+        return;
+    }
+    sTexLoadReads++;
+    if (fs_seek(sPackFile, start, SEEK_SET) < 0 || fs_read(sPackFile, chunk, bytes) != (ssize_t) bytes) {
+        free(chunk);
+        return;
+    }
+    record = (u16 *) chunk;
+    table = (u32 *) (chunk + 8);
+    if (bytes < 8u + 8u * (u32) frames || record[2] != (u16) frames || record[0] != frame->width ||
+        record[1] != frame->height) {
+#if DKR_TEX_TRACE
+        printf("TEX LOAD id=%04lx at %08lx: pack %ux%u x%u, asset %ux%u x%ld\n", (unsigned long) id,
+               (unsigned long) (frame + 1), record[0], record[1], record[2], frame->width, frame->height, (long) frames);
+#endif
+        free(chunk);
+        return; // not the asset the pack was built from
+    }
+    for (i = 0; i < frames && sPrebuiltCount < PREBUILT_MAX; i++) {
+        u32 timg = (u32) (frame + 1);
+        u32 at = table[2 * i] - start;
+        enj_texture_info_t info;
+        u32 handle = 0;
+
+        // A whole pvrtex DcTx file, 32-byte aligned within the pack and so
+        // within this chunk; enDjinn reads its header and loads the rest.
+        if (at + table[2 * i + 1] <= bytes && enj_texture_load_blob(chunk + at, &info)) {
+            handle = gfx_adopt_texture(info.ptr, record[0], record[1], info.width, info.height,
+                                       info.pvrformat & 0x7FFFFFFFu, info.flags.mipmapped, record[3]);
+            if (handle == 0) {
+                pvr_mem_free(info.ptr);
+            }
+        }
+        if (handle == 0) {
+            break;
+        }
+        prebuilt_forget(timg, timg + 1); // memory reused for a new asset
+        sPrebuilt[sPrebuiltCount].timg = timg;
+        sPrebuilt[sPrebuiltCount].handle = handle;
+        sPrebuilt[sPrebuiltCount].width = record[0];
+        sPrebuilt[sPrebuiltCount].height = record[1];
+        sPrebuilt[sPrebuiltCount].bundle = -1;
+        sPrebuiltCount++;
+        sTexLoadCount++;
+        frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
+    }
+    free(chunk);
+    sTexLoadNs += timer_ns_gettime64() - started;
+    if (pc_scene_is_ready()) {
+        // A texture loaded while the scene runs: a disc read in the middle of play.
+        sTexLoadsInFrame++;
+        sTexLoadNsInFrame += timer_ns_gettime64() - started;
+    }
+}
+
+/** Prints and resets what loading prebuilt textures cost; the scene gate calls it. */
+void pc_texture_load_report(u32 sceneMs) {
+    s32 i, unclaimed = 0;
+
+    for (i = 0; i < sBundleCount; i++) {
+        unclaimed += !sBundle[i].claimed;
+    }
+    printf("SCENE LOAD %lu ms: %lu textures from the scene bundle (%ld frames left unclaimed), "
+           "%lu frames read singly in %lu ms, %lu models held in %lu ms\n", (unsigned long) sceneMs,
+           (unsigned long) sBundleClaims, (long) unclaimed, (unsigned long) sTexLoadCount,
+           (unsigned long) (sTexLoadNs / 1000000u), (unsigned long) sModelHeld, (unsigned long) sModelHeldMs);
+    sTexLoadNs = 0;
+    sTexLoadReads = sTexLoadCount = sBundleClaims = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Scene models. dreamcast/models.scenes lists, per scene, the object models
+// its objects load after the scene has started (the character demo swaps
+// racers). The scene gate loads them and holds a reference until the next
+// scene loads, so those objects find them in the game's model cache.
+// ---------------------------------------------------------------------------
+#define DKR_MODEL_SCENES DKR_ASSET_MOUNT "/build/dc/models.scenes"
+extern s32 pc_model_hold(s32 modelID);
+extern void pc_model_release_held(void);
+
+void pc_model_loaded(s32 modelID) {
+#if DKR_TEX_TRACE
+    printf("MODELUSE level=%ld id=%04lx\n", (long) sSceneLevel, (unsigned long) modelID);
+#endif
+    if (pc_scene_is_ready()) {
+        sModelLoadsInFrame++; // a disc read in the middle of play
+    }
+}
+
+void pc_model_scene_release(void) {
+    pc_model_release_held();
+}
+
+/** Reads a scene map (build/dc/NAME.scenes) once; NULL if it is missing. */
+static const char *scene_map(const char *path, char **cache, s32 *tried) {
+    if (!*tried) {
+        file_t file = fs_open(path, O_RDONLY);
+        *tried = TRUE;
+        if (file != FILEHND_INVALID) {
+            size_t size = fs_total(file);
+            *cache = malloc(size + 1);
+            if (*cache != NULL && fs_read(file, *cache, size) == (ssize_t) size) {
+                (*cache)[size] = '\0';
+            } else {
+                free(*cache);
+                *cache = NULL;
+            }
+            fs_close(file);
+        }
+    }
+    return *cache;
+}
+
+/** The IDs a scene map lists for a level, after "scene LEVEL "; NULL if none. */
+static const char *scene_map_ids(const char *map, int level) {
+    char key[24];
+    const char *line;
+    s32 keyLength;
+
+    if (map == NULL || level < 0) {
+        return NULL;
+    }
+    keyLength = snprintf(key, sizeof(key), "scene %ld ", (long) level);
+    for (line = map; line != NULL && *line; line = strchr(line, '\n') ? strchr(line, '\n') + 1 : NULL) {
+        if (strncmp(line, key, keyLength) == 0) {
+            return line + keyLength;
+        }
+    }
+    return NULL;
+}
+
+void pc_model_scene_load(int level) {
+    static char *sMap;
+    static s32 sMapTried;
+    u64 started = timer_ns_gettime64();
+    const char *p = scene_map_ids(scene_map(DKR_MODEL_SCENES, &sMap, &sMapTried), level);
+
+    sModelHeld = 0;
+    while (p != NULL && *p && *p != '\n') {
+        char *end;
+        long id = strtol(p, &end, 16);
+        if (end == p || !pc_model_hold((s32) id)) {
+            break; // the end of the line, or the model table or memory has no more room
+        }
+        sModelHeld++;
+        p = end;
+    }
+    sModelHeldMs = (u32) ((timer_ns_gettime64() - started) / 1000000u);
+}
+
+// dreamcast/songs.scenes: the song a scene starts after it has begun (a
+// cutscene's animation object), which the gate makes resident beforehand.
+#define DKR_SONG_SCENES DKR_ASSET_MOUNT "/build/dc/songs.scenes"
+extern void music_prepare(u8 seqID);
+
+void pc_song_scene_load(int level) {
+    static char *sMap;
+    static s32 sMapTried;
+    const char *p = scene_map_ids(scene_map(DKR_SONG_SCENES, &sMap, &sMapTried), level);
+    char *end;
+    long sequence;
+
+    if (p == NULL) {
+        return;
+    }
+    sequence = strtol(p, &end, 16);
+    if (end != p && sequence > 0) {
+        music_prepare((u8) sequence); // one song fits; the first the scene starts
+    }
+}
 
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
     u32 lo = (u32) addr;
@@ -223,12 +1373,16 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
         GfxTexture *t = &sTexCache[i];
 
         if ((t->timg >= lo && t->timg < hi) || (t->tlut >= lo && t->tlut < hi)) {
-            gfx_delete_texture(t->handle);
+            if (!t->prebuilt) {
+                gfx_delete_texture(t->handle);
+            }
             sTexCache[i] = sTexCache[--sTexCacheCount];
+            sTexStateDirty = TRUE;
         } else {
             i++;
         }
     }
+    prebuilt_forget(lo, hi);
 }
 
 /**
@@ -238,7 +1392,7 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
  * the RSP consumes, so the PC build sees the same rounding and the same +-32768
  * saturation the console does and the N64 ROM stays a usable oracle.
  */
-static void mtx_to_float(const Mtx *m, f32 out[4][4]) {
+static DKR_HOT_CODE void mtx_to_float(const Mtx *m, f32 out[4][4]) {
 #ifdef GBI_FLOAT_MTX
     // Float matrix ABI: mtxf_to_mtx()/guMtxF2L() stored the 16 floats raw, so
     // read them back as-is. No fixed unpack, no /65536, no bit-shuffle.
@@ -292,6 +1446,49 @@ static void load_vertex(GfxVertex *dst, const Vertex *v, const f32 *anchor) {
     project_into(dst);
 }
 
+/**
+ * For dreamcast/scrawl.c: a world point through the current matrix, as G_VTX
+ * would place it: N64 screen pixels and w. 0 if it is behind the near plane.
+ */
+int pc_project_world(const f32 world[3], f32 out[3]) {
+    GfxVertex v;
+    Vertex in = { (s16) world[0], (s16) world[1], (s16) world[2], 255, 255, 255, 255 };
+
+    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
+    load_vertex(&v, &in, NULL);
+    if (!VERTEX_PROJECTED(&v)) {
+        return 0;
+    }
+    out[0] = v.sx;
+    out[1] = v.sy;
+    out[2] = v.sw;
+    return 1;
+}
+
+/**
+ * For dreamcast/swirl.c: count model points, x y z at a stride of `stride`
+ * floats, through the current matrix, as G_VTX would place them: N64 screen
+ * pixels and w, into out. Not clipped: they must be in front of the near plane.
+ */
+void pc_project_points(const f32 *xyz, int stride, int count, f32 (*out)[3]) {
+    int i;
+
+    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
+    for (i = 0; i < count; i++, xyz += stride) {
+        shz_vec4_t clip = shz_xmtrx_transform_vec4(shz_vec4_init(xyz[0], xyz[1], xyz[2], 1.0f));
+        f32 invW = shz_invf_fsrra(clip.w);
+
+        out[i][0] = clip.x * invW * sVpScaleX + sVpTransX;
+        out[i][1] = sVpTransY - clip.y * invW * sVpScaleY;
+        out[i][2] = clip.w;
+    }
+}
+
+/** For dreamcast/swirl.c: the current matrix, model to clip, column-major. */
+const f32 *pc_current_matrix(void) {
+    return &sMatrices[sCurMatrix][0][0];
+}
+
 static void handle_vertex(u32 w0, u32 w1) {
     const Vertex *src = (const Vertex *) w1;
     u32 params = (w0 >> 16) & 0xFF;
@@ -313,6 +1510,7 @@ static void handle_vertex(u32 w0, u32 w1) {
         sVertexBase = count;
     }
 
+    PROF_ADD(verts, count);
     shz_xmtrx_load_4x4((shz_mat4x4_t*)&sMatrices[sCurMatrix]);
     for (i = 0; i < count && dstIdx + i < GFX_MAX_VERTS; i++) {
         // Billboarded vertices are sprite-space offsets from vertex 0, the
@@ -475,10 +1673,14 @@ static void decode_texture(const u8 *src, u8 fmt, u8 siz, s32 width, s32 height,
  * The texture the current RDP state describes, decoded and uploaded once and
  * then kept. Returns 0 (untextured) if there is nothing sane to draw with.
  */
-static u32 texture_current(void) {
-    const u8 *tlut = (const u8 *) sTlutAddr;
-    s32 i;
+static u32 texture_lookup_slow(const u8 *tlut, u32 slot);
 
+static u32 texture_lookup(void) {
+    const u8 *tlut = (const u8 *) sTlutAddr;
+
+#if DKR_GFX_PROFILE
+    sScene.texLookups++;
+#endif
     if (sTexAddr == 0 || sTileWidth == 0 || sTileHeight == 0) {
         return 0;
     }
@@ -497,26 +1699,46 @@ static u32 texture_current(void) {
 
     {
         u32 slot = tex_hint_slot(sTexAddr, (u32) tlut);
-        s32 hi = (s32) sTexHint[slot] - 1;
+        s32 probe;
 
-        if (hi >= 0 && hi < sTexCacheCount) {
-            GfxTexture *t = &sTexCache[hi];
+        // A few neighbouring hints, so two textures that hash alike do not push
+        // each other out and send every lookup to the scan below.
+        for (probe = 0; probe < GFX_TEX_HINT_PROBES; probe++) {
+            s32 hi = (s32) sTexHint[(slot + probe) & (GFX_TEX_HINTS - 1)] - 1;
 
-            if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt &&
-                t->siz == sTileSiz && t->width == sTileWidth && t->height == sTileHeight &&
-                t->cmS == sTileCmS && t->cmT == sTileCmT && t->swapped == (u8) sTexSwapped) {
-                t->lastUsed = sGfxFrameCount;
-                return t->handle;
+            if (hi >= 0 && hi < sTexCacheCount) {
+                GfxTexture *t = &sTexCache[hi];
+
+                if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt &&
+                    t->siz == sTileSiz && t->width == sTileWidth && t->height == sTileHeight &&
+                    t->cmS == sTileCmS && t->cmT == sTileCmT && t->swapped == (u8) sTexSwapped) {
+                    t->lastUsed = sGfxFrameCount;
+                    return t->handle;
+                }
             }
         }
+        return texture_lookup_slow(tlut, slot);
+    }
+}
 
+/**
+ * texture_lookup() past a hint miss: the scan, and failing that the upload.
+ * Rare once a scene is running, so kept out of the walk's code.
+ */
+static __attribute__((noinline, cold)) u32 texture_lookup_slow(const u8 *tlut, u32 slot) {
+    s32 i;
+
+    {
+#if DKR_GFX_PROFILE
+        sScene.texScans++;
+#endif
         for (i = 0; i < sTexCacheCount; i++) {
             GfxTexture *t = &sTexCache[i];
             if (t->timg == sTexAddr && t->tlut == (u32) tlut && t->fmt == sTileFmt && t->siz == sTileSiz &&
                 t->width == sTileWidth && t->height == sTileHeight && t->cmS == sTileCmS && t->cmT == sTileCmT &&
                 t->swapped == (u8) sTexSwapped) {
                 t->lastUsed = sGfxFrameCount;
-                sTexHint[slot] = (u16) (i + 1);
+                tex_hint_store(slot, i);
                 return t->handle;
             }
         }
@@ -534,9 +1756,56 @@ static u32 texture_current(void) {
                 oldest = i;
             }
         }
-        gfx_delete_texture(sTexCache[oldest].handle);
+        if (!sTexCache[oldest].prebuilt) {
+            gfx_delete_texture(sTexCache[oldest].handle);
+        }
         sTexCache[oldest] = sTexCache[--sTexCacheCount];
     }
+
+    {
+        // Converted offline and already in video memory: no decoding.
+        s32 p = (sTileFmt != G_IM_FMT_CI) ? prebuilt_find(sTexAddr) : -1;
+
+        if (p >= 0 && sPrebuilt[p].width == sTileWidth && sPrebuilt[p].height == sTileHeight) {
+            GfxTexture *t = &sTexCache[sTexCacheCount++];
+
+            gfx_texture_set_wrap(sPrebuilt[p].handle, sTileCmS, sTileCmT);
+            t->timg = sTexAddr;
+            t->tlut = (u32) tlut;
+            t->fmt = sTileFmt;
+            t->siz = sTileSiz;
+            t->swapped = (u8) sTexSwapped;
+            t->width = sTileWidth;
+            t->height = sTileHeight;
+            t->cmS = sTileCmS;
+            t->cmT = sTileCmT;
+            t->lastUsed = sGfxFrameCount;
+            t->handle = sPrebuilt[p].handle;
+            t->prebuilt = 1;
+            tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
+            sTexPrebuiltHits++;
+            return t->handle;
+        }
+    }
+    sTexDecodes++;
+#if DKR_TEX_TRACE
+    {
+        // Why this texture is not prebuilt: one line per texture.
+        static u32 sTraced[256];
+        static s32 sTracedCount;
+        u32 key = sTexAddr ^ ((u32) tlut << 3) ^ ((u32) sTileWidth << 20) ^ ((u32) sTileHeight << 12);
+        s32 k, p = prebuilt_find(sTexAddr);
+
+        for (k = 0; k < sTracedCount && sTraced[k] != key; k++) {}
+        if (k == sTracedCount && sTracedCount < 256) {
+            sTraced[sTracedCount++] = key;
+            printf("TEX DECODE timg=%08lx tlut=%08lx fmt=%d siz=%d tile=%dx%d swapped=%d prebuilt=%s%dx%d\n",
+                   (unsigned long) sTexAddr, (unsigned long) tlut, sTileFmt, sTileSiz, sTileWidth, sTileHeight,
+                   (int) sTexSwapped, p >= 0 ? "yes " : "no ", p >= 0 ? sPrebuilt[p].width : 0,
+                   p >= 0 ? sPrebuilt[p].height : 0);
+        }
+    }
+#endif
 
     {
         const u8 *texels = (const u8 *) sTexAddr;
@@ -565,9 +1834,25 @@ static u32 texture_current(void) {
         t->cmT = sTileCmT;
         t->lastUsed = sGfxFrameCount;
         t->handle = gfx_create_texture(sTexDecodeBuf, sTileWidth, sTileHeight, sTileCmS, sTileCmT);
-        sTexHint[tex_hint_slot(t->timg, t->tlut)] = (u16) sTexCacheCount; // index of t, +1
+        t->prebuilt = 0;
+        tex_hint_store(tex_hint_slot(t->timg, t->tlut), sTexCacheCount - 1);
         return t->handle;
     }
+}
+
+// What texture_lookup() last returned, valid until the display list touches the
+// tile or loads an image. Consecutive batches mostly share a texture, and the
+// lookup is not free. A new frame starts dirty so that each texture's first use
+// in a frame goes through the lookup, which is what stamps it as recently used.
+static DKR_HOT s32 sTexStateDirty = TRUE;
+static DKR_HOT u32 sTexCurrent;
+
+static DKR_HOT_CODE u32 texture_current(void) {
+    if (sTexStateDirty) {
+        sTexCurrent = texture_lookup();
+        sTexStateDirty = FALSE;
+    }
+    return sTexCurrent;
 }
 
 /**
@@ -578,14 +1863,15 @@ static u32 texture_current(void) {
 static void combiner_eval(const f32 shade[4], u8 out[4], u8 sec[3]);
 static void combiner_eval_lit(const f32 shade[4], u8 lit[4]);
 static void combiner_classify(void);
+static void cc_prog_sync_current(void);
 static u8 clamp_u8(f32 v);
 
 // How the current batch's combiner collapses, per channel; see
 // combiner_classify(). sCcFast means every channel is either passthrough or a
 // constant, so project() can skip the mux entirely.
-static u8 sCcPass[4];  // 1 = this channel is the shade, unchanged
-static u8 sCcConst[4]; // otherwise, the constant it always produces
-static s32 sCcFast;
+static DKR_HOT u8 sCcPass[4];  // 1 = this channel is the shade, unchanged
+static DKR_HOT u8 sCcConst[4]; // otherwise, the constant it always produces
+static DKR_HOT s32 sCcFast;
 
 /**
  * The geometric half: perspective divide, viewport map and fog. Depends only on
@@ -646,6 +1932,12 @@ static void project_into(GfxVertex *v) {
  * so it can change between the G_VTX that loads a vertex and the G_TRIN that
  * draws with it.
  */
+// The emulated path's combiner results for the loaded vertices, valid while
+// sLitStamp[i] == sLitBatch; handle_polygon starts a new batch.
+static u32 sLitColor[GFX_MAX_VERTS];
+static u32 sLitStamp[GFX_MAX_VERTS];
+static DKR_HOT u32 sLitBatch = 1;
+
 static void project(const GfxVertex *v, GfxTriVert *out) {
     if (VERTEX_PROJECTED(v)) {
         out->x = v->sx;
@@ -674,20 +1966,35 @@ static void project(const GfxVertex *v, GfxTriVert *out) {
         out->a = sCcPass[3] ? v->a : sCcConst[3];
     } else {
         // At least one channel mixes shade with something else; run the real mux.
-        // Only the lit half is wanted, see combiner_eval_lit.
-        f32 shade[4];
-        u8 lit[4];
+        // Only the lit half is wanted, see combiner_eval_lit. A loaded vertex
+        // is a corner of two or three triangles, so its result is kept for the
+        // batch; a vertex the near clip made is not one of them.
+        u32 at = (u32) ((const u8 *) v - (const u8 *) sVerts) / sizeof(GfxVertex);
+        union {
+            u8 c[4];
+            u32 word;
+        } lit;
 
-        shade[0] = v->r * (1.0f / 255.0f);
-        shade[1] = v->g * (1.0f / 255.0f);
-        shade[2] = v->b * (1.0f / 255.0f);
-        shade[3] = v->a * (1.0f / 255.0f);
-        combiner_eval_lit(shade, lit);
+        if (at < GFX_MAX_VERTS && sLitStamp[at] == sLitBatch) {
+            lit.word = sLitColor[at];
+        } else {
+            f32 shade[4];
 
-        out->r = lit[0];
-        out->g = lit[1];
-        out->b = lit[2];
-        out->a = lit[3];
+            shade[0] = v->r * (1.0f / 255.0f);
+            shade[1] = v->g * (1.0f / 255.0f);
+            shade[2] = v->b * (1.0f / 255.0f);
+            shade[3] = v->a * (1.0f / 255.0f);
+            combiner_eval_lit(shade, lit.c);
+            if (at < GFX_MAX_VERTS) {
+                sLitColor[at] = lit.word;
+                sLitStamp[at] = sLitBatch;
+            }
+        }
+
+        out->r = lit.c[0];
+        out->g = lit.c[1];
+        out->b = lit.c[2];
+        out->a = lit.c[3];
     }
 }
 
@@ -792,13 +2099,13 @@ static void emit_triangle(const GfxVertex *v0, const GfxVertex *v1, const GfxVer
 }
 
 
-static void apply_texture_filter(void) {
+static DKR_HOT_CODE void apply_texture_filter(void) {
     u32 filt = sOtherModeH & (3 << G_MDSFT_TEXTFILT);
 
     gfx_set_texture_filter(filt == G_TF_POINT);
 }
 
-static void apply_render_mode(void) {
+static DKR_HOT_CODE void apply_render_mode(void) {
     u32 alphaCompare = sOtherModeL & (3 << G_MDSFT_ALPHACOMPARE);
     s32 zEnabled = (sGeometryMode & G_ZBUFFER) != 0;
     f32 ref = 0.0f;
@@ -809,6 +2116,18 @@ static void apply_render_mode(void) {
     gfx_set_depth_test(zEnabled && (sOtherModeL & Z_CMP) != 0);
     gfx_set_depth_write(zEnabled && (sOtherModeL & Z_UPD) != 0);
     gfx_set_depth_offset(zEnabled && (sOtherModeL & ZMODE_DEC) == ZMODE_DEC);
+    {
+        // FORCE_BL only says the blender runs. It blends with what is already
+        // drawn only if its equation reads the framebuffer; G_RM_OPA_SURF, the
+        // sky's mode, forces the blender and still outputs the pixel unchanged.
+        // The equation is P*A + M*B, two bits each, with one set per cycle; the
+        // last cycle's set decides.
+        s32 twoCycle = (sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
+        u32 p = (sOtherModeL >> (twoCycle ? 28 : 30)) & 3;
+        u32 m = (sOtherModeL >> (twoCycle ? 20 : 22)) & 3;
+
+        gfx_set_blend((sOtherModeL & FORCE_BL) != 0 && (p == G_BL_CLR_MEM || m == G_BL_CLR_MEM));
+    }
 
     // CVG_X_ALPHA is how the cutout materials (G_RM_*_TEX_EDGE) get their hard
     // edge: the RDP multiplies coverage by alpha, which on a non-antialiased
@@ -828,6 +2147,8 @@ static void apply_render_mode(void) {
  * G_TRIN — DKR's polygon command. w1 points at an array of Triangles (vertex
  * indices plus UVs); shade each one from its vertex colours.
  */
+static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled);
+
 static void handle_polygon(u32 w0, u32 w1) {
     const Triangle *tris = (const Triangle *) w1;
     u32 params = (w0 >> 16) & 0xFF;
@@ -840,7 +2161,11 @@ static void handle_polygon(u32 w0, u32 w1) {
     if (tris == NULL) {
         return;
     }
+    if (polygon_blast(tris, count, texEnabled)) {
+        return;
+    }
 
+    PROF_LAP_START();
     if (texEnabled) {
         texture = texture_current();
     }
@@ -858,6 +2183,11 @@ static void handle_polygon(u32 w0, u32 w1) {
     // Settle how this batch's combiner collapses before touching any vertex. The
     // mux, prim and env cannot change inside a batch, so once is enough.
     combiner_classify();
+    if (!sCcFast) {
+        cc_prog_sync_current(); // project() runs it per vertex
+        sLitBatch++;
+    }
+    PROF_LAP(tPolyState);
 
     for (i = 0; i < count; i++) {
         // The UVs are the only per-triangle part of a vertex, so write them into
@@ -881,12 +2211,17 @@ static void handle_polygon(u32 w0, u32 w1) {
         emit_triangle(a, b, c, !(tris[i].flags & BACKFACE_DRAW));
     }
 
+    PROF_LAP(tPolyEmit);
     apply_render_mode();
     gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
     gfx_bind_texture(texture);
     apply_texture_filter();
     gfx_set_texenv_modulate(); // the 2D path leaves the env in blend mode
+    PROF_ADD(slowTris, sTriVertCount / 3);
+    PROF_ADD(sentFrame, sTriVertCount / 3);
+    PROF_ADD(slowBatches, 1);
     gfx_draw_tris(sTriVerts, sTriVertCount);
+    PROF_LAP(tPolyDraw);
 }
 
 // ---------------------------------------------------------------------------
@@ -914,30 +2249,100 @@ static void handle_polygon(u32 w0, u32 w1) {
 
 
 /** Render a blast batch through the emulated path, as the DL would have. */
-static void blast_fallback(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                           s32 texEnabled) {
-    handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts);
-    handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
-                   (u32) tris);
+static __attribute__((noinline)) void blast_fallback(const Vertex *verts, s32 numVerts, const Vertex *verts2,
+                                                     s32 numVerts2, s32 matrix2, const Triangle *tris, s32 numTris,
+                                                     s32 texEnabled) {
+    PROF_ADD(fallback, 1);
+#if DKR_GFX_PROFILE_SKIP == 3
+    PROF_ADD(slowTris, numTris);
+    return;
+#endif
+    PROF_TIME(tFallback, handle_vertex(((u32) G_VTX << 24) | ((u32) ((numVerts - 1) << 3) << 16), (u32) verts));
+    if (numVerts2 > 0) {
+        // The second run was loaded under another matrix and appended.
+        s32 matrix = sCurMatrix;
+
+        sCurMatrix = matrix2;
+        PROF_TIME(tFallback, handle_vertex(((u32) G_VTX << 24) |
+                                               ((u32) (((numVerts2 - 1) << 3) | G_VTX_APPEND) << 16),
+                                           (u32) verts2));
+        sCurMatrix = matrix;
+    }
+    PROF_TIME(tFallback, handle_polygon(((u32) G_TRIN << 24) | ((u32) (((numTris - 1) << 4) | texEnabled) << 16),
+                                        (u32) tris));
 }
 
 // N64-pixels -> framebuffer scale, from gfx_blast_begin. File-scope so the
 // cold clip path shares the hot loop's emit.
-static f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
+static DKR_HOT f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
-/** One PVR vertex straight to the store queue — inline, no cross-file call. */
+// Where a blended batch's vertices are recorded; NULL streams to the open list.
+static DKR_HOT pvr_vertex_t *sBlastRecord;
+// Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
+static DKR_HOT f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
+
+/**
+ * Write one finished PVR vertex to `vt`, which is a store queue or a slot in a
+ * recording. A recorded vertex is one whole 32-byte cache line, so `alloc`
+ * claims the line with movca.l instead of letting the first store miss read it
+ * in from memory, only for all eight words to be overwritten. movca.l stores r0
+ * to the line's first word, which is `flags` anyway.
+ *
+ * The words go out from the top down with pre-decrement stores: the FPU has no
+ * displacement store, so field by field the compiler spends an address add on
+ * each. The asm is said to write the whole vertex, which keeps it ordered with
+ * the flush, and there is no memory clobber to make the caller reload every
+ * global around each vertex.
+ */
+/** A fade to black drawn into the frame (dreamcast/cover.h), on a batch's colours. Out of the hot section. */
+static __attribute__((noinline, cold)) void blast_fade_colors(u32 *argb, s32 count) {
+    for (s32 i = 0; i < count; i++) {
+        argb[i] = gfx_fade_argb(argb[i]);
+    }
+}
+
+static inline void blast_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v,
+                             u32 argb) {
+    u8 *top = (u8 *) vt + 32;
+
+    if (alloc) {
+        __asm__ __volatile__("movca.l r0, @%1" : "=m"(*vt) : "r"(vt), "z"(flags));
+    }
+    __asm__ __volatile__("mov.l %[zero], @-%[p]\n\t"
+                         "mov.l %[argb], @-%[p]\n\t"
+                         "fmov.s %[v], @-%[p]\n\t"
+                         "fmov.s %[u], @-%[p]\n\t"
+                         "fmov.s %[z], @-%[p]\n\t"
+                         "fmov.s %[y], @-%[p]\n\t"
+                         "fmov.s %[x], @-%[p]\n\t"
+                         "mov.l %[flags], @-%[p]"
+                         : [p] "+r"(top), "+m"(*vt)
+                         : [zero] "r"(0), [argb] "r"(argb), [v] "f"(v), [u] "f"(u), [z] "f"(z), [y] "f"(y),
+                           [x] "f"(x), [flags] "r"(flags));
+}
+
+/** Send a store queue's vertex to the TA. The asm reads the vertex, which orders the stores before it. */
+static inline void blast_sq_flush(pvr_vertex_t *vt) {
+    __asm__ __volatile__("pref @%0" : : "r"(vt), "m"(*vt));
+}
+
+/** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
-    pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
+    pvr_vertex_t *rec = sBlastRecord;
 
-    vt->flags = flags;
-    vt->x = x * sBlastSX;
-    vt->y = y * sBlastSY;
-    vt->z = invw;
-    vt->u = u;
-    vt->v = v;
-    vt->argb = color;
-    vt->oargb = 0;
-    pvr_dr_commit(vt);
+#if DKR_FILL_PROF
+    gfx_prof_fill_vert(x * sBlastSX, y * sBlastSY, flags == PVR_CMD_VERTEX_EOL);
+#endif
+    color = gfx_fade_argb(color);
+    if (rec) {
+        blast_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        sBlastRecord = rec + 1;
+    } else {
+        pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
+
+        blast_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color);
+        blast_sq_flush(vt);
+    }
 }
 
 // A corner in clip space on its way through the blast near-clipper: position,
@@ -967,7 +2372,7 @@ static u32 blast_argb_lerp(u32 a, u32 b, f32 t) {
  * project the survivors and emit the fan. Only triangles that actually cross
  * the plane come here, so this is cold.
  */
-static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
+static __attribute__((noinline)) void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     BlastClipVert poly[4];
     f32 px[4], py[4], iw[4];
     s32 n = 0;
@@ -1020,30 +2425,128 @@ static void blast_clip_tri(const BlastClipVert *in, s32 cull) {
     }
 }
 
-static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris,
-                         s32 texEnabled) {
-    f32 sx[GFX_BLAST_MAX_VERTS], sy[GFX_BLAST_MAX_VERTS], iw[GFX_BLAST_MAX_VERTS];
+/** A blast triangle with a corner behind the near plane, to the clipper; out of line, off the hot loop. */
+static __attribute__((noinline)) void blast_clip_corners(const Triangle *t, const shz_vec4_t *cp, const u32 *argb,
+                                                         f32 uMul, f32 vMul) {
+    BlastClipVert cv[3];
+
+    cv[0].c = cp[t->vi0];
+    cv[0].u = t->uv0.u * uMul;
+    cv[0].v = t->uv0.v * vMul;
+    cv[0].argb = argb[t->vi0];
+    cv[1].c = cp[t->vi1];
+    cv[1].u = t->uv1.u * uMul;
+    cv[1].v = t->uv1.v * vMul;
+    cv[1].argb = argb[t->vi1];
+    cv[2].c = cp[t->vi2];
+    cv[2].u = t->uv2.u * uMul;
+    cv[2].v = t->uv2.v * vMul;
+    cv[2].argb = argb[t->vi2];
+    blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
+}
+
+#if DKR_GFX_PROFILE
+static __attribute__((noinline)) void prof_slow_cc(u32 verts) {
+    u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
+    u32 prim = (sPrimColor[0] << 24) | (sPrimColor[1] << 16) | (sPrimColor[2] << 8) | sPrimColor[3];
+    u32 env = (sEnvColor[0] << 24) | (sEnvColor[1] << 16) | (sEnvColor[2] << 8) | sEnvColor[3];
+    s32 i;
+
+    for (i = 0; i < PROF_SLOW_CC; i++) {
+        if (sSlowCc[i].verts == 0 || (sSlowCc[i].w0 == sCombineW0 && sSlowCc[i].w1 == sCombineW1 &&
+                                      sSlowCc[i].cyc == cyc && sSlowCc[i].prim == prim && sSlowCc[i].env == env)) {
+            sSlowCc[i].w0 = sCombineW0;
+            sSlowCc[i].w1 = sCombineW1;
+            sSlowCc[i].cyc = cyc;
+            sSlowCc[i].prim = prim;
+            sSlowCc[i].env = env;
+            sSlowCc[i].verts += verts;
+            return;
+        }
+    }
+}
+#endif
+
+/**
+ * shz_xmtrx_transform_vec4 on fv4 rather than fv8, with w = 1: a second vector
+ * register, so two vertices can be in the transform at once.
+ */
+static inline shz_vec4_t blast_transform_fv4(f32 x, f32 y, f32 z) {
+    register f32 rx __asm__("fr4") = x;
+    register f32 ry __asm__("fr5") = y;
+    register f32 rz __asm__("fr6") = z;
+    register f32 rw __asm__("fr7") = 1.0f;
+
+    __asm__ __volatile__("ftrv xmtrx, fv4" : "+f"(rx), "+f"(ry), "+f"(rz), "+f"(rw));
+    return shz_vec4_init(rx, ry, rz, rw);
+}
+
+/**
+ * The combiner mixes shade with something else: run the real mux, once per
+ * vertex rather than once per corner. Out of line, so the loop that calls it
+ * stays small for the batches that never do.
+ */
+static __attribute__((noinline)) u32 blast_color_mux(const Vertex *v) {
+    f32 shade[4];
+    u8 lit[4];
+
+    shade[0] = v->r * (1.0f / 255.0f);
+    shade[1] = v->g * (1.0f / 255.0f);
+    shade[2] = v->b * (1.0f / 255.0f);
+    shade[3] = v->a * (1.0f / 255.0f);
+    combiner_eval_lit(shade, lit);
+    return ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
+}
+
+/**
+ * A vertex's colour in a blast batch: the shade bytes through the per-batch
+ * keep/constant masks when the combiner collapses (sCcFast), the real mux
+ * otherwise.
+ */
+static inline u32 blast_color(const Vertex *v, s32 ccFast, u32 keep, u32 konst) {
+    if (ccFast) {
+        return ((((u32) v->a << 24) | ((u32) v->r << 16) | ((u32) v->g << 8) | (u32) v->b) & keep) | konst;
+    }
+    return blast_color_mux(v);
+}
+
+static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const Vertex *verts2, s32 numVerts2, s32 matrix2,
+                         const Triangle *tris, s32 numTris, s32 texEnabled) {
+    // Per vertex, what the emit loop writes out: the framebuffer position, the
+    // depth and the colour. The clip-space position is kept for the triangles
+    // that cross the near plane.
+    f32 px[GFX_BLAST_MAX_VERTS], py[GFX_BLAST_MAX_VERTS], pz[GFX_BLAST_MAX_VERTS];
     u32 argb[GFX_BLAST_MAX_VERTS];
     shz_vec4_t cp[GFX_BLAST_MAX_VERTS];
     u32 behind = 0;
     u32 texture = 0;
+    u32 keep, konst;
     f32 uMul = 0.0f, vMul = 0.0f;
     f32 uS, vS;
     s32 i;
+    s32 total = numVerts + numVerts2;
+    s32 ccFast;
 
     if (verts == NULL || tris == NULL || numTris <= 0 || numVerts <= 0) {
         return;
     }
-    if (numVerts > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
+    if (total > GFX_BLAST_MAX_VERTS || numTris > GFX_BLAST_MAX_TRIS) {
         // Can't occur in a valid asset (the DL macros can't encode it).
         printf("blast: oversized batch %dv/%dt\n", (int) numVerts, (int) numTris);
         return;
     }
+    // The batch's vertices and triangles are rarely in the cache. Start on the
+    // first lines now, so they arrive while the state work below runs; the
+    // vertex loop fetches the rest a line ahead.
+    __builtin_prefetch(verts);
+    __builtin_prefetch(tris);
 
+    PROF_LAP_START();
     // The color must be per-batch trivial: shade byte or constant per channel.
     combiner_classify();
-    if (!sCcFast || sBillboard) {
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+    if (sBillboard) {
+        PROF_ADD(whyBillboard, numTris);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
 
@@ -1063,82 +2566,327 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
     // fallback's handle_polygon redoes this state, so these state calls are safe
     // to have run.
     if (!gfx_blast_viable()) {
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
-        return;
-    }
-
-    // Transform + project every vertex. A vertex behind the near plane just marks
-    // its bit; the triangles touching it go through the in-path clipper below.
-    shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[sCurMatrix]);
-    for (i = 0; i < numVerts; i++) {
-        const Vertex *v = &verts[i];
-        shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
-        f32 invW;
-
-        cp[i] = c;
-        argb[i] = ((u32) (sCcPass[3] ? v->a : sCcConst[3]) << 24) |
-                  ((u32) (sCcPass[0] ? v->r : sCcConst[0]) << 16) |
-                  ((u32) (sCcPass[1] ? v->g : sCcConst[1]) << 8) |
-                  (u32) (sCcPass[2] ? v->b : sCcConst[2]);
-        if (c.w < GFX_NEAR_W) {
-            behind |= 1u << i;
-            continue;
+        PROF_ADD(whyState, numTris);
+#if DKR_GFX_PROFILE
+        {
+            extern int gfx_blast_why(void);
+            sProf.whyStateKind[gfx_blast_why()] += numTris;
         }
-        invW = shz_invf_fsrra(c.w);
-        sx[i] = (c.x * invW * sVpScaleX) + sVpTransX;
-        sy[i] = sVpTransY - (c.y * invW * sVpScaleY);
-        iw[i] = invW;
-    }
-
-    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY)) {
-        // handle_polygon redoes this state, so falling back here is safe.
-        blast_fallback(verts, numVerts, tris, numTris, texEnabled);
+#endif
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
         return;
     }
+
+    // Each channel is the vertex's own or a per-batch constant; settle which
+    // once, so a vertex costs a mask and an or.
+    ccFast = sCcFast;
+    if (!ccFast) {
+        cc_prog_sync_current();
+    }
+    keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
+           (sCcPass[2] ? 0x000000FFu : 0);
+    konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) | (u32) sCcConst[2]) &
+            ~keep;
+    argb[0] = blast_color(&verts[0], ccFast, keep, konst);
+
+    // Open the batch before transforming: the list and the depth mapping are
+    // folded into each vertex as it is projected. The first vertex's alpha is
+    // what decides the list. A triangle crossing the near plane can come back
+    // as two.
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, numTris * 6, (void **) &sBlastRecord, (int) (argb[0] >> 24),
+                         &sBlastZMul, &sBlastZAdd)) {
+        // handle_polygon redoes this state, so falling back here is safe.
+        PROF_ADD(whyFull, numTris);
+        blast_fallback(verts, numVerts, verts2, numVerts2, matrix2, tris, numTris, texEnabled);
+        return;
+    }
+
+    PROF_ADD(blast, 1);
+    PROF_ADD(verts, total);
+#if DKR_GFX_PROFILE
+    if (!sCcFast) {
+        prof_slow_cc((u32) total);
+    }
+#endif
+    PROF_ADD(tris, numTris);
+    PROF_LAP(tState);
+#if DKR_GFX_PROFILE_SKIP == 2
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
+    return;
+#endif
+
+    // Transform + project every vertex, all the way to what the PVR is sent. A
+    // vertex behind the near plane just marks its bit; the triangles touching
+    // it go through the in-path clipper below.
+    {
+        // N64 viewport, then framebuffer scale, kept apart in that order so the
+        // result is the same float the emit used to compute per corner.
+        const f32 vpSX = sVpScaleX, vpSY = sVpScaleY, vpTX = sVpTransX, vpTY = sVpTransY;
+        const f32 outSX = sBlastSX, outSY = sBlastSY, zMul = sBlastZMul, zAdd = sBlastZAdd;
+        const u8 *triEnd = (const u8 *) (tris + numTris);
+        const u8 *triPref = (const u8 *) tris + 32;
+        s32 run;
+
+        i = 0;
+        for (run = 0; run < 2; run++) {
+            const Vertex *v = run ? verts2 : verts;
+            const Vertex *end = v + (run ? numVerts2 : numVerts);
+
+            if (v == end) {
+                continue;
+            }
+            shz_xmtrx_load_4x4((shz_mat4x4_t *) &sMatrices[run ? matrix2 : sCurMatrix]);
+            // Two vertices at a time, on two vector registers, so the second
+            // one's transform runs while the first is divided and mapped: one
+            // vertex alone is a single chain of dependent latencies. Every
+            // vertex is projected, even one behind the near plane; its numbers
+            // are garbage and nothing reads them, but the loop has no branch.
+            for (; v + 1 < end; v += 2, i += 2) {
+                shz_vec4_t c0, c1;
+                f32 inv0, inv1;
+
+                // The next vertex line, and one more line of the triangles
+                // until they are all on their way. Fetching a line that is
+                // already in the cache costs next to nothing.
+                __builtin_prefetch((const u8 *) v + 40);
+                if (triPref < triEnd) {
+                    __builtin_prefetch(triPref);
+                    triPref += 32;
+                }
+                c0 = shz_xmtrx_transform_vec4(shz_vec4_init(v[0].x, v[0].y, v[0].z, 1.0f));
+                c1 = blast_transform_fv4(v[1].x, v[1].y, v[1].z);
+                inv0 = shz_invf_fsrra(c0.w);
+                inv1 = shz_invf_fsrra(c1.w);
+                cp[i] = c0;
+                cp[i + 1] = c1;
+                behind |= ((u32) (c0.w < GFX_NEAR_W) << i) | ((u32) (c1.w < GFX_NEAR_W) << (i + 1));
+                px[i] = ((c0.x * inv0 * vpSX) + vpTX) * outSX;
+                py[i] = (vpTY - (c0.y * inv0 * vpSY)) * outSY;
+                pz[i] = (inv0 * zMul) + zAdd;
+                px[i + 1] = ((c1.x * inv1 * vpSX) + vpTX) * outSX;
+                py[i + 1] = (vpTY - (c1.y * inv1 * vpSY)) * outSY;
+                pz[i + 1] = (inv1 * zMul) + zAdd;
+            }
+            if (v < end) {
+                shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+                f32 invW = shz_invf_fsrra(c.w);
+
+                cp[i] = c;
+                behind |= (u32) (c.w < GFX_NEAR_W) << i;
+                px[i] = ((c.x * invW * vpSX) + vpTX) * outSX;
+                py[i] = (vpTY - (c.y * invW * vpSY)) * outSY;
+                pz[i] = (invW * zMul) + zAdd;
+                i++;
+            }
+        }
+    }
+
+    // The colours in a pass of their own, so the transform loop has no branch
+    // on the combiner for the compiler to make two copies of it over.
+    if (ccFast) {
+        for (i = 0; i < numVerts; i++) {
+            argb[i] = blast_color(&verts[i], TRUE, keep, konst);
+        }
+        for (i = 0; i < numVerts2; i++) {
+            argb[numVerts + i] = blast_color(&verts2[i], TRUE, keep, konst);
+        }
+    } else {
+        for (i = 0; i < numVerts; i++) {
+            argb[i] = blast_color_mux(&verts[i]);
+        }
+        for (i = 0; i < numVerts2; i++) {
+            argb[numVerts + i] = blast_color_mux(&verts2[i]);
+        }
+    }
+
+    if (gDcFadeOn) {
+        blast_fade_colors(argb, total);
+    }
+
+    PROF_LAP(tXform);
+#if DKR_GFX_PROFILE
+    if (sOtherModeL & FORCE_BL) {
+        extern int gfx_texture_kind(void);
+        u32 vtxAnd = 0xFF, outAnd = 0xFF000000u;
+
+        for (i = 0; i < numVerts; i++) {
+            vtxAnd &= verts[i].a;
+            outAnd &= argb[i];
+        }
+        prof_blend(sOtherModeL, sCombineW0, sCombineW1, gfx_texture_kind(), vtxAnd == 0xFF, outAnd == 0xFF000000u,
+                   (sGeometryMode & G_FOG) != 0, sPrimColor[3], sEnvColor[3], numTris);
+    }
+#endif
     if (texture != 0) {
         uMul = shz_invf_fsrra(32.0f * (f32) sTileWidth) * uS;
         vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
     }
 
-    for (i = 0; i < numTris; i++) {
+    {
+        // The output position lives in locals for the whole loop: the store
+        // queue address alternates between the two queues, a recording just
+        // advances.
+        pvr_vertex_t *rec = sBlastRecord;
+        u32 sq = pvr_dr_addr;
+
+        for (i = 0; i < numTris; i++) {
+            const Triangle *t = &tris[i];
+            s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
+            pvr_vertex_t *o0, *o1, *o2;
+
+            if (i0 >= total || i1 >= total || i2 >= total) {
+                continue;
+            }
+            if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
+                PROF_ADD(clipped, 1);
+#if DKR_GFX_PROFILE_SKIP != 1
+                // The cold clipper emits through the globals.
+                sBlastRecord = rec;
+                pvr_dr_addr = sq;
+                blast_clip_corners(t, cp, argb, uMul, vMul);
+                rec = sBlastRecord;
+                sq = pvr_dr_addr;
+#endif
+                continue;
+            }
+            if (!(t->flags & BACKFACE_DRAW)) {
+                // In framebuffer pixels: the scale is positive, so the winding
+                // is the same as in N64 pixels.
+                f32 area = ((px[i1] - px[i0]) * (py[i2] - py[i0])) - ((px[i2] - px[i0]) * (py[i1] - py[i0]));
+                if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                    PROF_ADD(culled, 1);
+                    continue;
+                }
+            }
+            PROF_ADD(sent, 1);
+            PROF_ADD(sentFrame, 1);
+#if DKR_GFX_PROFILE_SKIP == 1
+            continue;
+#endif
+#if DKR_FILL_PROF
+            gfx_prof_fill_vert(px[i0], py[i0], FALSE);
+            gfx_prof_fill_vert(px[i1], py[i1], FALSE);
+            gfx_prof_fill_vert(px[i2], py[i2], TRUE);
+#endif
+            if (rec) {
+                o0 = rec;
+                o1 = rec + 1;
+                o2 = rec + 2;
+                rec += 3;
+            } else {
+                o0 = (pvr_vertex_t *) (sq ^ 32);
+                o1 = (pvr_vertex_t *) sq;
+                o2 = (pvr_vertex_t *) (sq ^ 32);
+            }
+            blast_put(o0, rec != NULL, PVR_CMD_VERTEX, px[i0], py[i0], pz[i0], t->uv0.u * uMul, t->uv0.v * vMul,
+                      argb[i0]);
+            if (!rec) {
+                blast_sq_flush(o0);
+            }
+            blast_put(o1, rec != NULL, PVR_CMD_VERTEX, px[i1], py[i1], pz[i1], t->uv1.u * uMul, t->uv1.v * vMul,
+                      argb[i1]);
+            if (!rec) {
+                blast_sq_flush(o1);
+            }
+            blast_put(o2, rec != NULL, PVR_CMD_VERTEX_EOL, px[i2], py[i2], pz[i2], t->uv2.u * uMul, t->uv2.v * vMul,
+                      argb[i2]);
+            if (!rec) {
+                blast_sq_flush(o2);
+                // Three flips from sq leave it where the third vertex went.
+                sq ^= 32;
+            }
+        }
+        pvr_dr_addr = sq;
+        sBlastRecord = rec;
+    }
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
+    PROF_LAP(tEmit);
+}
+
+/**
+ * A G_TRIN over vertices that G_VTX already loaded and projected: sprites, whose
+ * quads share one appended load across several textures, and any batch the
+ * peephole could not fuse. Writes them straight out like the blast path when
+ * the state allows and no corner is behind the near plane; returns FALSE to
+ * leave the batch to the emulated path otherwise.
+ */
+static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
+    u32 texture = 0;
+    f32 uMul = 0.0f, vMul = 0.0f;
+    f32 uS, vS;
+    u32 keep, konst;
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        if (!VERTEX_PROJECTED(&sVerts[tris[i].vi0 % GFX_MAX_VERTS]) ||
+            !VERTEX_PROJECTED(&sVerts[tris[i].vi1 % GFX_MAX_VERTS]) ||
+            !VERTEX_PROJECTED(&sVerts[tris[i].vi2 % GFX_MAX_VERTS])) {
+            return FALSE;
+        }
+    }
+    combiner_classify();
+    if (!sCcFast) {
+        return FALSE;
+    }
+    if (texEnabled) {
+        texture = texture_current();
+    }
+    apply_render_mode();
+    gfx_set_fog((sGeometryMode & G_FOG) != 0, sFogColor);
+    gfx_bind_texture(texture);
+    apply_texture_filter();
+    gfx_set_texenv_modulate();
+    keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
+           (sCcPass[2] ? 0x000000FFu : 0);
+    konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) | (u32) sCcConst[2]) &
+            ~keep;
+    if (!gfx_blast_begin(&uS, &vS, &sBlastSX, &sBlastSY, count * 3, (void **) &sBlastRecord,
+                         (int) (((((u32) sVerts[tris[0].vi0 % GFX_MAX_VERTS].a << 24) & keep) | konst) >> 24),
+                         &sBlastZMul, &sBlastZAdd)) {
+        return FALSE;
+    }
+    if (texture != 0) {
+        uMul = shz_invf_fsrra(32.0f * (f32) sTileWidth) * uS;
+        vMul = shz_invf_fsrra(32.0f * (f32) sTileHeight) * vS;
+    }
+    PROF_ADD(tris, count);
+    for (i = 0; i < count; i++) {
         const Triangle *t = &tris[i];
-        s32 i0 = t->vi0, i1 = t->vi1, i2 = t->vi2;
+        const GfxVertex *a = &sVerts[t->vi0 % GFX_MAX_VERTS];
+        const GfxVertex *b = &sVerts[t->vi1 % GFX_MAX_VERTS];
+        const GfxVertex *c = &sVerts[t->vi2 % GFX_MAX_VERTS];
 
-        if (i0 >= numVerts || i1 >= numVerts || i2 >= numVerts) {
-            continue;
-        }
-        if (behind & ((1u << i0) | (1u << i1) | (1u << i2))) {
-            BlastClipVert cv[3];
-
-            cv[0].c = cp[i0];
-            cv[0].u = t->uv0.u * uMul;
-            cv[0].v = t->uv0.v * vMul;
-            cv[0].argb = argb[i0];
-            cv[1].c = cp[i1];
-            cv[1].u = t->uv1.u * uMul;
-            cv[1].v = t->uv1.v * vMul;
-            cv[1].argb = argb[i1];
-            cv[2].c = cp[i2];
-            cv[2].u = t->uv2.u * uMul;
-            cv[2].v = t->uv2.v * vMul;
-            cv[2].argb = argb[i2];
-            blast_clip_tri(cv, !(t->flags & BACKFACE_DRAW));
-            continue;
-        }
         if (!(t->flags & BACKFACE_DRAW)) {
-            f32 area = ((sx[i1] - sx[i0]) * (sy[i2] - sy[i0])) -
-                       ((sx[i2] - sx[i0]) * (sy[i1] - sy[i0]));
+            f32 area = ((b->sx - a->sx) * (c->sy - a->sy)) - ((c->sx - a->sx) * (b->sy - a->sy));
+
             if (area * GFX_FRONT_FACE_SIGN <= 0.0f) {
+                PROF_ADD(culled, 1);
                 continue;
             }
         }
-        blast_emit(sx[i0], sy[i0], iw[i0], t->uv0.u * uMul, t->uv0.v * vMul, argb[i0],
+        PROF_ADD(sent, 1);
+        PROF_ADD(sentFrame, 1);
+        blast_emit(a->sx, a->sy, shz_invf_fsrra(a->sw), t->uv0.u * uMul, t->uv0.v * vMul,
+                   ((((u32) a->a << 24) | ((u32) a->r << 16) | ((u32) a->g << 8) | (u32) a->b) & keep) | konst,
                    PVR_CMD_VERTEX);
-        blast_emit(sx[i1], sy[i1], iw[i1], t->uv1.u * uMul, t->uv1.v * vMul, argb[i1],
+        blast_emit(b->sx, b->sy, shz_invf_fsrra(b->sw), t->uv1.u * uMul, t->uv1.v * vMul,
+                   ((((u32) b->a << 24) | ((u32) b->r << 16) | ((u32) b->g << 8) | (u32) b->b) & keep) | konst,
                    PVR_CMD_VERTEX);
-        blast_emit(sx[i2], sy[i2], iw[i2], t->uv2.u * uMul, t->uv2.v * vMul, argb[i2],
+        blast_emit(c->sx, c->sy, shz_invf_fsrra(c->sw), t->uv2.u * uMul, t->uv2.v * vMul,
+                   ((((u32) c->a << 24) | ((u32) c->r << 16) | ((u32) c->g << 8) | (u32) c->b) & keep) | konst,
                    PVR_CMD_VERTEX_EOL);
     }
+    if (sBlastRecord) {
+        gfx_blast_end(sBlastRecord);
+        sBlastRecord = NULL;
+    }
+    return TRUE;
 }
 
 // ---------------------------------------------------------------------------
@@ -1163,103 +2911,173 @@ static void blast_render(const Vertex *verts, s32 numVerts, const Triangle *tris
 // black (Diddy's plane went dark).
 // ---------------------------------------------------------------------------
 
+// The combiner is compiled per state, not interpreted per vertex. Every input a
+// slot can name is one of a handful of values: a shade channel, a channel of
+// the first cycle's result, or a constant of the batch (0, 1, a PRIM or ENV
+// channel, the texel). All of them sit in one array, sCcSrc, and each slot of
+// each cycle becomes a pointer into it, so a channel costs four loads, a
+// subtract and a multiply-add: (a - b) * c + d, clamped, the same arithmetic in
+// the same order as the RDP formula always was here.
+enum {
+    CC_SRC_SHADE = 0, // 4: the vertex's shade, RGBA
+    CC_SRC_COMB = 4,  // 4: what the first cycle produced
+    CC_SRC_ZERO = 8,
+    CC_SRC_ONE = 9,
+    CC_SRC_TEXEL = 10, // 1 (white) for the modulate half, 0 for the additive half (combiner_eval)
+    CC_SRC_PRIM = 11,  // 4
+    CC_SRC_ENV = 15,   // 4
+    CC_SRC_COUNT = 19
+};
+static DKR_HOT f32 sCcSrc[CC_SRC_COUNT];
+// [cycle][R, G, B, A][a, b, c, d slot]: where in sCcSrc each slot reads.
+static DKR_HOT const f32 *sCcProg[2][4][4];
+static DKR_HOT s32 sCcProgCycles;   // 1 or 2
+// The state the program was compiled from, as combiner_classify keys it.
+static DKR_HOT u32 sCcProgW0, sCcProgW1, sCcProgCyc, sCcProgPrim, sCcProgEnv;
+static DKR_HOT s32 sCcProgValid;
+
 /**
- * A colour input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
+ * An RGB input from one of the 4-bit (a, b) or 3-bit (d) slots. The 4-bit slots
  * encode 0..7 and treat anything from 8 up as zero; the 3-bit d slot puts 1 at 6
  * and zero at 7. Slot 7 of a 4-bit slot is NOISE/K4, neither of which DKR uses,
- * so it lands in the zero default.
+ * so it lands in the zero default. `comb` is where COMBINED reads: the shade in
+ * the first cycle, the first cycle's result in the second.
  */
-static f32 sCcTexel = 1.0f; // the value TEXEL0/TEXEL1 take for this evaluation
-
-static void cc_rgb_in(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
-    s32 i;
-
+static u8 cc_src_rgb(u32 mux, s32 ch, u8 comb) {
     switch (mux) {
         case G_CCMUX_COMBINED:
-            for (i = 0; i < 3; i++) {
-                out[i] = comb[i];
-            }
-            return;
+            return (u8) (comb + ch);
         case G_CCMUX_TEXEL0:
         case G_CCMUX_TEXEL1: // no TEXEL1 yet; it follows TEXEL0
-            out[0] = out[1] = out[2] = sCcTexel;
-            return;
+            return CC_SRC_TEXEL;
         case G_CCMUX_1:
-            out[0] = out[1] = out[2] = 1.0f;
-            return;
+            return CC_SRC_ONE;
         case G_CCMUX_PRIMITIVE:
-            for (i = 0; i < 3; i++) {
-                out[i] = sPrimColor[i] / 255.0f;
-            }
-            return;
+            return (u8) (CC_SRC_PRIM + ch);
         case G_CCMUX_SHADE:
-            for (i = 0; i < 3; i++) {
-                out[i] = shade[i];
-            }
-            return;
+            return (u8) (CC_SRC_SHADE + ch);
         case G_CCMUX_ENVIRONMENT:
-            for (i = 0; i < 3; i++) {
-                out[i] = sEnvColor[i] / 255.0f;
-            }
-            return;
+            return (u8) (CC_SRC_ENV + ch);
         default:
-            out[0] = out[1] = out[2] = 0.0f;
-            return;
+            return CC_SRC_ZERO;
     }
 }
 
 /**
- * A colour input from the 5-bit multiplier (c) slot, which also reaches the alpha
+ * An RGB input from the 5-bit multiplier (c) slot, which also reaches the alpha
  * registers: the source of ENV_ALPHA and SHADE_ALPHA, both used by DKR's lighting.
  */
-static void cc_rgb_mul(u32 mux, const f32 shade[4], const f32 comb[4], f32 out[3]) {
-    f32 scalar;
-
+static u8 cc_src_mul(u32 mux, s32 ch, u8 comb) {
     switch (mux) {
         case G_CCMUX_COMBINED_ALPHA:
-            scalar = comb[3];
-            break;
+            return (u8) (comb + 3);
         case G_CCMUX_TEXEL0_ALPHA:
         case G_CCMUX_TEXEL1_ALPHA:
-            scalar = sCcTexel;
-            break;
+            return CC_SRC_TEXEL;
         case G_CCMUX_PRIMITIVE_ALPHA:
-            scalar = sPrimColor[3] / 255.0f;
-            break;
+            return CC_SRC_PRIM + 3;
         case G_CCMUX_SHADE_ALPHA:
-            scalar = shade[3];
-            break;
+            return CC_SRC_SHADE + 3;
         case G_CCMUX_ENV_ALPHA:
-            scalar = sEnvColor[3] / 255.0f;
-            break;
+            return CC_SRC_ENV + 3;
         default:
             // Everything below 7 is a plain colour input; LOD_FRAC and K5 are not
-            // used by DKR and fall through cc_rgb_in()'s zero default.
-            cc_rgb_in(mux, shade, comb, out);
-            return;
+            // used by DKR and fall through to cc_src_rgb()'s zero default.
+            return cc_src_rgb(mux, ch, comb);
     }
-    out[0] = out[1] = out[2] = scalar;
 }
 
 /** Every alpha slot is 3 bits and they all share one encoding. */
-static f32 cc_alpha_in(u32 mux, const f32 shade[4], const f32 comb[4]) {
+static u8 cc_src_alpha(u32 mux, u8 comb) {
     switch (mux) {
         case G_ACMUX_COMBINED:
-            return comb[3];
+            return (u8) (comb + 3);
         case G_ACMUX_TEXEL0:
         case G_ACMUX_TEXEL1:
-            return sCcTexel;
+            return CC_SRC_TEXEL;
         case G_ACMUX_1:
-            return 1.0f;
+            return CC_SRC_ONE;
         case G_ACMUX_PRIMITIVE:
-            return sPrimColor[3] / 255.0f;
+            return CC_SRC_PRIM + 3;
         case G_ACMUX_SHADE:
-            return shade[3];
+            return CC_SRC_SHADE + 3;
         case G_ACMUX_ENVIRONMENT:
-            return sEnvColor[3] / 255.0f;
+            return CC_SRC_ENV + 3;
         default:
-            return 0.0f; // G_ACMUX_0
+            return CC_SRC_ZERO; // G_ACMUX_0
     }
+}
+
+/** One cycle's slots, (a - b) * c + d, colour and alpha on their own muxes. */
+static void cc_compile_cycle(const f32 *prog[4][4], u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA,
+                             u8 comb) {
+    s32 ch;
+
+    for (ch = 0; ch < 3; ch++) {
+        prog[ch][0] = &sCcSrc[cc_src_rgb(a, ch, comb)];
+        prog[ch][1] = &sCcSrc[cc_src_rgb(b, ch, comb)];
+        prog[ch][2] = &sCcSrc[cc_src_mul(c, ch, comb)];
+        prog[ch][3] = &sCcSrc[cc_src_rgb(d, ch, comb)];
+    }
+    prog[3][0] = &sCcSrc[cc_src_alpha(aA, comb)];
+    prog[3][1] = &sCcSrc[cc_src_alpha(bA, comb)];
+    prog[3][2] = &sCcSrc[cc_src_alpha(cA, comb)];
+    prog[3][3] = &sCcSrc[cc_src_alpha(dA, comb)];
+}
+
+/**
+ * Make the compiled combiner match the current state. Cheap when it already
+ * does; run once per batch or rectangle, never per vertex.
+ */
+static void cc_prog_sync(u32 cyc, u32 prim, u32 env) {
+    s32 i;
+
+    if (sCcProgValid && sCombineW0 == sCcProgW0 && sCombineW1 == sCcProgW1 && cyc == sCcProgCyc &&
+        prim == sCcProgPrim && env == sCcProgEnv) {
+        return;
+    }
+    sCcProgW0 = sCombineW0;
+    sCcProgW1 = sCombineW1;
+    sCcProgCyc = cyc;
+    sCcProgPrim = prim;
+    sCcProgEnv = env;
+    sCcProgValid = TRUE;
+
+    sCcSrc[CC_SRC_ZERO] = 0.0f;
+    sCcSrc[CC_SRC_ONE] = 1.0f;
+    sCcSrc[CC_SRC_TEXEL] = 1.0f;
+    for (i = 0; i < 4; i++) {
+        sCcSrc[CC_SRC_PRIM + i] = sPrimColor[i] / 255.0f;
+        sCcSrc[CC_SRC_ENV + i] = sEnvColor[i] / 255.0f;
+    }
+
+    // Both cycles, if othermode says so: the directional-lighting materials are
+    // two-cycle and the second cycle is where the environment blend lives. The
+    // first cycle's COMBINED is the shade.
+    cc_compile_cycle(sCcProg[0], (sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F,
+                     (sCombineW1 >> 15) & 0x7, (sCombineW0 >> 12) & 0x7, (sCombineW1 >> 12) & 0x7,
+                     (sCombineW0 >> 9) & 0x7, (sCombineW1 >> 9) & 0x7, CC_SRC_SHADE);
+    sCcProgCycles = 1;
+    if (cyc == G_CYC_2CYCLE) {
+        cc_compile_cycle(sCcProg[1], (sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F,
+                         (sCombineW1 >> 6) & 0x7, (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7,
+                         (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, CC_SRC_COMB);
+        sCcProgCycles = 2;
+    }
+}
+
+/** The current state's (cycle type, PRIM, ENV) as the combiner keys them. */
+#define CC_KEY_CYC() (sOtherModeH & (3 << G_MDSFT_CYCLETYPE))
+#define CC_KEY_RGBA(c) (((u32) (c)[0] << 24) | ((u32) (c)[1] << 16) | ((u32) (c)[2] << 8) | (u32) (c)[3])
+
+/**
+ * Compile the combiner for the current state if it is not already. Only the
+ * batches that run it per vertex call this: most batches collapse to selects
+ * (combiner_classify) and their state changes, prim and env colours that differ
+ * per object, would otherwise recompile it batch after batch.
+ */
+static void cc_prog_sync_current(void) {
+    cc_prog_sync(CC_KEY_CYC(), CC_KEY_RGBA(sPrimColor), CC_KEY_RGBA(sEnvColor));
 }
 
 static f32 cc_clamp(f32 v) {
@@ -1276,46 +3094,32 @@ static u8 clamp_u8(f32 v) {
     return (u8) (cc_clamp(v) * 255.0f);
 }
 
-/** One cycle of (a - b) * c + d, colour and alpha on their own muxes. */
-static void cc_cycle(u32 a, u32 b, u32 c, u32 d, u32 aA, u32 bA, u32 cA, u32 dA, const f32 shade[4], const f32 in[4],
-                     f32 out[4]) {
-    f32 va[3], vb[3], vc[3], vd[3];
-    s32 i;
-
-    cc_rgb_in(a, shade, in, va);
-    cc_rgb_in(b, shade, in, vb);
-    cc_rgb_mul(c, shade, in, vc);
-    cc_rgb_in(d, shade, in, vd);
-
-    for (i = 0; i < 3; i++) {
-        out[i] = cc_clamp(((va[i] - vb[i]) * vc[i]) + vd[i]);
-    }
-    out[3] = cc_clamp(((cc_alpha_in(aA, shade, in) - cc_alpha_in(bA, shade, in)) * cc_alpha_in(cA, shade, in)) +
-                      cc_alpha_in(dA, shade, in));
-}
-
 /**
- * Run the combiner for one shade value. Both cycles, if othermode says so — the
- * directional-lighting materials are two-cycle and the second cycle is where the
- * environment blend lives, so stopping after cycle 0 (as we used to) throws away
- * the half that matters.
+ * Run the compiled combiner on one shade value, with the texel at `texel`
+ * (1 = white, 0 = black). The result is left in sCcSrc[CC_SRC_COMB..+3].
  */
-static void combiner_run(const f32 shade[4], f32 out[4]) {
-    f32 cycle0[4];
-    s32 i;
+static inline void cc_prog_run(const f32 shade[4], f32 texel) {
+    f32 *src = sCcSrc;
+    s32 cycle;
 
-    cc_cycle((sCombineW0 >> 20) & 0xF, (sCombineW1 >> 28) & 0xF, (sCombineW0 >> 15) & 0x1F, (sCombineW1 >> 15) & 0x7,
-             (sCombineW0 >> 12) & 0x7, (sCombineW1 >> 12) & 0x7, (sCombineW0 >> 9) & 0x7, (sCombineW1 >> 9) & 0x7,
-             shade, shade, cycle0);
+    src[CC_SRC_SHADE + 0] = shade[0];
+    src[CC_SRC_SHADE + 1] = shade[1];
+    src[CC_SRC_SHADE + 2] = shade[2];
+    src[CC_SRC_SHADE + 3] = shade[3];
+    src[CC_SRC_TEXEL] = texel;
+    for (cycle = 0; cycle < sCcProgCycles; cycle++) {
+        const f32 *const (*prog)[4] = sCcProg[cycle];
+        f32 out[4];
+        s32 ch;
 
-    if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) {
-        cc_cycle((sCombineW0 >> 5) & 0xF, (sCombineW1 >> 24) & 0xF, sCombineW0 & 0x1F, (sCombineW1 >> 6) & 0x7,
-                 (sCombineW1 >> 21) & 0x7, (sCombineW1 >> 3) & 0x7, (sCombineW1 >> 18) & 0x7, sCombineW1 & 0x7, shade,
-                 cycle0, out);
-    } else {
-        for (i = 0; i < 4; i++) {
-            out[i] = cycle0[i];
+        for (ch = 0; ch < 4; ch++) {
+            out[ch] = cc_clamp(((*prog[ch][0] - *prog[ch][1]) * *prog[ch][2]) + *prog[ch][3]);
         }
+        // Written after all four channels: the second cycle reads the first's.
+        src[CC_SRC_COMB + 0] = out[0];
+        src[CC_SRC_COMB + 1] = out[1];
+        src[CC_SRC_COMB + 2] = out[2];
+        src[CC_SRC_COMB + 3] = out[3];
     }
 }
 
@@ -1340,39 +3144,34 @@ static void combiner_run(const f32 shade[4], f32 out[4]) {
  * TEXEL0 * PRIM form DKR's 2D uses everywhere.
  */
 static void combiner_eval(const f32 shade[4], u8 lit[4], u8 unlit[3]) {
-    f32 on[4];  // texel = white
-    f32 off[4]; // texel = black
     s32 i;
 
-    sCcTexel = 1.0f;
-    combiner_run(shade, on);
-    sCcTexel = 0.0f;
-    combiner_run(shade, off);
-    sCcTexel = 1.0f;
-
-    for (i = 0; i < 3; i++) {
-        lit[i] = clamp_u8(on[i]);
-        unlit[i] = clamp_u8(off[i]);
+    cc_prog_sync_current();
+    cc_prog_run(shade, 1.0f);
+    for (i = 0; i < 4; i++) {
+        lit[i] = clamp_u8(sCcSrc[CC_SRC_COMB + i]);
     }
-    lit[3] = clamp_u8(on[3]);
+    cc_prog_run(shade, 0.0f);
+    for (i = 0; i < 3; i++) {
+        unlit[i] = clamp_u8(sCcSrc[CC_SRC_COMB + i]);
+    }
 }
 
 /**
  * Just the lit half. The 3D path (project) only ever consumes `lit` — the
  * texel=0 run that combiner_eval also does is thrown away there, so the second
- * combiner_run was pure waste on every 3D vertex in the frame. The 2D path still
- * needs both halves and keeps using combiner_eval.
+ * run was pure waste on every 3D vertex in the frame. The 2D path still needs
+ * both halves and keeps using combiner_eval.
+ *
+ * Per vertex, so it trusts the program to be current: every caller has run
+ * cc_prog_sync_current() for the batch.
  */
 static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
-    f32 on[4];
-    s32 i;
-
-    sCcTexel = 1.0f;
-    combiner_run(shade, on);
-
-    for (i = 0; i < 4; i++) {
-        lit[i] = clamp_u8(on[i]);
-    }
+    cc_prog_run(shade, 1.0f);
+    lit[0] = clamp_u8(sCcSrc[CC_SRC_COMB + 0]);
+    lit[1] = clamp_u8(sCcSrc[CC_SRC_COMB + 1]);
+    lit[2] = clamp_u8(sCcSrc[CC_SRC_COMB + 2]);
+    lit[3] = clamp_u8(sCcSrc[CC_SRC_COMB + 3]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1399,8 +3198,16 @@ static void combiner_eval_lit(const f32 shade[4], u8 lit[4]) {
 // misclassified; it fails both tests and takes the slow path.
 // ---------------------------------------------------------------------------
 // The state the classification is valid for. Any change and it is recomputed.
-static u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
-static s32 sCcSigValid = FALSE;
+static DKR_HOT u32 sCcSigW0, sCcSigW1, sCcSigCyc, sCcSigPrim, sCcSigEnv;
+static DKR_HOT s32 sCcSigValid = FALSE;
+static DKR_HOT u32 sCcCacheAt;
+
+// Materials alternate within a frame, so remember more than the last result.
+#define GFX_CC_CACHE 128
+static struct {
+    u32 w0, w1, cyc, prim, env;
+    u8 valid, fast, pass[4], konst[4];
+} sCcCache[GFX_CC_CACHE];
 
 static void combiner_classify(void) {
     // Three probes, not two: two mid-range ones would call a combiner that
@@ -1410,13 +3217,16 @@ static void combiner_classify(void) {
     static const u8 probeA[4] = { 13, 71, 149, 233 };
     static const u8 probeB[4] = { 200, 5, 96, 44 };
     static const u8 probeC[4] = { 0, 255, 255, 0 };
-    u32 cyc = sOtherModeH & (3 << G_MDSFT_CYCLETYPE);
-    u32 prim = (sPrimColor[0] << 24) | (sPrimColor[1] << 16) | (sPrimColor[2] << 8) | sPrimColor[3];
-    u32 env = (sEnvColor[0] << 24) | (sEnvColor[1] << 16) | (sEnvColor[2] << 8) | sEnvColor[3];
+    u32 cyc = CC_KEY_CYC();
+    u32 prim = CC_KEY_RGBA(sPrimColor);
+    u32 env = CC_KEY_RGBA(sEnvColor);
     f32 shade[4];
     u8 a[4], b[4], c[4];
     s32 i;
 
+#if DKR_GFX_PROFILE
+    sCcClassified++;
+#endif
     if (sCcSigValid && sCombineW0 == sCcSigW0 && sCombineW1 == sCcSigW1 && cyc == sCcSigCyc && prim == sCcSigPrim &&
         env == sCcSigEnv) {
         return; // still the combiner we classified last time
@@ -1427,6 +3237,26 @@ static void combiner_classify(void) {
     sCcSigPrim = prim;
     sCcSigEnv = env;
     sCcSigValid = TRUE;
+
+    {
+        u32 hash = sCombineW0 ^ (sCombineW1 * 0x9E3779B1u) ^ (prim * 0x85EBCA6Bu) ^ (env * 0xC2B2AE35u) ^ cyc;
+        u32 at = (hash ^ (hash >> 15)) & (GFX_CC_CACHE - 1);
+
+        if (sCcCache[at].valid && sCcCache[at].w0 == sCombineW0 && sCcCache[at].w1 == sCombineW1 &&
+            sCcCache[at].cyc == cyc && sCcCache[at].prim == prim && sCcCache[at].env == env) {
+            sCcFast = sCcCache[at].fast;
+            for (i = 0; i < 4; i++) {
+                sCcPass[i] = sCcCache[at].pass[i];
+                sCcConst[i] = sCcCache[at].konst[i];
+            }
+            return;
+        }
+        sCcCacheAt = at;
+    }
+#if DKR_GFX_PROFILE
+    sCcProbed++;
+#endif
+    cc_prog_sync(cyc, prim, env);
 
     for (i = 0; i < 4; i++) {
         shade[i] = probeA[i] * (1.0f / 255.0f);
@@ -1458,6 +3288,18 @@ static void combiner_classify(void) {
             break;
         }
     }
+
+    sCcCache[sCcCacheAt].w0 = sCombineW0;
+    sCcCache[sCcCacheAt].w1 = sCombineW1;
+    sCcCache[sCcCacheAt].cyc = cyc;
+    sCcCache[sCcCacheAt].prim = prim;
+    sCcCache[sCcCacheAt].env = env;
+    sCcCache[sCcCacheAt].fast = (u8) sCcFast;
+    for (i = 0; i < 4; i++) {
+        sCcCache[sCcCacheAt].pass[i] = (u8) sCcPass[i];
+        sCcCache[sCcCacheAt].konst[i] = sCcConst[i];
+    }
+    sCcCache[sCcCacheAt].valid = TRUE;
 }
 
 /**
@@ -1527,7 +3369,8 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
  * menu image. `w2`/`w3` are the two G_RDPHALF words that follow the opcode and
  * carry the texture coordinates.
  */
-static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
+static __attribute__((noinline)) void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
+    PROF_ADD(rects, 1);
     // Screen coordinates are 10.2 fixed point, texture coordinates S10.5, and
     // the per-pixel texture steps S5.10.
     f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
@@ -1571,7 +3414,7 @@ static void handle_texrect(u32 w0, u32 w1, u32 w2, u32 w3, s32 flip) {
 /**
  * G_FILLRECT — the letterbox bars, dialogue-box backgrounds and screen fades.
  */
-static void handle_fillrect(u32 w0, u32 w1) {
+static __attribute__((noinline)) void handle_fillrect(u32 w0, u32 w1) {
     f32 x0 = ((w1 >> 12) & 0xFFF) / 4.0f;
     f32 y0 = (w1 & 0xFFF) / 4.0f;
     f32 x1 = ((w0 >> 12) & 0xFFF) / 4.0f;
@@ -1579,6 +3422,9 @@ static void handle_fillrect(u32 w0, u32 w1) {
     u8 color[4];
     u8 unlit[3] = { 0, 0, 0 };
 
+    if (sFadeSkipRect) {
+        return;
+    }
     if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
         // Fill mode paints the fill colour flat, and its lower-right corner is
         // inclusive — one pixel further than the same rect in 1-cycle mode. The
@@ -1600,23 +3446,108 @@ static void handle_fillrect(u32 w0, u32 w1) {
     draw_2d_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.0f, color, unlit, 0);
 }
 
+/** The port's own tags, which ride in G_NOOP: a few a frame, so out of the hot code. */
+static __attribute__((noinline)) void handle_tag(u32 w1) {
+    if (w1 == PC_SCRAWL_TAG) {
+        pc_scrawl_draw();
+    } else if (w1 == PC_SWIRL_TAG) {
+        pc_swirl_draw();
+    } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
+        gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
+    } else if (w1 == PC_FADE_BEGIN_TAG) {
+        // Everything before it is drawn darkened already; what comes after it
+        // is drawn over the fade, as it is.
+        sFadeSkipRect = sFadeAlpha > 0 && sFadeAlpha < 255;
+        gfx_set_fade(255);
+    } else if (w1 == PC_FADE_END_TAG) {
+        sFadeSkipRect = FALSE;
+    }
+#if DKR_GFX_PROFILE
+    if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
+        scene_category((s32) (w1 & 0xFF));
+    }
+#endif
+}
+
+/** gSPViewport: the viewport map, and the rectangle it confines drawing to. */
+static __attribute__((noinline, cold)) void set_viewport(const Vp *vp) {
+    f32 halfW, halfH;
+
+    sVpScaleX = vp->vp.vscale[0] / 4.0f;
+    sVpScaleY = vp->vp.vscale[1] / 4.0f;
+    sVpTransX = vp->vp.vtrans[0] / 4.0f;
+    sVpTransY = vp->vp.vtrans[1] / 4.0f;
+
+    // The rectangle NDC +-1 maps onto. The scale carries a sign (y is commonly
+    // negative, since screen y runs the other way from clip y), so take it off
+    // before using it as a half-size.
+    halfW = (sVpScaleX < 0.0f) ? -sVpScaleX : sVpScaleX;
+    halfH = (sVpScaleY < 0.0f) ? -sVpScaleY : sVpScaleY;
+    sVpClipX0 = sVpTransX - halfW;
+    sVpClipX1 = sVpTransX + halfW;
+    sVpClipY0 = sVpTransY - halfH;
+    sVpClipY1 = sVpTransY + halfH;
+    apply_clip_rect();
+}
+
+#if DKR_GFX_PROFILE
+/** Profile only: level vertex loads, and those not drawn with the cull matrix. */
+static __attribute__((noinline)) void prof_level_vtx(void) {
+    if ((sCatCur == PC_PROF_CAT_LEVEL || sCatCur == PC_PROF_CAT_LEVEL_TR) && sLevelCullMatrix != NULL) {
+        sScene.levelVtx++;
+        if (memcmp(sMatrices[sCurMatrix], sLevelCullMatrix, sizeof(sMatrices[0])) != 0) {
+            sScene.levelVtxOtherMatrix++;
+        }
+    }
+}
+
+/** Profile only: why an unfused G_TRIN's vertices were not drawn by the blast path. */
+static __attribute__((noinline)) void prof_trin_why(u32 w0) {
+    u32 n = (((w0 >> 16) & 0xFF) >> 4) + 1;
+
+    if (sProfVtxWhy == 1) {
+        sProf.whyAppend += n;
+    } else if (sProfVtxWhy == 2) {
+        sProf.whyBillboard += n;
+    } else if (sProfVtxWhy == 3) {
+        sProf.whyShared += n;
+    } else {
+        sProf.whyLoose += n;
+    }
+}
+#endif
+
 /**
  * Interpret one display list. A `count` above zero means "at most this many
  * commands" — the task's own display list is bounded by its length rather than
  * a G_ENDDL, and G_DMADL likewise DMAs a fixed-size block. Zero means "run
  * until G_ENDDL", which is how nested G_DL lists terminate.
  */
-static void run_dl(const Gfx *dl, s32 count, s32 depth) {
+static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
     s32 i;
 
     if (dl == NULL || depth > GFX_MAX_DEPTH) {
         return;
     }
+    // One bound for both kinds of list, rather than testing count == 0 in the
+    // loop: -O3 unswitches on that test, which is a second copy of the whole
+    // interpreter for the instruction cache to hold.
+    if (count == 0) {
+        count = 0x7FFFFFFF;
+    }
 
-    for (i = 0; count == 0 || i < count; i++) {
-        u32 w0 = dl[i].words.w0;
-        u32 w1 = dl[i].words.w1;
-        u32 cmd = (w0 >> 24) & 0xFF;
+    for (i = 0; i < count; i++) {
+        u32 w0, w1, cmd;
+
+        // The game builds the frame's list in memory far larger than the
+        // cache, so each new line of it would be a miss. On entering a line,
+        // start on the one after next.
+        if (!((u32) &dl[i] & 31)) {
+            __builtin_prefetch(&dl[i + 8]);
+        }
+        w0 = dl[i].words.w0;
+        w1 = dl[i].words.w1;
+        cmd = (w0 >> 24) & 0xFF;
 
         // The immediate-mode opcodes are negative ints in gbi.h (G_ENDDL is
         // G_IMMFIRST-7 = -72), so every case has to be masked to the byte the
@@ -1625,7 +3556,7 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
             case G_MTX: {
                 s32 slot = (((w0 >> 16) & 0xFF) >> 6) & 3;
                 if (w1 != 0 && slot < 3) {
-                    mtx_to_float((const Mtx *) w1, sMatrices[slot]);
+                    PROF_TIME(tMtx, mtx_to_float((const Mtx *) w1, sMatrices[slot]));
                     sCurMatrix = slot;
                 }
                 break;
@@ -1652,63 +3583,102 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // 320x240 default, which looks right full-screen and falls apart
                 // the moment the game asks for a smaller one.
                 if (((w0 >> 16) & 0xFF) == G_MV_VIEWPORT && w1 != 0) {
-                    const Vp *vp = (const Vp *) w1;
-                    f32 halfW, halfH;
-
-                    sVpScaleX = vp->vp.vscale[0] / 4.0f;
-                    sVpScaleY = vp->vp.vscale[1] / 4.0f;
-                    sVpTransX = vp->vp.vtrans[0] / 4.0f;
-                    sVpTransY = vp->vp.vtrans[1] / 4.0f;
-
-                    // The rectangle NDC +-1 maps onto. The scale carries a sign
-                    // (y is commonly negative, since screen y runs the other way
-                    // from clip y), so take it off before using it as a half-size.
-                    halfW = (sVpScaleX < 0.0f) ? -sVpScaleX : sVpScaleX;
-                    halfH = (sVpScaleY < 0.0f) ? -sVpScaleY : sVpScaleY;
-                    sVpClipX0 = sVpTransX - halfW;
-                    sVpClipX1 = sVpTransX + halfW;
-                    sVpClipY0 = sVpTransY - halfH;
-                    sVpClipY1 = sVpTransY + halfH;
-                    apply_clip_rect();
+                    set_viewport((const Vp *) w1);
                 }
                 break;
             }
             case G_VTX: {
+#if DKR_GFX_PROFILE
+                prof_level_vtx();
+#endif
                 // Peephole: a G_VTX immediately followed by the one G_TRIN that
                 // consumes it is the common object/model batch shape, and the
                 // pair can be fused into the native blast path — skipping the
                 // sVerts staging and the whole per-corner emit machinery.
                 //
-                // Guards: no append (the anchor scheme needs sVerts), no
-                // billboard, and — because the fast path leaves sVerts stale —
-                // the command after the pair must not be another G_TRIN reusing
-                // these vertices. When blast_render itself falls back it does so
-                // by running the real handlers, which repopulates sVerts, so
-                // every fallback is exactly the unfused behaviour.
+                // Object models whose batch hangs off a second matrix arrive in
+                // two more shapes (see the batch loop in src/objects.c), both
+                // with matrix selects around the load:
+                //   G_VTX, select, G_TRIN                      one matrix
+                //   G_VTX, select, G_VTX append, select, G_TRIN  two matrices
+                // A select only changes which matrix later loads use, so the
+                // vertices transform with the matrix current at their own G_VTX
+                // and the last select is applied afterwards.
+                //
+                // Guards: no append on the first load (the anchor scheme needs
+                // sVerts), no billboard, and — because the fast path leaves
+                // sVerts stale — the command after the batch must not be another
+                // G_TRIN reusing these vertices. When blast_render itself falls
+                // back it does so by running the real handlers, which
+                // repopulates sVerts, so every fallback is exactly the unfused
+                // behaviour.
                 u32 params = (w0 >> 16) & 0xFF;
 
-                if (!(params & G_VTX_APPEND) && !sBillboard && (count == 0 || i + 1 < count) &&
-                    ((dl[i + 1].words.w0 >> 24) & 0xFF) == G_TRIN &&
-                    ((dl[i + 2].words.w0 >> 24) & 0xFF) != G_TRIN) {
-                    u32 tw0 = dl[i + 1].words.w0;
+                if (!(params & G_VTX_APPEND) && !sBillboard) {
+#define DL_HAS(k) (i + (k) < count)
+#define DL_OP(k) ((dl[i + (k)].words.w0 >> 24) & 0xFF)
+#define DL_SELECT(k) (DL_OP(k) == (u8) G_MOVEWORD && (dl[i + (k)].words.w0 & 0xFF) == G_MW_MVPMATRIX)
+#define DL_LAST_TRIN(k) (DL_OP(k) == G_TRIN && !(DL_HAS((k) + 1) && DL_OP((k) + 1) == G_TRIN))
+                    s32 numVerts = (s32) ((params >> 3) & 0x1F) + 1;
+                    const Vertex *verts2 = NULL;
+                    s32 numVerts2 = 0, matrix2 = 0, trin = 0, select = 0;
 
-                    blast_render((const Vertex *) w1, (s32) ((params >> 3) & 0x1F) + 1,
-                                 (const Triangle *) dl[i + 1].words.w1,
-                                 (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1, (s32) ((tw0 >> 16) & 1));
-                    i++;
-                    break;
+                    if (DL_HAS(1) && DL_LAST_TRIN(1)) {
+                        trin = 1;
+                    } else if (DL_HAS(2) && DL_SELECT(1) && DL_LAST_TRIN(2)) {
+                        trin = 2;
+                        select = 1;
+                    } else if (DL_HAS(4) && DL_SELECT(1) && DL_OP(2) == G_VTX &&
+                               ((dl[i + 2].words.w0 >> 16) & G_VTX_APPEND) && DL_SELECT(3) && DL_LAST_TRIN(4)) {
+                        u32 params2 = (dl[i + 2].words.w0 >> 16) & 0xFF;
+
+                        numVerts2 = (s32) ((params2 >> 3) & 0x1F) + 1;
+                        if (numVerts + numVerts2 <= GFX_BLAST_MAX_VERTS && dl[i + 2].words.w1 != 0) {
+                            verts2 = (const Vertex *) dl[i + 2].words.w1;
+                            matrix2 = (dl[i + 1].words.w1 >> 6) & 3;
+                            trin = 4;
+                            select = 3;
+                        }
+                    }
+#undef DL_HAS
+#undef DL_OP
+#undef DL_SELECT
+#undef DL_LAST_TRIN
+                    if (trin) {
+                        u32 tw0 = dl[i + trin].words.w0;
+
+                        PROF_TIME(tBlast, blast_render((const Vertex *) w1, numVerts, verts2, numVerts2, matrix2,
+                                                       (const Triangle *) dl[i + trin].words.w1,
+                                                       (s32) (((tw0 >> 16) & 0xFF) >> 4) + 1,
+                                                       (s32) ((tw0 >> 16) & 1)));
+                        if (select) {
+                            sCurMatrix = (dl[i + select].words.w1 >> 6) & 3;
+                        }
+                        i += trin;
+                        break;
+                    }
                 }
-                handle_vertex(w0, w1);
+#if DKR_GFX_PROFILE
+                sProfVtxWhy = (params & G_VTX_APPEND) ? 1 : sBillboard ? 2 :
+                              (((dl[i + 1].words.w0 >> 24) & 0xFF) == G_TRIN) ? 3 : 4;
+#endif
+                PROF_TIME(tVtx, handle_vertex(w0, w1));
                 break;
             }
             case G_TRIN:
-                handle_polygon(w0, w1);
+#if DKR_GFX_PROFILE
+                prof_trin_why(w0);
+#endif
+                PROF_TIME(tPoly, handle_polygon(w0, w1));
                 break;
             case G_DL:
                 run_dl((const Gfx *) w1, 0, depth + 1);
                 if (((w0 >> 16) & 0xFF) == G_DL_NOPUSH) {
                     return; // a branch, not a call
                 }
+                break;
+            case (u8) G_NOOP:
+                handle_tag(w1);
                 break;
             case G_DMADL:
                 run_dl((const Gfx *) w1, (w0 >> 16) & 0xFF, depth + 1);
@@ -1718,16 +3688,31 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 break;
             case (u8) G_SETTILE: {
                 // Only the tile the triangles actually render with matters.
+                //
+                // Every material loads its texture afresh, mostly the one the
+                // batch before drew with. The texture commands therefore only
+                // dirty the texture when what texture_lookup keys on changes;
+                // a new frame starts dirty all the same.
                 s32 tile = (w1 >> 24) & 0x7;
                 if (tile == G_TX_RENDERTILE) {
-                    sTileFmt = (w0 >> 21) & 0x7;
-                    sTileSiz = (w0 >> 19) & 0x3;
-                    sTilePalette = (w1 >> 20) & 0xF;
+                    u8 fmt = (w0 >> 21) & 0x7;
+                    u8 siz = (w0 >> 19) & 0x3;
+                    u8 palette = (w1 >> 20) & 0xF;
                     // cmt/cms are 2-bit fields (bit 0 mirror, bit 1 clamp), not
                     // flags. Reading only the low bit picked up mirror and
                     // dropped clamp entirely, so every clamped texture wrapped.
-                    sTileCmT = (w1 >> 18) & 0x3;
-                    sTileCmS = (w1 >> 8) & 0x3;
+                    u8 cmT = (w1 >> 18) & 0x3;
+                    u8 cmS = (w1 >> 8) & 0x3;
+
+                    if (fmt != sTileFmt || siz != sTileSiz || palette != sTilePalette || cmT != sTileCmT ||
+                        cmS != sTileCmS) {
+                        sTileFmt = fmt;
+                        sTileSiz = siz;
+                        sTilePalette = palette;
+                        sTileCmT = cmT;
+                        sTileCmS = cmS;
+                        sTexStateDirty = TRUE;
+                    }
                 }
                 break;
             }
@@ -1739,8 +3724,14 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                     u32 ult = w0 & 0xFFF;
                     u32 lrs = (w1 >> 12) & 0xFFF;
                     u32 lrt = w1 & 0xFFF;
-                    sTileWidth = ((lrs - uls) >> 2) + 1;
-                    sTileHeight = ((lrt - ult) >> 2) + 1;
+                    u16 width = ((lrs - uls) >> 2) + 1;
+                    u16 height = ((lrt - ult) >> 2) + 1;
+
+                    if (width != sTileWidth || height != sTileHeight) {
+                        sTileWidth = width;
+                        sTileHeight = height;
+                        sTexStateDirty = TRUE;
+                    }
                     sTileUls = uls;
                     sTileUlt = ult;
                 }
@@ -1750,33 +3741,44 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 // Latch the image being loaded: gDPLoadTLUT_pal16 issues its own
                 // G_SETTIMG for the palette afterwards, which would otherwise
                 // overwrite the texture address before the triangles draw.
-                sTexAddr = sTimgAddr;
                 // dxt is the low 12 bits. Zero means the RDP applied no odd-row
                 // swizzle on the way in, i.e. the asset is already swizzled.
-                sTexSwapped = ((w1 & 0xFFF) == 0);
+                if (sTexAddr != sTimgAddr || sTexSwapped != ((w1 & 0xFFF) == 0)) {
+                    sTexAddr = sTimgAddr;
+                    sTexSwapped = ((w1 & 0xFFF) == 0);
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_LOADTILE:
-                sTexAddr = sTimgAddr;
-                sTexSwapped = FALSE; // a tile load is row-by-row, never swizzled
+                // A tile load is row-by-row, never swizzled.
+                if (sTexAddr != sTimgAddr || sTexSwapped) {
+                    sTexAddr = sTimgAddr;
+                    sTexSwapped = FALSE;
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_LOADTLUT:
                 // The palette is whatever G_SETTIMG last pointed at.
-                sTlutAddr = sTimgAddr;
+                if (sTlutAddr != sTimgAddr) {
+                    sTlutAddr = sTimgAddr;
+                    sTexStateDirty = TRUE;
+                }
                 break;
             case (u8) G_TEXRECT:
             case (u8) G_TEXRECTFLIP: {
                 // A texture rectangle is three display-list words: the opcode,
                 // then G_RDPHALF_1 and G_RDPHALF_2 carrying the texture
                 // coordinates. Skip past them so they are not run as commands.
-                if (count != 0 && i + 2 >= count) {
+                if (i + 2 >= count) {
                     return; // truncated — the halves are not there to read
                 }
-                handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1, cmd == (u8) G_TEXRECTFLIP);
+                PROF_TIME(tRect, handle_texrect(w0, w1, dl[i + 1].words.w1, dl[i + 2].words.w1,
+                                                cmd == (u8) G_TEXRECTFLIP));
                 i += 2;
                 break;
             }
             case (u8) G_FILLRECT:
-                handle_fillrect(w0, w1);
+                PROF_TIME(tRect, handle_fillrect(w0, w1));
                 break;
             case (u8) G_SETSCISSOR: {
                 // 10.2 fixed point, lower-right inclusive — a full-screen scissor
@@ -1872,10 +3874,253 @@ static void run_dl(const Gfx *dl, s32 count, s32 depth) {
 extern void dc_audio_init(void);
 extern void dc_audio_start_thread(void);
 
-void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
-    sGfxFrameCount++;
+// Sampling profile (GFX_PROFILE=3): a timer interrupt notes where the program
+// is, a few thousand times a second, while a race level (or PROF_SAMPLE_MAP)
+// is loaded. Unlike the timers above it costs next to nothing, so it shows
+// where time really goes.
+// The counts land in build/dc/prof_samples.bin when the run exits by itself;
+// one count per 32 bytes of code from the load address.
+#if DKR_GFX_PROFILE >= 3
+#define PROF_SAMPLE_BASE 0x8c010000u
+#define PROF_SAMPLE_BUCKETS (1536u * 1024u / 32u) // the program's code is about 1.1 MB
+extern s32 gMapId;
+static u16 sProfSamples[PROF_SAMPLE_BUCKETS];
+static u32 sProfSampleInfo[4]; // samples taken, samples outside the range, bucket bytes, base
 
-    gfx_frame_begin();
+static void prof_sample_count(u32 pc) {
+    u32 bucket = (pc - PROF_SAMPLE_BASE) / 32u;
+
+    sProfSampleInfo[0]++;
+    if (bucket >= PROF_SAMPLE_BUCKETS) {
+        sProfSampleInfo[1]++;
+    } else if (sProfSamples[bucket] != 0xFFFF) {
+        sProfSamples[bucket]++;
+    }
+}
+
+#if DKR_GFX_PROFILE >= 4
+// GFX_PROFILE=4: only the late frames. A frame's samples wait here and are
+// counted once the next frame start shows that it was late.
+#define PROF_FRAME_SAMPLES 512
+static u32 sProfFramePc[PROF_FRAME_SAMPLES];
+static u32 sProfFrameCount;
+
+static void prof_sample_frame_end(s32 late) {
+    int old = irq_disable();
+    u32 i;
+
+    if (late) {
+        for (i = 0; i < sProfFrameCount; i++) {
+            prof_sample_count(sProfFramePc[i]);
+        }
+    }
+    sProfFrameCount = 0;
+    irq_restore(old);
+}
+#else
+#define prof_sample_frame_end(late) ((void) (late))
+#endif
+
+static void prof_sample_irq(irq_t code, irq_context_t *context, void *data) {
+    (void) code;
+    (void) data;
+    timer_clear(TMU1);
+#if DKR_PROF_SAMPLE_MAP >= 0
+    if (gMapId != DKR_PROF_SAMPLE_MAP) {
+        return;
+    }
+#else
+    if (gMapId != 18 && gMapId != 28) {
+        return;
+    }
+#endif
+#if DKR_GFX_PROFILE >= 4
+    if (sProfFrameCount < PROF_FRAME_SAMPLES) {
+        sProfFramePc[sProfFrameCount++] = context->pc;
+    }
+#else
+    prof_sample_count(context->pc);
+#endif
+}
+
+static void prof_sample_start(void) {
+    sProfSampleInfo[2] = 32;
+    sProfSampleInfo[3] = PROF_SAMPLE_BASE;
+    irq_set_handler(EXC_TMU1_TUNI1, prof_sample_irq, NULL);
+    timer_prime(TMU1, 3989, 1); // not a multiple of the frame rate
+    timer_start(TMU1);
+}
+
+static void prof_sample_write(void) {
+    file_t file;
+
+    timer_stop(TMU1);
+    file = fs_open("/pc/build/dc/prof_samples.bin", O_WRONLY | O_CREAT | O_TRUNC);
+    if (file != FILEHND_INVALID) {
+        fs_write(file, sProfSampleInfo, sizeof(sProfSampleInfo));
+        fs_write(file, sProfSamples, sizeof(sProfSamples));
+        fs_close(file);
+    }
+}
+#else
+#define prof_sample_start() ((void) 0)
+#define prof_sample_write() ((void) 0)
+#define prof_sample_frame_end(late) ((void) (late))
+#endif
+
+// Debug view (DEBUG_VIEW=1): hold a frame and switch how cutout textures are
+// stored and drawn, to compare the modes on a still picture.
+//
+//   both triggers + X   hold or release the current frame
+//   both triggers + Y   next mode; the squares at the top left show which
+//
+//   1  as before: 4-4-4-4
+//   2  5-5-5-1
+//   3  5-5-5-1, invisible texels coloured from their neighbours (the default)
+#ifndef DKR_DEBUG_VIEW
+#define DKR_DEBUG_VIEW 0
+#endif
+#if DKR_DEBUG_VIEW
+extern void gfx_set_cutout_mode(int use1555, int bleed);
+static s32 sDebugHold;
+static s32 sDebugMode = 3;
+
+static void debug_view_apply(void) {
+    static const u8 modes[3][2] = { { 0, 0 }, { 1, 0 }, { 1, 1 } };
+    s32 i;
+
+    gfx_set_cutout_mode(modes[sDebugMode - 1][0], modes[sDebugMode - 1][1]);
+    // The format is chosen when a texture is created, so make them all anew.
+    for (i = 0; i < sTexCacheCount; i++) {
+        if (!sTexCache[i].prebuilt) {
+            gfx_delete_texture(sTexCache[i].handle);
+        }
+    }
+    sTexCacheCount = 0;
+    memset(sTexHint, 0, sizeof(sTexHint));
+    sTexStateDirty = TRUE;
+    printf("DEBUG VIEW: mode %d\n", (int) sDebugMode);
+}
+
+static void debug_view_poll(void) {
+    static u32 sLast;
+    maple_device_t *pad = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    cont_state_t *state = pad ? (cont_state_t *) maple_dev_status(pad) : NULL;
+    u32 buttons = (state && state->ltrig > 128 && state->rtrig > 128) ? state->buttons : 0;
+    u32 pressed = buttons & ~sLast;
+
+    sLast = buttons;
+    if (pressed & CONT_X) {
+        sDebugHold = !sDebugHold;
+        printf("DEBUG VIEW: frame %s\n", sDebugHold ? "held" : "released");
+    }
+    if (pressed & CONT_Y) {
+        sDebugMode = (sDebugMode % 3) + 1;
+        debug_view_apply();
+    }
+}
+
+static void debug_view_draw(void) {
+    static const u8 white[4] = { 255, 255, 255, 255 }, black[3] = { 0, 0, 0 };
+    s32 i;
+
+    for (i = 0; i < sDebugMode; i++) {
+        draw_2d_quad(8.0f + (i * 8.0f), 8.0f, 14.0f + (i * 8.0f), 14.0f, 0.0f, 0.0f, 0.0f, 0.0f, white, black, 0);
+    }
+}
+#endif
+
+static void gfx_task_draw(void *dlBegin, void *dlEnd);
+
+#if DKR_ENJ_LOOP
+static void gfx_task_queue(void *dlBegin, void *dlEnd);
+#endif
+
+void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
+#if DKR_ENJ_LOOP
+    // enDjinn draws it once the frame's iteration returns (pc_enj_loop_run).
+    gfx_task_queue(dlBegin, dlEnd);
+    return;
+#endif
+    gfx_task_draw(dlBegin, dlEnd);
+    pc_scene_frame_shown();
+#if DKR_DEBUG_VIEW
+    // The game does not run while a frame is held: its last display list is
+    // drawn again each field, so a mode change shows on the same picture.
+    debug_view_poll();
+    while (sDebugHold) {
+        gfx_task_draw(dlBegin, dlEnd);
+        debug_view_poll();
+    }
+#endif
+}
+
+typedef struct {
+    void *begin, *end;
+} FrameDl;
+#if DKR_GFX_PROFILE
+static u64 sProfT1, sProfT2; // the walk's start and end, for prof_frame
+static s32 sProfStallKind;   // which stall the counter counts this frame: 0 data, 1 code
+#endif
+
+/** One frame's display-list walk, inside the opaque list. */
+static void frame_walk(void *data) {
+    const FrameDl *frame = data;
+
+#if DKR_GFX_PROFILE
+    sProfT1 = pc_uptime_ns();
+    {
+        // The previous scene was flipped by now (gfx_frame_begin waits for the
+        // PVR), so the vblank count between two frame starts is how many
+        // fields the frame before took.
+        u32 vbl = (u32) pvr_get_vbl_count();
+        if (sSceneVbl != 0 && pc_scene_is_ready()) {
+            u32 fields = vbl - sSceneVbl;
+            prof_sample_frame_end(fields > (u32) PC_LOGIC_UPDATE_RATE);
+            sScene.frames++;
+            {
+                extern s32 gMapId;
+                sScene.map = gMapId;
+            }
+            if (fields > (u32) PC_LOGIC_UPDATE_RATE) {
+                u32 pvr = sLastPvrUs[0];
+
+                if (sLastPvrUs[1] > pvr) pvr = sLastPvrUs[1];
+                if (sLastPvrUs[2] > pvr) pvr = sLastPvrUs[2];
+                sScene.lateFrames++;
+                sScene.lateFields += fields - (u32) PC_LOGIC_UPDATE_RATE;
+                // Where a frame was lost, to find it again in a capture: time
+                // since boot, the scene, its frame, and what the frame cost.
+                pc_prof_log("LATE t=%lu ms map %ld frame %lu fields %lu cpu %lu us dl %lu us pvr %lu us fade %d\n",
+                            (unsigned long) (pc_uptime_ns() / 1000000u), (long) sScene.map,
+                            (unsigned long) sScene.frames, (unsigned long) fields, (unsigned long) sLastWorkUs,
+                            (unsigned long) sLastDlUs, (unsigned long) pvr, (int) gDcFadeOn);
+            }
+            if (fields > sScene.maxFields) sScene.maxFields = fields;
+        } else {
+            prof_sample_frame_end(0);
+        }
+        sSceneVbl = vbl;
+    }
+    sCatCur = PC_PROF_CAT_OTHER;
+    gfx_prof_set_category(sCatCur);
+#if DKR_PROF_SKIP == 999
+    prof_skip_next_frame();
+#endif
+    gfx_fill_frame(sSceneVbl != 0 && pc_scene_is_ready());
+    sCatStart = sProfT1;
+    sCatTrisStart = sProf.tris;
+    {
+        // The second performance counter (the first is KOS's clock) counts the
+        // cycles the pipeline waits on cache misses, during the walk only:
+        // operand-cache and instruction-cache misses take turns, a frame each.
+        sProfWalkSp = (u32) __builtin_frame_address(0);
+        // Starting it clears it.
+        sProfStallKind ^= 1;
+        perf_cntr_start(PRFC1, sProfStallKind ? PMCR_PIPELINE_FREEZE_BY_ICACHE_MISS_MODE :
+                                                PMCR_PIPELINE_FREEZE_BY_DCACHE_MISS_MODE, PMCR_COUNT_CPU_CYCLES);
+    }
+#endif
 
     sCurMatrix = 0;
     sBillboard = FALSE;
@@ -1887,10 +4132,19 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sTlutAddr = 0;
     sTileWidth = 0;
     sTileHeight = 0;
+    sTexStateDirty = TRUE;
     sTileUls = 0;
     sTileUlt = 0;
     sOtherModeL = 0;
     sGeometryMode = GFX_GEOMETRY_MODE_INIT;
+    // The fade the display list ends with, drawn into the frame (dreamcast/cover.h).
+    sFadeAlpha = sFadeAnnounced;
+    sFadeAnnounced = -1;
+    sFadeSkipRect = FALSE;
+    gfx_set_fade((sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255);
+#if DKR_GFX_PROFILE
+    sScene.fadeFrames += gDcFadeOn != 0;
+#endif
 
     // The list sets its own scissor and viewport before it draws anything
     // (src/rcp_dkr.c), but don't inherit last frame's rects until it does.
@@ -1900,10 +4154,148 @@ void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
     sScisY1 = sVpClipY1 = (f32) N64_SCREEN_H;
     gfx_disable_scissor();
 
-    run_dl((const Gfx *) dlBegin, (const Gfx *) dlEnd - (const Gfx *) dlBegin, 0);
+    run_dl((const Gfx *) frame->begin, (const Gfx *) frame->end - (const Gfx *) frame->begin, 0);
+#if DKR_GFX_PROFILE
+    scene_category(PC_PROF_CAT_OTHER);
+#endif
+#if DKR_DEBUG_VIEW
+    debug_view_draw();
+#endif
+#if DKR_GFX_PROFILE
+    sProfT2 = pc_uptime_ns();
+    sScene.walkStall[sProfStallKind] += perf_cntr_count(PRFC1);
+    {
+        int pt, tr;
+        gfx_recorded_words(&pt, &tr);
+        {
+            extern void gfx_tr_stats(unsigned int out[10]);
+            unsigned int tr8[10];
+            s32 j;
 
-    gfx_frame_end();
+            gfx_tr_stats(tr8);
+            {
+                extern void gfx_nodepth_stats(unsigned int out[4]);
+                unsigned int nd[4];
+
+                gfx_nodepth_stats(nd);
+                for (j = 0; j < 4; j++) {
+                    sProf.noDepth[j] += nd[j];
+                }
+            }
+            for (j = 0; j < 10; j++) {
+                sProf.trStats[j] += tr8[j];
+            }
+        }
+        if ((u32) pt > sProf.ptWords) sProf.ptWords = (u32) pt;
+        if ((u32) tr > sProf.trWords) sProf.trWords = (u32) tr;
+    }
+#endif
+
 }
+
+static void gfx_task_draw(void *dlBegin, void *dlEnd) {
+    FrameDl frame = { dlBegin, dlEnd };
+#if DKR_GFX_PROFILE
+    u64 profT0 = pc_uptime_ns();
+#endif
+    sGfxFrameCount++;
+
+#if DKR_ENJ_RENDER
+    gfx_frame_render(frame_walk, &frame);
+#else
+    gfx_frame_begin();
+    frame_walk(&frame);
+    gfx_frame_end();
+#endif
+#if DKR_GFX_PROFILE
+    prof_frame(profT0, sProfT1, sProfT2, pc_uptime_ns());
+#endif
+#if DKR_AUTO_EXIT_SECONDS
+    // Unattended measurement runs: return to the loader by ourselves.
+    if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
+#if DKR_GFX_PROFILE
+        pc_scene_prof_report();
+#endif
+        prof_sample_write();
+#if DKR_GFX_PROFILE
+        pc_prof_log_flush();
+#endif
+#if DKR_ASSET_TRACE
+        {
+            extern void pc_asset_trace_report(void);
+            pc_asset_trace_report();
+        }
+#endif
+        arch_exit();
+    }
+#endif
+}
+
+#if DKR_ENJ_LOOP
+#include <enDjinn/enj_mode.h>
+#include <enDjinn/enj_render.h>
+#include <enDjinn/enj_state.h>
+// ENJ_LOOP=1: enDjinn's enj_state_run is the game loop. Each frame it calls
+// the game's iteration (thread3_frame), which queues the display list it built
+// through gfx_task_queue; enDjinn then submits the scene, and its post-render
+// callback finishes the frame as gfx_task_draw's tail does.
+static FrameDl sQueuedFrame;
+#if DKR_GFX_PROFILE
+static u64 sQueuedT0;
+#endif
+
+static void gfx_task_queue(void *dlBegin, void *dlEnd) {
+    sQueuedFrame.begin = dlBegin;
+    sQueuedFrame.end = dlEnd;
+#if DKR_GFX_PROFILE
+    sQueuedT0 = pc_uptime_ns();
+#endif
+    sGfxFrameCount++;
+    gfx_frame_queue(frame_walk, &sQueuedFrame);
+}
+
+static void enj_frame_submitted(void *data) {
+    (void) data;
+    if (sQueuedFrame.begin == NULL) {
+        return; // nothing was drawn this frame
+    }
+    sQueuedFrame.begin = NULL;
+    gfx_frame_submitted();
+    pc_scene_frame_shown();
+#if DKR_GFX_PROFILE
+    prof_frame(sQueuedT0, sProfT1, sProfT2, pc_uptime_ns());
+#endif
+#if DKR_AUTO_EXIT_SECONDS
+    if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
+#if DKR_GFX_PROFILE
+        pc_scene_prof_report();
+#endif
+        prof_sample_write();
+#if DKR_GFX_PROFILE
+        pc_prof_log_flush();
+#endif
+#if DKR_ASSET_TRACE
+        {
+            extern void pc_asset_trace_report(void);
+            pc_asset_trace_report();
+        }
+#endif
+        arch_exit();
+    }
+#endif
+}
+
+void pc_enj_loop_run(void (*frame)(void *)) {
+    static enj_mode_t sGameMode;
+
+    sGameMode.mode_updater = frame;
+    sGameMode.no_soft_reset = 1;
+    strncpy(sGameMode.name, "dkr", sizeof(sGameMode.name) - 1);
+    enj_render_post_callback_set(enj_frame_submitted, NULL);
+    enj_mode_push(&sGameMode);
+    enj_state_run();
+}
+#endif
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
     (void)addr;
@@ -1913,6 +4305,7 @@ static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
 
 int main(int argc, char **argv) {
     cont_btn_callback(0, CONT_RESET_BUTTONS, cont_reset_btn_callback_);
+    prof_sample_start();
 
     printf("=== DKR PC ===\n");
     sHostThread.id = 3;

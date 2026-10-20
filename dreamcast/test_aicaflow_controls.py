@@ -34,15 +34,6 @@ prefix = r'''
 #include <string.h>
 #include <aicaflow/host.h>
 #include <aicaflow/bank.h>
-typedef struct { unsigned count; } semaphore_t;
-#define SEM_INITIALIZER(n) { n }
-static jmp_buf blocked;
-static int sem_wait(semaphore_t *sem) {
-    if (!sem->count) longjmp(blocked, 1);
-    --sem->count;
-    return 0;
-}
-static int sem_signal(semaphore_t *sem) { ++sem->count; return 0; }
 static unsigned sleeps;
 static void thd_sleep(int ms) { (void)ms; ++sleeps; }
 static uint64_t timer_us_gettime64(void) { return 0; }
@@ -129,15 +120,12 @@ names = [
     "dkr_afx_sfx_pan", "dkr_afx_sfx_fx", "dkr_afx_music_gain", "dkr_afx_music_tempo",
     "dkr_afx_music_lane_mute", "dkr_afx_music_lane_volume", "dkr_afx_music_lane_fade",
     "dkr_afx_scene_reverb", "jingle_flow", "music_flow_for", "fallback_bank_active",
-    "fallback_quiesce", "fallback_release_idle", "fallback_request", "sfx_loader",
+    "fallback_quiesce", "fallback_release_idle", "fallback_request", "dkr_afx_frame",
     "song_in_use", "song_release", "song_load", "music_retire",
     "voices_release_one", "voices_load", "dkr_afx_voices_prepare",
     "dkr_afx_music_prepare", "dkr_afx_music_prefetch", "dkr_afx_music_play", "dkr_afx_update",
 ]
 checks = r'''
-static void run(void *(*worker)(void *)) {
-    if (!setjmp(blocked)) worker(0);
-}
 int main(void) {
     uint16_t fields[AFX_FIELD_COUNT] = {0};
     dkr_sfx_sound_t sound = { .channels = 1, .fields = fields };
@@ -175,15 +163,20 @@ int main(void) {
     sMuteDirty = 0; dkr_afx_music_lane_mute(2, 1); assert(!sMuteDirty);
     dkr_afx_music_lane_mute(2, 0); assert(sMuteDirty == 4);
     sVolumeDirty = 0; dkr_afx_music_lane_volume(16, 0); assert(!sVolumeDirty);
-    /* An idle worker blocks. Multiple queued SFX requests each wake the worker. */
-    run(sfx_loader); assert(!fallbackLoads);
+    /* The game thread's frame call loads nothing until a sound is requested,
+     * then every requested sound once, without waiting. */
+    sReady = 1;
+    dkr_afx_frame(); assert(!fallbackLoads);
     assert(fallback_request(100) == -AFX_BUSY);
     assert(fallback_request(100) == -AFX_BUSY);
     assert(fallback_request(101) == -AFX_BUSY);
-    assert(sSfxLoadWake.count == 2);
-    run(sfx_loader); assert(fallbackLoads == 2 && !sSfxLoadWake.count && !sleeps);
+    dkr_afx_frame(); assert(fallbackLoads == 2 && !sleeps);
+    /* A scene change drops requests instead of waiting for them. */
+    assert(fallback_request(102) == -AFX_BUSY);
+    fallback_quiesce(); assert(!sleeps);
+    dkr_afx_frame(); assert(fallbackLoads == 2);
     /* Jingles are resident: preparing one loads nothing. */
-    sReady = 1; sJingleFlows[0] = 2;
+    sJingleFlows[0] = 2;
     assert(!dkr_afx_music_prepare(2) && !bankLoads && !loads);
     /* A song's samples and flow are resident when prepare returns. */
     assert(!dkr_afx_music_prepare(22));
@@ -242,4 +235,4 @@ with tempfile.TemporaryDirectory(prefix="dkr-audio-check-") as directory:
                     "-I" + str(root / "third_party/aicaflow/driver/format/include"),
                     str(path / "check.c"), "-o", str(path / "check")], check=True)
     subprocess.run([str(path / "check")], check=True, timeout=10)
-print("AICAflow controls, songs and worker wakeups: OK")
+print("AICAflow controls, songs and fallback loads: OK")
