@@ -54,10 +54,7 @@ static void sndp_aicaflow_started(ALSoundState *state) {
     state->flags |= SOUND_FLAG_PLAYING;
     state->state = SOUND_STATE_PLAYING;
     ++gNumActiveSounds;
-    sndp_aicaflow_volume(state);
-    dkr_afx_sfx_pitch(state, state->pitch);
-    dkr_afx_sfx_pan(state, state->pan);
-    dkr_afx_sfx_fx(state, state->fxmix);
+    dkr_afx_sfx_start_controls(state, sndp_aicaflow_gain(state), state->pitch, state->pan, state->fxmix);
 }
 
 int sndp_aicaflow_voice_available(void *owner) {

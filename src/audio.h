@@ -56,6 +56,8 @@ void music_prepare(u8 seqID);
 void music_prefetch(u8 seqID);
 void sound_scene_prepare(u16 level);
 void sound_scene_stop(void);
+void sound_racer_voice_want(s32 character, s32 isPlayer);
+void sound_racer_voices_prepare(void);
 void music_voicelimit_set(u8 voiceLimit);
 void music_voicelimit_change_off(void);
 void music_voicelimit_change_on(void);

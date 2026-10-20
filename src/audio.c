@@ -417,6 +417,8 @@ void music_prepare(u8 seqID) {
 #ifdef DKR_AICAFLOW
     int result;
 
+    /* A blocked change keeps the current song, which shares the song's AICA space. */
+    if (gBlockMusicChange || gMusicSliderVolume == 0) return;
     pc_audio_lock();
     result = dkr_afx_music_prepare(seqID);
     pc_audio_unlock();
@@ -460,6 +462,46 @@ void sound_scene_prepare(u16 level) {
     if (result) stubbed_printf("AICAFLOW: scene SFX for level %d was not prepared (%d)\n", level, result);
 #else
     (void)level;
+#endif
+}
+
+#ifdef DKR_AICAFLOW
+static u8 sVoiceCharacters[8];
+static u8 sVoicePlayers;
+static u8 sVoiceRacers;
+#endif
+
+/**
+ * Notes a racer whose voice clips the coming race can play. Players are heard
+ * far more than computer racers, so their characters go first.
+ */
+void sound_racer_voice_want(s32 character, s32 isPlayer) {
+#ifdef DKR_AICAFLOW
+    s32 i;
+
+    if (sVoiceRacers >= ARRAY_COUNT(sVoiceCharacters)) return;
+    i = sVoiceRacers++;
+    if (isPlayer) {
+        for (; i > sVoicePlayers; i--) sVoiceCharacters[i] = sVoiceCharacters[i - 1];
+        sVoicePlayers++;
+    }
+    sVoiceCharacters[i] = character;
+#else
+    (void)character;
+    (void)isPlayer;
+#endif
+}
+
+/**
+ * Loads the voices of the racers noted since the last call. Runs once the
+ * racers exist, which is after the level's own sounds and song are loaded.
+ */
+void sound_racer_voices_prepare(void) {
+#ifdef DKR_AICAFLOW
+    pc_audio_lock();
+    dkr_afx_voices_prepare(sVoiceCharacters, sVoiceRacers);
+    pc_audio_unlock();
+    sVoicePlayers = sVoiceRacers = 0;
 #endif
 }
 

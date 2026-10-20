@@ -2,6 +2,7 @@
 #include "memory.h"
 #include "asset_enums.h"
 #include "asset_loading.h"
+#include "audio.h"
 #include "audio_spatial.h"
 #include "audio_vehicle.h"
 #include "audiosfx.h"
@@ -1606,6 +1607,9 @@ void track_setup_racers(Vehicle vehicle, u32 entranceID, s32 playerCount) {
             } else {
                 curRacer->characterId = settings->racers[var_s4].character;
             }
+            if (vehicle < VEHICLE_BOSSES) {
+                sound_racer_voice_want(curRacer->characterId, curRacer->playerIndex != PLAYER_COMPUTER);
+            }
             if (raceType == RACETYPE_CHALLENGE_BATTLE) {
                 curRacer->bananas = 8;
             } else {
@@ -1639,6 +1643,7 @@ void track_setup_racers(Vehicle vehicle, u32 entranceID, s32 playerCount) {
             }
         }
     }
+    sound_racer_voices_prepare();
     var_s4 = 0;
     if (raceType != RACETYPE_BOSS) {
         D_8011AD3C = 0;
