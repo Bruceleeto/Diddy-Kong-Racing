@@ -31,8 +31,8 @@ command -v sh-elf-gcc >/dev/null || command -v "${KOS_CC:-kos-cc}" >/dev/null ||
     fail "the sh-elf toolchain is not on PATH; source your KallistiOS environ.sh first"
 pvrtex=${PVRTEX:-$KOS_BASE/utils/pvrtex/pvrtex}
 [[ -x $pvrtex ]] || fail "no pvrtex at $pvrtex; build it with: make -C $KOS_BASE/utils/pvrtex"
-[[ -f $KOS_BASE/addons/lib/dreamcast/libsh4zam.a ]] ||
-    fail "the sh4zam addon is not installed in $KOS_BASE/addons (see https://github.com/gyrovorbis/sh4zam)"
+[[ -f $KOS_BASE/addons/lib/dreamcast/libsh4zam.a || -f ${KOS_PORTS:-$KOS_BASE/../kos-ports}/lib/libsh4zam.a ]] ||
+    fail "sh4zam is not installed in $KOS_BASE/addons or kos-ports (see https://github.com/gyrovorbis/sh4zam)"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' 2>/dev/null ||
     fail "Python 3.10 or newer is needed as python3"
 if [[ $cdi == 1 ]]; then
