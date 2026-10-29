@@ -2589,6 +2589,8 @@ static __attribute__((noinline)) u32 blast_color_mux(const Vertex *v) {
     return ((u32) lit[3] << 24) | ((u32) lit[0] << 16) | ((u32) lit[1] << 8) | (u32) lit[2];
 }
 
+static void blast_colors_mux(u32 *argb, const Vertex *verts, s32 count);
+
 /**
  * A vertex's colour in a blast batch: the shade bytes through the per-batch
  * keep/constant masks when the combiner collapses (sCcFast), the real mux
@@ -2785,12 +2787,8 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
             argb[numVerts + i] = blast_color(&verts2[i], TRUE, keep, konst);
         }
     } else {
-        for (i = 0; i < numVerts; i++) {
-            argb[i] = blast_color_mux(&verts[i]);
-        }
-        for (i = 0; i < numVerts2; i++) {
-            argb[numVerts + i] = blast_color_mux(&verts2[i]);
-        }
+        blast_colors_mux(argb, verts, numVerts);
+        blast_colors_mux(argb + numVerts, verts2, numVerts2);
     }
 
     if (gDcFadeOn) {
@@ -3195,6 +3193,51 @@ static f32 cc_clamp(f32 v) {
 
 static u8 clamp_u8(f32 v) {
     return (u8) (cc_clamp(v) * 255.0f);
+}
+
+/**
+ * The directional-lighting material (render_3d_model, with the header's
+ * directionalPointLighting): two cycles, lerp(PRIM, TEXEL0, SHADE_ALPHA) and then
+ * lerp(that, ENV, SHADE), with alpha TEXEL0 * PRIM_ALPHA. It mixes the shade in
+ * twice, so it does not collapse, and the generic program costs a few hundred
+ * cycles a vertex through its operand table; this is the same arithmetic,
+ * written out.
+ */
+#define CC_DIRLIGHT_W0 0xFC1596A4u
+#define CC_DIRLIGHT_W1 0x30FDFE38u
+
+/**
+ * The colours of a run of vertices through the real mux. Out of line, like
+ * blast_color_mux, to keep it out of the hot code. The caller has synced the
+ * program (cc_prog_sync_current).
+ */
+static __attribute__((noinline)) void blast_colors_mux(u32 *argb, const Vertex *verts, s32 count) {
+    s32 i;
+
+    if (sCombineW0 == CC_DIRLIGHT_W0 && sCombineW1 == CC_DIRLIGHT_W1 &&
+        (sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE) {
+        const f32 *src = sCcSrc;
+        const f32 pr = src[CC_SRC_PRIM + 0], pg = src[CC_SRC_PRIM + 1], pb = src[CC_SRC_PRIM + 2];
+        const f32 er = src[CC_SRC_ENV + 0], eg = src[CC_SRC_ENV + 1], eb = src[CC_SRC_ENV + 2];
+        const u32 alpha = (u32) clamp_u8(src[CC_SRC_PRIM + 3]) << 24;
+
+        for (i = 0; i < count; i++) {
+            const Vertex *v = &verts[i];
+            f32 sa = v->a * (1.0f / 255.0f);
+            f32 r = cc_clamp(((1.0f - pr) * sa) + pr);
+            f32 g = cc_clamp(((1.0f - pg) * sa) + pg);
+            f32 b = cc_clamp(((1.0f - pb) * sa) + pb);
+
+            r = cc_clamp(((er - r) * (v->r * (1.0f / 255.0f))) + r);
+            g = cc_clamp(((eg - g) * (v->g * (1.0f / 255.0f))) + g);
+            b = cc_clamp(((eb - b) * (v->b * (1.0f / 255.0f))) + b);
+            argb[i] = alpha | ((u32) clamp_u8(r) << 16) | ((u32) clamp_u8(g) << 8) | (u32) clamp_u8(b);
+        }
+        return;
+    }
+    for (i = 0; i < count; i++) {
+        argb[i] = blast_color_mux(&verts[i]);
+    }
 }
 
 /**
