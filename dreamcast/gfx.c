@@ -961,6 +961,13 @@ static int clip_poly_plane(const GfxTriVert *in, int n, GfxTriVert *out, int axi
     return m;
 }
 
+/** Whether a triangle lies wholly inside the scissor rect, so it needs no clipping. */
+static inline int tri_inside_scissor(const GfxTriVert *tri) {
+    return tri[0].x >= sScisX0 && tri[0].x <= sScisX1 && tri[0].y >= sScisY0 && tri[0].y <= sScisY1 &&
+           tri[1].x >= sScisX0 && tri[1].x <= sScisX1 && tri[1].y >= sScisY0 && tri[1].y <= sScisY1 &&
+           tri[2].x >= sScisX0 && tri[2].x <= sScisX1 && tri[2].y >= sScisY0 && tri[2].y <= sScisY1;
+}
+
 /**
  * Clips one triangle to the scissor rect. Returns the resulting convex polygon's
  * vertex count in `poly` (0 when nothing survives), to be fanned into triangles.
@@ -1638,7 +1645,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
     if (exact && sRoute != ROUTE_OP) {
         outTris = 0;
         for (i = 0; i + 3 <= count; i += 3) {
-            int n = clip_tri_to_scissor(&verts[i], poly);
+            int n = tri_inside_scissor(&verts[i]) ? 3 : clip_tri_to_scissor(&verts[i], poly);
 
             if (n >= 3) {
                 outTris += n - 2;
@@ -1719,7 +1726,9 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
 
     // GL_TRIANGLES -> one 3-vertex PVR strip per triangle (3rd vertex EOL).
     for (i = 0; i + 3 <= count; i += 3) {
-        if (!exact) {
+        if (!exact || tri_inside_scissor(&verts[i])) {
+            // Wholly inside the scissor (the common case): as it is, without
+            // the clipper's copy of it.
             for (j = 0; j < 3; j++) {
                 emit_vert(&verts[i + j], j == 2, uScale, vScale);
             }

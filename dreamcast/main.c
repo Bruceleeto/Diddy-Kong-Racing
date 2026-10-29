@@ -3456,8 +3456,45 @@ static void combiner_classify(void) {
  */
 static void combiner_color(u8 lit[4], u8 unlit[3]) {
     static const f32 white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    // Text is a run of rectangles under one combiner and colour, while the 3D
+    // batches between runs leave a program of their own compiled: keep the last
+    // few results instead of compiling and running it again for each glyph.
+    static struct {
+        u32 w0, w1, cyc, prim, env;
+        u8 lit[4], unlit[3], valid;
+    } cache[4];
+    static u32 next;
+    u32 cyc = CC_KEY_CYC(), prim = CC_KEY_RGBA(sPrimColor), env = CC_KEY_RGBA(sEnvColor);
+    s32 i;
 
+    for (i = 0; i < 4; i++) {
+        if (cache[i].valid && cache[i].w0 == sCombineW0 && cache[i].w1 == sCombineW1 && cache[i].cyc == cyc &&
+            cache[i].prim == prim && cache[i].env == env) {
+            lit[0] = cache[i].lit[0];
+            lit[1] = cache[i].lit[1];
+            lit[2] = cache[i].lit[2];
+            lit[3] = cache[i].lit[3];
+            unlit[0] = cache[i].unlit[0];
+            unlit[1] = cache[i].unlit[1];
+            unlit[2] = cache[i].unlit[2];
+            return;
+        }
+    }
     combiner_eval(white, lit, unlit);
+    i = (s32) (next++ & 3);
+    cache[i].w0 = sCombineW0;
+    cache[i].w1 = sCombineW1;
+    cache[i].cyc = cyc;
+    cache[i].prim = prim;
+    cache[i].env = env;
+    cache[i].lit[0] = lit[0];
+    cache[i].lit[1] = lit[1];
+    cache[i].lit[2] = lit[2];
+    cache[i].lit[3] = lit[3];
+    cache[i].unlit[0] = unlit[0];
+    cache[i].unlit[1] = unlit[1];
+    cache[i].unlit[2] = unlit[2];
+    cache[i].valid = TRUE;
 }
 
 /**
