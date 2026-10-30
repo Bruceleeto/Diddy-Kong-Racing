@@ -984,7 +984,7 @@ void wave_load_material(TextureHeader *tex, s32 rtile) {
 #define WAVE_DRAW(vtx, numVerts, tri, numTris)                                                  \
     do {                                                                                        \
         if (natMat != NULL) {                                                                   \
-            pc_nat_tris(&gWaveDL, natMat, (vtx), (numVerts), (tri), (numTris));                 \
+            pc_nat_tris(&gWaveDL, natMat, (const Vertex *) (vtx), (numVerts), (const Triangle *) (tri), (numTris));               \
         } else {                                                                                \
             gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), (numVerts), 0);                     \
             gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), (numTris), TRIN_ENABLE_TEXTURE);      \

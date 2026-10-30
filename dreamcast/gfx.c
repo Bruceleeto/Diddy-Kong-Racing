@@ -194,6 +194,15 @@ static int sPendingFreeCount;
 
 static DKR_HOT int sRoute;
 
+#ifndef DKR_NATIVE_CHECK
+#define DKR_NATIVE_CHECK 0
+#endif
+#if DKR_NATIVE_CHECK
+static pvr_poly_hdr_t sCheckHdr __attribute__((aligned(32))); // what the last blast batch went out under
+static int sCheckRoute;
+static int sCheckValid; // a header went out since the last gfx_nat_last
+#endif
+
 // PVR punch-through alpha threshold: a texel with alpha below this is discarded
 // before the depth stage. KOS names the register's offset (PVR_PT_ALPHA_REF) but
 // never writes it; this is its full address. 0x80 is the RDP's ref = 0.5, which
@@ -1724,6 +1733,12 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         shz_sq_memcpy32_1(pvr_ta_sq_addr, &sHdr);
     }
 
+#if DKR_NATIVE_CHECK
+    compile_header_for((sRoute == ROUTE_PT) ? PVR_LIST_PT_POLY : (sRoute == ROUTE_TR) ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY,
+                       &sCheckHdr);
+    sCheckRoute = sRoute;
+    sCheckValid = 1;
+#endif
     // GL_TRIANGLES -> one 3-vertex PVR strip per triangle (3rd vertex EOL).
     for (i = 0; i + 3 <= count; i += 3) {
         if (!exact || tri_inside_scissor(&verts[i])) {
@@ -1797,19 +1812,18 @@ int gfx_blast_viable(void) {
 }
 
 static DKR_HOT int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
-#ifndef DKR_NATIVE_CHECK
-#define DKR_NATIVE_CHECK 0
-#endif
 #if DKR_NATIVE_CHECK
-static pvr_poly_hdr_t sCheckHdr __attribute__((aligned(32))); // what the last blast batch went out under
-static int sCheckRoute;
 
-void gfx_nat_last(unsigned int words[4], int *route) {
+int gfx_nat_last(unsigned int words[4], int *route) {
+    int valid = sCheckValid;
+
+    sCheckValid = 0;
     words[0] = sCheckHdr.cmd;
     words[1] = sCheckHdr.mode1;
     words[2] = sCheckHdr.mode2;
     words[3] = sCheckHdr.mode3;
-    *route = sCheckRoute;
+    *route = (sCheckRoute == ROUTE_OP) ? 0 : (sCheckRoute == ROUTE_PT) ? 1 : 2;
+    return valid;
 }
 #endif
 
@@ -1971,11 +1985,14 @@ DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, fl
     compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : (route == ROUTE_TR) ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY,
                        &sCheckHdr);
     sCheckRoute = route;
+    sCheckValid = 1;
 #endif
     return 1;
 }
 
-DKR_NAT_CODE void *gfx_nat_header(const void *hdr, int route, int words, int *ok) {
+DKR_NAT_CODE void *gfx_nat_header(const void *hdr, int list, int words, int *ok) {
+    // 0 opaque, 1 punch-through, 2 translucent, as the pack has them.
+    int route = (list == 0) ? ROUTE_OP : (list == 1) ? ROUTE_PT : ROUTE_TR;
     int *dirty = (route == ROUTE_PT) ? &sScisDirtyPt : (route == ROUTE_TR) ? &sScisDirty : &sScisDirtyOp;
     pvr_poly_hdr_t scissored;
 
@@ -2016,6 +2033,53 @@ DKR_NAT_CODE void *gfx_nat_header(const void *hdr, int route, int words, int *ok
 void gfx_nat_end(void *recordEnd) {
     if (recordEnd != NULL) {
         gfx_blast_end(recordEnd);
+    }
+}
+
+int gfx_nat_exact(void) {
+    return scissor_needs_exact_clip();
+}
+
+void *gfx_nat_position(void) {
+    if (sBlastRoute == ROUTE_PT) {
+        return sPtBuf[sPtCount];
+    }
+    return sBlastRoute == ROUTE_TR ? (void *) sTrBuf[sTrCount] : NULL;
+}
+
+static void nat_exact_vert(const GfxTriVert *s, int eol, float zMul, unsigned int offset) {
+    pvr_vertex_t *v;
+
+    sRoute = sBlastRoute;
+    v = (pvr_vertex_t *) ta_target();
+    v->flags = eol ? PVR_CMD_VERTEX_EOL : PVR_CMD_VERTEX;
+    v->x = s->x * sScaleX;
+    v->y = s->y * sScaleY;
+    v->z = shz_invf_fsrra(s->w) * zMul;
+    v->u = s->u;
+    v->v = s->v;
+    v->argb = pack_argb(s->a, s->r, s->g, s->b);
+    v->oargb = offset;
+    ta_commit(v);
+    sRoute = ROUTE_OP;
+}
+
+void gfx_nat_tri_exact(const GfxTriVert *tri, float zMul, unsigned int offset) {
+    GfxTriVert poly[CLIP_MAX_VERTS];
+    int j;
+
+    if (tri_inside_scissor(tri)) {
+        nat_exact_vert(&tri[0], 0, zMul, offset);
+        nat_exact_vert(&tri[1], 0, zMul, offset);
+        nat_exact_vert(&tri[2], 1, zMul, offset);
+    } else {
+        int n = clip_tri_to_scissor(tri, poly);
+
+        for (j = 1; j + 1 < n; j++) {
+            nat_exact_vert(&poly[0], 0, zMul, offset);
+            nat_exact_vert(&poly[j], 0, zMul, offset);
+            nat_exact_vert(&poly[j + 1], 1, zMul, offset);
+        }
     }
 }
 

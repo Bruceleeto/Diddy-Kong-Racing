@@ -35,6 +35,7 @@ typedef struct {
     u32 prim, env;        // as the combiner keys them, RGBA
     f32 vpScaleX, vpScaleY, vpTransX, vpTransY; // the N64 viewport
     s32 serial;           // changes when any of the above does
+    s32 exact;            // the scissor is not on the tiles
 } NatView;
 
 // One compiled corner: what the PVR gets for it, all but the position.

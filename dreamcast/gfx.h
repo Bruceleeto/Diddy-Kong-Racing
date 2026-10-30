@@ -145,11 +145,17 @@ int gfx_nat_room(void *record, int words); // room for `words` more in the open 
 void gfx_nat_scale(float *x, float *y);
 // Whether the scissor can be left to the PVR's tiles alone, as native draws do.
 int gfx_nat_viable(void);
+// A scissor not on the tiles: a run's triangles then go through this one by one,
+// in N64 pixels with texture coordinates as written, after gfx_nat_end; the run goes
+// on from gfx_nat_position.
+int gfx_nat_exact(void);
+void gfx_nat_tri_exact(const GfxTriVert *tri, float zMul, unsigned int offset);
+void *gfx_nat_position(void);
 // The bits of a polygon header that come from a texture.
 int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3);
 void gfx_texture_scale(unsigned int handle, float *u, float *v);
 // What the blast path last sent, for NATIVE_CHECK=1.
-void gfx_nat_last(unsigned int words[4], int *route);
+int gfx_nat_last(unsigned int words[4], int *route); // whether one went out since the last call
 
 // A native polygon in the translucent list, at this point of the display list
 // (dreamcast/scrawl.c). Vertex x/y are N64 pixels. 0 if the recording is full.

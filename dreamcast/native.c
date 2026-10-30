@@ -28,6 +28,9 @@
 #ifndef DKR_NATIVE_CHECK
 #define DKR_NATIVE_CHECK 0
 #endif
+#ifndef DKR_NATIVE_SKIP
+#define DKR_NATIVE_SKIP 0
+#endif
 
 struct NatMaterial {
     pvr_poly_hdr_t hdr; // no culling: these go out as triangles, culled here
@@ -254,6 +257,8 @@ static __attribute__((noinline, cold)) void nat_level_resolve(void) {
 
             tex = (TextureHeader *) ((u8 *) tex + info->frame * tex->textureSize);
             if (!pc_nat_texture_words(tex, &mode2, &mode3)) {
+                printf("native: mat %lu: texture %ld frame %u (%ux%u fmt %u) is not in video memory\n", (unsigned long) i,
+                       (long) info->texture, info->frame, tex->width, tex->height, tex->format & 0xF);
                 sMatGood[i] = FALSE;
                 sLevelWhole = FALSE;
                 continue;
@@ -295,7 +300,7 @@ s32 pc_nat_level_batches(Gfx **dl, s32 segment, s32 batch, s32 end, s32 waterHid
     s32 next;
     s32 first = -1, last = -1;
 
-    if (sLevel == NULL) {
+    if (sLevel == NULL || (DKR_NATIVE_SKIP & 1)) {
         return 0;
     }
     if (!sResolved) {
@@ -480,6 +485,57 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_level(const NatChu
     return pc_nat_clip(corners, count, clip, NULL, cull, record, scaleX, scaleY, zMul, offset, textured);
 }
 
+/**
+ * Strips under a scissor that is not on the PVR's tiles, which it would overdraw
+ * by up to a tile: split-screen-like views and menus. Triangle by triangle
+ * through the scissor. Returns where a recording stands.
+ */
+static __attribute__((noinline, cold)) pvr_vertex_t *nat_write_exact(pvr_vertex_t *rec, const NatCorner *corners, s32 count, u32 offset,
+                                                                     s32 lit, s32 textured, f32 zMul, f32 scaleX, f32 scaleY) {
+    GfxTriVert t[3];
+    s32 step = 0;
+    s32 i;
+
+    gfx_nat_end(rec);
+    for (i = 0; i < count; i++) {
+        const NatCorner *c = &corners[i];
+        const NatPoint *p = &sPoints[c->word & 0xFFFF];
+        GfxTriVert *out = &t[step < 3 ? step : 2];
+        u32 argb;
+
+        if (step >= 3) {
+            t[0] = t[1];
+            t[1] = t[2];
+        }
+        argb = lit ? p->argb : (gDcFadeOn ? gfx_frame_argb(c->argb, textured) : c->argb);
+        out->x = p->x / scaleX;
+        out->y = p->y / scaleY;
+        out->w = zMul / p->z;
+        out->z = 0.0f;
+        out->u = c->u;
+        out->v = c->v;
+        out->fog = 0.0f;
+        out->a = argb >> 24;
+        out->r = argb >> 16;
+        out->g = argb >> 8;
+        out->b = argb;
+        step++;
+        if (step >= 3) {
+            if (step & 1) {
+                gfx_nat_tri_exact(t, zMul, offset);
+            } else {
+                GfxTriVert swapped[3] = { t[1], t[0], t[2] };
+
+                gfx_nat_tri_exact(swapped, zMul, offset);
+            }
+        }
+        if ((c->word & 0xF0000000u) == PVR_CMD_VERTEX_EOL) {
+            step = 0;
+        }
+    }
+    return gfx_nat_position();
+}
+
 /** An animated texture: the mat with this frame's image, as the batch stands now. */
 static __attribute__((noinline, cold)) const pvr_poly_hdr_t *nat_anim_header(const NatChunk *chunk, s32 segment, s32 mat,
                                                                              pvr_poly_hdr_t *out) {
@@ -539,7 +595,8 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, u32 w0, u32 w1) {
             for (part = 0; part < 2; part++) {
                 s32 count = part ? chunk->twoSided : chunk->oneSided;
                 s32 mat = part ? chunk->matTwo : chunk->matOne;
-                s32 words = behind ? (6 * count) + 6 : count; // near-clipped, a strip's triangle can become two
+                // Near-clipped a triangle can become two; through a scissor, five.
+                s32 words = (behind || view->exact) ? (15 * count) + 6 : count;
 
                 if (count == 0) {
                     continue;
@@ -568,6 +625,8 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, u32 w0, u32 w1) {
                 if (behind) {
                     rec = nat_clip_level(chunk, corners, count, !part, rec, scaleX, scaleY, zMul, offset,
                                          info->texture >= 0);
+                } else if (view->exact) {
+                    rec = nat_write_exact(rec, corners, count, offset, FALSE, info->texture >= 0, zMul, scaleX, scaleY);
                 } else if (fade) {
                     rec = nat_write_faded(rec, corners, count, offset, info->texture >= 0);
                 } else if (rec != NULL) {
@@ -696,7 +755,7 @@ s32 pc_nat_model_draw(Gfx **dl, ObjectModel *model, const Vertex *verts, s32 sta
     NatModel *nat = NAT_MODEL(model);
     s32 variant, i;
 
-    if (nat == NULL || gBlockedRenderFlags != 0 || cam_get_viewport_layout() != 0) {
+    if (nat == NULL || gBlockedRenderFlags != 0 || cam_get_viewport_layout() != 0 || (DKR_NATIVE_SKIP & 2)) {
         return -2;
     }
     if (nat->generation != sVramGeneration) {
@@ -940,7 +999,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, u32 w0, u32 w1, u32 w1b)
         for (part = 0; part < 2; part++) {
             s32 numCorners = part ? chunk->twoSided : chunk->oneSided;
             s32 mat = chunk->mat[variant] + part;
-            s32 words = behind ? (6 * numCorners) + 6 : numCorners;
+            s32 words = (behind || view->exact) ? (15 * numCorners) + 6 : numCorners;
             s32 frame = 0;
 
             if (numCorners == 0) {
@@ -982,6 +1041,8 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, u32 w0, u32 w1, u32 w1b)
                 if (behind) {
                     rec = nat_clip_model(view, v, count, split, c, numCorners, !part, rec, scaleX, scaleY, zMul, offset,
                                          info->texture >= 0);
+                } else if (view->exact) {
+                    rec = nat_write_exact(rec, c, numCorners, offset, TRUE, info->texture >= 0, zMul, scaleX, scaleY);
                 } else if (rec != NULL) {
                     rec = nat_write_record(rec, c, numCorners, offset, TRUE);
                 } else {
@@ -1130,7 +1191,7 @@ const NatMaterial *pc_nat_material(TextureHeader *tex, s32 flags, s32 texOffset)
     const Gfx *entry;
     s32 zBuffer, fog;
 
-    if (cam_get_viewport_layout() != 0) {
+    if (cam_get_viewport_layout() != 0 || (DKR_NATIVE_SKIP & 4)) {
         return NULL; // the split-screen scissors: see pc_nat_level_batches
     }
     if (tex != NULL && texOffset && (texOffset < tex->numOfTextures << 8)) {
@@ -1197,12 +1258,35 @@ DKR_NAT_CODE void pc_nat_tris_run(const NatView *view, u32 w0, u32 w1, const Nat
     if (!fast || gDcFadeOn) {
         nat_colours_slow(v, numVerts, fast, mat->textured);
     }
-    rec = gfx_nat_header(&mat->hdr, mat->route, numTris * 6, &ok);
+    rec = gfx_nat_header(&mat->hdr, mat->route, numTris * 15, &ok);
     if (!ok) {
         return;
     }
     if (behind) {
         rec = nat_clip_tris(view, v, numVerts, tris, numTris, mat, rec, scaleX, scaleY, zMul, offset);
+        gfx_nat_end(rec);
+        return;
+    }
+    if (view->exact) {
+        for (i = 0; i < numTris; i++) {
+            const Triangle *t = &tris[i];
+            NatCorner c[3];
+
+            if (t->vi0 >= numVerts || t->vi1 >= numVerts || t->vi2 >= numVerts) {
+                continue;
+            }
+            if (!(t->flags & BACKFACE_DRAW)) {
+                const NatPoint *p0 = &sPoints[t->vi0], *p1 = &sPoints[t->vi1], *p2 = &sPoints[t->vi2];
+
+                if (((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y)) >= 0.0f) {
+                    continue;
+                }
+            }
+            c[0] = (NatCorner) { t->uv0.u * uMul, t->uv0.v * vMul, 0, PVR_CMD_VERTEX | t->vi0 };
+            c[1] = (NatCorner) { t->uv1.u * uMul, t->uv1.v * vMul, 0, PVR_CMD_VERTEX | t->vi1 };
+            c[2] = (NatCorner) { t->uv2.u * uMul, t->uv2.v * vMul, 0, PVR_CMD_VERTEX_EOL | t->vi2 };
+            rec = nat_write_exact(rec, c, 3, offset, TRUE, mat->textured, zMul, scaleX, scaleY);
+        }
         gfx_nat_end(rec);
         return;
     }
@@ -1250,7 +1334,7 @@ DKR_NAT_CODE void pc_nat_tris_run(const NatView *view, u32 w0, u32 w1, const Nat
 s32 pc_nat_rect(Gfx **dl, TextureHeader *tex, s32 ulx, s32 uly, s32 lrx, s32 lry, s32 s, s32 t, s32 dsdx, s32 dtdy) {
     u32 mode2, mode3;
 
-    if (TEX_FORMAT(tex->format) == TEX_FORMAT_CI4 || TEX_FORMAT(tex->format) == TEX_FORMAT_CI8 ||
+    if (TEX_FORMAT(tex->format) == TEX_FORMAT_CI4 || TEX_FORMAT(tex->format) == TEX_FORMAT_CI8 || (DKR_NATIVE_SKIP & 16) ||
         !pc_nat_texture_words(tex, &mode2, &mode3)) {
         return FALSE;
     }
@@ -1276,7 +1360,7 @@ s32 pc_nat_sprite(Gfx **dl, const Sprite *sprite, s32 frame, s32 flags, const Ve
     const Gfx *entry;
     s32 zBuffer, i;
 
-    if (cam_get_viewport_layout() != 0 || frame < 0 || frame >= sprite->numberOfFrames) {
+    if (cam_get_viewport_layout() != 0 || frame < 0 || frame >= sprite->numberOfFrames || (DKR_NATIVE_SKIP & 8)) {
         return FALSE;
     }
     entry = material_simple_lookup(flags, &zBuffer);
@@ -1385,12 +1469,21 @@ DKR_NAT_CODE void pc_nat_sprite_run(const NatView *view, u32 w0, u32 w1, const G
         c[1] = (NatCorner) { uMax, vMax, 0, PVR_CMD_VERTEX | 2 };
         c[2] = (NatCorner) { uMin, 0.0f, 0, PVR_CMD_VERTEX | 0 };
         c[3] = (NatCorner) { uMin, vMax, 0, PVR_CMD_VERTEX_EOL | 3 };
-        rec = gfx_nat_header(&mat->hdr, mat->route, behind ? 12 : 4, &ok);
+        rec = gfx_nat_header(&mat->hdr, mat->route, (behind || view->exact) ? 36 : 4, &ok);
         if (!ok) {
             continue;
         }
         if (behind) {
             rec = nat_clip_quad(clip, argb, c, rec, scaleX, scaleY, zMul, offset);
+        } else if (view->exact) {
+            for (k = 0; k < 4; k++) {
+                f32 inv = shz_invf_fsrra(clip[k].w);
+
+                sPoints[k].x = (clip[k].x * inv * sx) + tx;
+                sPoints[k].y = ty - (clip[k].y * inv * sy);
+                sPoints[k].z = inv * zMul;
+            }
+            rec = nat_write_exact(rec, c, 4, offset, TRUE, TRUE, zMul, scaleX, scaleY);
         } else {
             u32 sq = pvr_dr_addr;
 
@@ -1446,7 +1539,9 @@ void pc_nat_check_model_run(u32 w0, u32 w1) {
         return;
     }
     hdr = &nat->mats[mat];
-    gfx_nat_last(got, &route);
+    if (!gfx_nat_last((unsigned int *) got, (int *) &route)) {
+        return; // the walk dropped this batch
+    }
     sChecked++;
     if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
         got[2] != hdr->mode2 || (model->batches[w0 & 0xFF].texOffset == 0 && got[3] != hdr->mode3) ||
@@ -1491,7 +1586,9 @@ void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
     }
     chunk = &sChunks[at];
     hdr = &sMats[chunk->matOne];
-    gfx_nat_last(got, &route);
+    if (!gfx_nat_last((unsigned int *) got, (int *) &route)) {
+        return; // the walk dropped this batch
+    }
     sChecked++;
     if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
         got[2] != hdr->mode2 || (!(chunk->flags & NAT_CHUNK_TEX_ANIM) && got[3] != hdr->mode3) ||
