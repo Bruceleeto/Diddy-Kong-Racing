@@ -18,6 +18,7 @@
 #define NATIVE_MODEL 2 // w0: first batch, variant, vertices split; w1: vertices; then a word with w1 the model
 #define NATIVE_CHECK_MODEL 3 // NATIVE_CHECK=1: w0: batch, variant; w1: the model
 #define NATIVE_SPRITE 5 // w0: frame, z buffer; w1: sprite; then words with the anchor, the matrix, the render table's entry
+#define NATIVE_RECT 6 // w1: texture; then words with ulx, uly, lrx, lry and s, t, dsdx, dtdy, 16 bits each
 #define NATIVE_TRIS 4 // w0: vertices, triangles; w1: vertices; then a word with the material and the triangles
 
 #define gDkrNative(pkt, kind, a, b)                                                                     \
@@ -107,6 +108,7 @@ const NatMaterial *pc_nat_material(TextureHeader *tex, s32 flags, s32 texOffset)
 const NatMaterial *pc_nat_material_state(TextureHeader *tex, const Gfx *state, s32 zBuffer, s32 fog);
 void pc_nat_tris(Gfx **dl, const NatMaterial *mat, const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris);
 void pc_nat_materials_forget(void);
+s32 pc_nat_rect(Gfx **dl, TextureHeader *tex, s32 ulx, s32 uly, s32 lrx, s32 lry, s32 s, s32 t, s32 dsdx, s32 dtdy);
 s32 pc_nat_sprite(Gfx **dl, const Sprite *sprite, s32 frame, s32 flags, const Vertex *anchor, const Mtx *billboard);
 
 // The walk's side (dreamcast/main.c).
@@ -125,6 +127,7 @@ void pc_nat_colours_mux(u32 *argb, const Vertex *verts, s32 count);
 // the texture decides. 0 if the texture is not in video memory.
 s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3);
 void pc_nat_texture_scale(const void *textureHeader, f32 *u, f32 *v);
+u32 pc_nat_texture_handle(const void *textureHeader);
 // `clip`: the clip space positions; `argb`: their colours, or NULL for the corners' own.
 pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip, const u32 *argb, s32 cull,
                           pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul, u32 offset, s32 textured);

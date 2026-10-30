@@ -7,6 +7,7 @@
 #include "textures_sprites.h"
 #include "video.h"
 #include "pc_swap.h"
+#include "../dreamcast/native_game.h"
 
 /************ .data ************/
 
@@ -521,8 +522,11 @@ void render_text_string(Gfx **dList, DialogueBoxBackground *box, char *text, Ali
                     textureT += -textureUly * 8;
                     textureUly = 0;
                 }
-                gSPTextureRectangle((*dList)++, textureUlx, textureUly, textureLrx, newTempY, 0, textureS, textureT,
-                                    1 << 10, 1 << 10);
+                if (!pc_nat_rect(dList, texture, textureUlx, textureUly, textureLrx, newTempY, textureS, textureT,
+                                 1 << 10, 1 << 10)) {
+                    gSPTextureRectangle((*dList)++, textureUlx, textureUly, textureLrx, newTempY, 0, textureS, textureT,
+                                        1 << 10, 1 << 10);
+                }
                 if (lastTextureIndex) {} // Fakematch
             }
             if (gCompactKerning && charSpace) {

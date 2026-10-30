@@ -985,6 +985,23 @@ void material_set(Gfx **dList, TextureHeader *texhead, s32 flags, s32 texOffset)
 }
 
 #ifdef TARGET_DC
+/** The clamp and wrap material_init gives a texture. */
+void material_wrap(const TextureHeader *tex, s32 *cms, s32 *cmt) {
+    s32 size = 1, uClamp = TRUE, vClamp = TRUE, i;
+
+    for (i = 0; i < 7; i++) {
+        if (size == tex->width) {
+            uClamp = FALSE;
+        }
+        if (size == tex->height) {
+            vClamp = FALSE;
+        }
+        size *= 2;
+    }
+    *cms = (uClamp || (tex->flags & RENDER_CLAMP_X)) ? G_TX_CLAMP : G_TX_WRAP;
+    *cmt = (vClamp || (tex->flags & RENDER_CLAMP_Y)) ? G_TX_CLAMP : G_TX_WRAP;
+}
+
 /** material_load_simple's decisions without its state, as material_lookup for material_set's. */
 const Gfx *material_simple_lookup(s32 flags, s32 *zBuffer) {
     flags &= ~RENDER_VTX_ALPHA;

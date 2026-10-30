@@ -8,6 +8,7 @@
 #include "textures_sprites.h"
 #include "types.h"
 #include "video.h"
+#include "../dreamcast/native_game.h"
 
 /************ .data ************/
 
@@ -710,8 +711,10 @@ void texrect_draw(Gfx **dList, DrawTexture *element, s32 xPos, s32 yPos, u8 red,
                 t = -(uly << 3);
                 uly = 0;
             }
-            gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
-            gSPTextureRectangle((*dList)++, ulx, uly, lrx, lry, G_TX_RENDERTILE, s, t, 1024, 1024);
+            if (!pc_nat_rect(dList, tex, ulx, uly, lrx, lry, s, t, 1024, 1024)) {
+                gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+                gSPTextureRectangle((*dList)++, ulx, uly, lrx, lry, G_TX_RENDERTILE, s, t, 1024, 1024);
+            }
         }
     }
     gDPPipeSync((*dList)++);
@@ -810,8 +813,10 @@ void texrect_draw_scaled(Gfx **dList, DrawTexture *element, f32 xPos, f32 yPos, 
                     uly = 0;
                 }
 
-                gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
-                gSPTextureRectangle((*dList)++, ulx, uly, lrx, lry, G_TX_RENDERTILE, s, t, dsdx, dtdy);
+                if (!pc_nat_rect(dList, tex, ulx, uly, lrx, lry, s, t, dsdx, dtdy)) {
+                    gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
+                    gSPTextureRectangle((*dList)++, ulx, uly, lrx, lry, G_TX_RENDERTILE, s, t, dsdx, dtdy);
+                }
             }
         }
     }

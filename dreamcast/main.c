@@ -1324,6 +1324,12 @@ s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3) {
     return gfx_texture_words(sPrebuilt[p].handle, (unsigned int *) mode2, (unsigned int *) mode3);
 }
 
+u32 pc_nat_texture_handle(const void *textureHeader) {
+    s32 p = prebuilt_find((u32) ((const TextureHeader *) textureHeader + 1));
+
+    return p < 0 ? 0 : sPrebuilt[p].handle;
+}
+
 void pc_nat_texture_scale(const void *textureHeader, f32 *u, f32 *v) {
     s32 p = prebuilt_find((u32) ((const TextureHeader *) textureHeader + 1));
 
@@ -3540,9 +3546,10 @@ static void combiner_color(u8 lit[4], u8 unlit[3]) {
  * relies on display-list order, and so do we.
  */
 /** One rectangle's two triangles, ready for gfx_draw_tris. */
-static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 lit[4],
-                         const u8 unlit[3], u32 texture) {
-    GfxTriVert q[6];
+extern void material_wrap(const TextureHeader *tex, s32 *cms, s32 *cmt);
+
+static void quad_fill(GfxTriVert *q, f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 lit[4],
+                      const u8 unlit[3], u32 texture) {
     s32 i;
 
     q[0].x = x0; q[0].y = y0; q[0].u = u0; q[0].v = v0;
@@ -3565,7 +3572,9 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
         q[i].b = (texture != 0) ? unlit[2] : lit[2];
         q[i].a = lit[3];
     }
+}
 
+static void draw_2d_quads(const GfxTriVert *q, s32 count, const u8 lit[4], u32 texture) {
     if (texture != 0) {
         gfx_set_texenv_blend(lit);
     } else {
@@ -3582,7 +3591,63 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     gfx_set_fog(FALSE, sFogColor); // the HUD does not sit in the world's haze
     gfx_bind_texture(texture);
     apply_texture_filter();
-    gfx_draw_tris(q, 6);
+    gfx_draw_tris(q, count);
+}
+
+static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 lit[4],
+                         const u8 unlit[3], u32 texture) {
+    GfxTriVert q[6];
+
+    quad_fill(q, x0, y0, x1, y1, u0, v0, u1, v1, lit, unlit, texture);
+    draw_2d_quads(q, 6, lit, texture);
+}
+
+#define NAT_RECT_RUN 32
+
+/**
+ * A run of texture rectangles from the same texture, with nothing between them
+ * to change their colours: text, mostly. One header and a strip of triangles,
+ * where the walk's texture rectangles were one each. Returns the words it took.
+ */
+static __attribute__((noinline)) s32 nat_rect_run(const Gfx *g) {
+    static GfxTriVert sRun[NAT_RECT_RUN * 6] __attribute__((aligned(32)));
+    const TextureHeader *tex = (const TextureHeader *) g->words.w1;
+    u32 texture = pc_nat_texture_handle(tex);
+    f32 w = tex->width, h = tex->height;
+    u8 lit[4], unlit[3];
+    s32 n = 0, cms, cmt;
+    s32 extra = 0;
+
+    if (texture == 0) {
+        return 2;
+    }
+    material_wrap(tex, &cms, &cmt);
+    gfx_texture_set_wrap(texture, cms, cmt);
+    combiner_color(lit, unlit);
+    while (n < NAT_RECT_RUN) {
+        u32 pos0 = g[1].words.w0, pos1 = g[1].words.w1, tc0 = g[2].words.w0, tc1 = g[2].words.w1;
+        f32 x0 = (s32) (pos0 >> 16) / 4.0f;
+        f32 y0 = (s16) (pos0 & 0xFFFF) / 4.0f;
+        f32 x1 = (s32) (pos1 >> 16) / 4.0f;
+        f32 y1 = (s16) (pos1 & 0xFFFF) / 4.0f;
+        f32 s0 = (f32) (s16) (tc0 >> 16) / 32.0f;
+        f32 t0 = (f32) (s16) (tc0 & 0xFFFF) / 32.0f;
+        f32 dsdx = (f32) (s16) (tc1 >> 16) / 1024.0f;
+        f32 dtdy = (f32) (s16) (tc1 & 0xFFFF) / 1024.0f;
+        f32 s1 = s0 + ((x1 - x0) * dsdx);
+        f32 t1 = t0 + ((y1 - y0) * dtdy);
+
+        quad_fill(&sRun[n * 6], x0, y0, x1, y1, s0 / w, t0 / h, s1 / w, t1 / h, lit, unlit, texture);
+        n++;
+        g += 3;
+        if (n == NAT_RECT_RUN || ((g->words.w0 >> 24) & 0xFF) != G_NATIVE || ((g->words.w0 >> 20) & 0xF) != NATIVE_RECT ||
+            g->words.w1 != (u32) tex) {
+            break;
+        }
+        extra += 3;
+    }
+    draw_2d_quads(sRun, n * 6, lit, texture);
+    return extra + 2;
 }
 
 /**
@@ -3774,6 +3839,8 @@ static __attribute__((noinline)) s32 handle_native(u32 w0, u32 w1, const Gfx *ne
     } else if (kind == NATIVE_MODEL) {
         pc_nat_model_run(&sNatView, w0 & 0xFFFFF, w1, next->words.w1);
         return 1;
+    } else if (kind == NATIVE_RECT) {
+        return nat_rect_run(next - 1);
     } else if (kind == NATIVE_SPRITE) {
         pc_nat_sprite_run(&sNatView, w0 & 0xFFFFF, w1, next);
         return 2;

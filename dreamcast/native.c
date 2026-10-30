@@ -1247,6 +1247,23 @@ DKR_NAT_CODE void pc_nat_tris_run(const NatView *view, u32 w0, u32 w1, const Nat
     gfx_nat_end(rec);
 }
 
+s32 pc_nat_rect(Gfx **dl, TextureHeader *tex, s32 ulx, s32 uly, s32 lrx, s32 lry, s32 s, s32 t, s32 dsdx, s32 dtdy) {
+    u32 mode2, mode3;
+
+    if (TEX_FORMAT(tex->format) == TEX_FORMAT_CI4 || TEX_FORMAT(tex->format) == TEX_FORMAT_CI8 ||
+        !pc_nat_texture_words(tex, &mode2, &mode3)) {
+        return FALSE;
+    }
+    gDkrNative((*dl)++, NATIVE_RECT, 0, tex);
+    (*dl)->words.w0 = ((u32) ulx << 16) | ((u32) uly & 0xFFFF);
+    (*dl)->words.w1 = ((u32) lrx << 16) | ((u32) lry & 0xFFFF);
+    (*dl)++;
+    (*dl)->words.w0 = ((u32) s << 16) | ((u32) t & 0xFFFF);
+    (*dl)->words.w1 = ((u32) dsdx << 16) | ((u32) dtdy & 0xFFFF);
+    (*dl)++;
+    return TRUE;
+}
+
 /** A sprite's material for one of its tiles. */
 static const NatMaterial *nat_sprite_material(const Gfx *entry, s32 zBuffer, const TextureHeader *tex) {
     return nat_material(entry[0].words.w0, entry[0].words.w1, entry[1].words.w0 & 0x00FFFFFF, entry[1].words.w1, tex, zBuffer, TRUE);
