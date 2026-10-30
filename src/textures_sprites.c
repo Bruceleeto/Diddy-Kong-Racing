@@ -1038,7 +1038,7 @@ const Gfx *material_lookup(TextureHeader *texhead, s32 flags, s32 *zBuffer, s32 
                             RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING));
     flags &= ~gBlockedRenderFlags;
     flags = (flags & RENDER_VTX_ALPHA) ? flags & ~RENDER_FOG_ACTIVE : flags & ~RENDER_Z_UPDATE;
-    *fog = !(flags & RENDER_VTX_ALPHA);
+    *fog = !(flags & RENDER_VTX_ALPHA) && !gUseDirectionalLighting;
     *zBuffer = (flags & RENDER_Z_COMPARE) != 0;
     if (texhead == NULL) {
         if (flags & RENDER_VTX_ALPHA) {

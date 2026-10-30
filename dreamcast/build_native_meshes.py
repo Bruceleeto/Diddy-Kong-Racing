@@ -172,9 +172,8 @@ def material(tables, flags, tex, directional=False):
         flags &= (RENDER_VTX_ALPHA | RENDER_DECAL | RENDER_Z_UPDATE | RENDER_COLOUR_INDEX | RENDER_CUTOUT |
                   RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)
     flags = flags & ~RENDER_FOG_ACTIVE if flags & RENDER_VTX_ALPHA else flags & ~RENDER_Z_UPDATE
-    # Directional lighting leaves G_FOG as the material before it set it, which
-    # is on unless that was a vertex-alpha one.
-    geometry = 0 if flags & RENDER_VTX_ALPHA else G_FOG
+    # Directional lighting goes without fog, as the walk draws it.
+    geometry = 0 if flags & RENDER_VTX_ALPHA or directional else G_FOG
     if flags & RENDER_Z_COMPARE:
         geometry |= G_ZBUFFER
     if tex is None:
@@ -264,6 +263,7 @@ def pvr_header(state, textured, wrap, culled):
         mode2 |= clamp << 15
         mode2 |= (0 if state["point"] else 1) << 13
         mode2 |= env << 6
+        mode2 |= 4 << 8  # PVR_MIPBIAS_NORMAL
     return [cmd, mode1, mode2, 0, 0xFFFFFFFF, 0xFFFFFFFF, 0, 0]
 
 
