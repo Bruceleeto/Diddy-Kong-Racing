@@ -15,9 +15,11 @@
 #include <ultra64.h>
 #include <structs.h>
 #include <kos.h>
+#include "../src/textures_sprites.h"
 #include "native.h"
 
 #define NAT_MAX_POSITIONS 32
+#define NAT_MAX_CORNERS 64 // sixteen triangles at most in a batch
 #define NAT_CHUNK_WATER 1
 #define NAT_CHUNK_TEX_ANIM 2
 #define NAT_BATCH_WALK 0xFFFF
@@ -73,6 +75,7 @@ static u8 sLevelWhole; // every mat resolved
 // An animated texture's frames, as header words: per level texture, NULL if it has none.
 static u32 **sFrameWords;
 static u8 *sMatGood;
+static s32 sVramGeneration = 1; // a model's mats are good for one of these
 
 // A frame's five planes through the view: the box is outside when its corner
 // nearest a plane's positive side lies behind it.
@@ -84,15 +87,24 @@ typedef struct {
 static DKR_HOT NatPlane sPlanes[5];
 static DKR_HOT s32 sPlanesFor = -1;
 
+// A position as a frame leaves it, and for an object model its colour.
 typedef struct {
-    f32 x, y, z, pad;
+    f32 x, y, z;
+    u32 argb;
 } NatPoint;
 
 static DKR_HOT NatPoint sPoints[NAT_MAX_POSITIONS] __attribute__((aligned(32)));
 
 extern LevelModel *gCurrentLevelModel;
 
+#if DKR_NATIVE_CHECK
+static u32 sChecked, sCheckBad;
+#endif
+
 void pc_nat_level_free(void) {
+#if DKR_NATIVE_CHECK
+    printf("NATCHK level done: %lu batches compared, %lu differ\n", (unsigned long) sChecked, (unsigned long) sCheckBad);
+#endif
     if (sFrameWords != NULL && sLevel != NULL) {
         s32 i;
 
@@ -109,52 +121,72 @@ void pc_nat_level_free(void) {
     sResolved = FALSE;
 }
 
-/** Reads the level's block from the pack. Without it the walk draws the level, as it can. */
-void pc_nat_level_load(s32 modelId) {
-    static file_t sPack = FILEHND_INVALID;
-    static u32 *sIndex;
-    static u32 sLevels;
-    static u32 sCount; // level models, then object models
+// The pack's index: level models, then object models.
+static file_t sPack = FILEHND_INVALID;
+static u32 *sPackIndex;
+static u32 sPackLevels, sPackEntries;
+
+static s32 nat_pack_open(void) {
+    u32 head[4];
+
+    if (sPack != FILEHND_INVALID) {
+        return TRUE;
+    }
+    if (sPackIndex != NULL) {
+        return FALSE; // tried, and it did not work
+    }
+    sPack = fs_open(DKR_ASSET_MOUNT "/build/dc/native.pack", O_RDONLY);
+    if (sPack == FILEHND_INVALID) {
+        printf("native: no mesh pack\n");
+        return FALSE;
+    }
+    if (fs_read(sPack, head, 16) != 16 || head[0] != 0x4B504E44 /* DNPK */ || head[1] != 2) {
+        printf("native: mesh pack is not version 2\n");
+        fs_close(sPack);
+        sPack = FILEHND_INVALID;
+        return FALSE;
+    }
+    sPackLevels = head[2];
+    sPackEntries = head[2] + head[3];
+    sPackIndex = malloc(sPackEntries * 8);
+    if (sPackIndex == NULL || fs_read(sPack, sPackIndex, sPackEntries * 8) != (ssize_t) (sPackEntries * 8)) {
+        printf("native: mesh pack index unread\n");
+        sPackEntries = sPackLevels = 0;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/** An entry of the pack in fresh memory, or NULL if it has none. */
+static u8 *nat_pack_read(u32 entry) {
     u8 *block;
     u32 bytes;
+
+    if (!nat_pack_open() || entry >= sPackEntries || sPackIndex[entry * 2 + 1] == 0) {
+        return NULL;
+    }
+    bytes = sPackIndex[entry * 2 + 1];
+    block = memalign(32, bytes);
+    if (block == NULL) {
+        printf("native: malloc failed, %lu bytes for entry %lu\n", (unsigned long) bytes, (unsigned long) entry);
+        return NULL;
+    }
+    if (fs_seek(sPack, sPackIndex[entry * 2], SEEK_SET) < 0 || fs_read(sPack, block, bytes) != (ssize_t) bytes) {
+        printf("native: entry %lu unread\n", (unsigned long) entry);
+        free(block);
+        return NULL;
+    }
+    return block;
+}
+
+/** Reads the level's block from the pack. Without it the walk draws the level, as it can. */
+void pc_nat_level_load(s32 modelId) {
+    u8 *block;
     u32 i;
 
     pc_nat_level_free();
-    if (sPack == FILEHND_INVALID) {
-        u32 head[4];
-
-        sPack = fs_open(DKR_ASSET_MOUNT "/build/dc/native.pack", O_RDONLY);
-        if (sPack == FILEHND_INVALID) {
-            printf("native: no mesh pack\n");
-            return;
-        }
-        if (fs_read(sPack, head, 16) != 16 || head[0] != 0x4B504E44 /* DNPK */ || head[1] != 2) {
-            printf("native: mesh pack is not version 2\n");
-            fs_close(sPack);
-            sPack = FILEHND_INVALID;
-            return;
-        }
-        sLevels = head[2];
-        sCount = head[2] + head[3];
-        sIndex = malloc(sCount * 8);
-        if (sIndex == NULL || fs_read(sPack, sIndex, sCount * 8) != (ssize_t) (sCount * 8)) {
-            printf("native: mesh pack index unread\n");
-            sCount = sLevels = 0;
-            return;
-        }
-    }
-    if ((u32) modelId >= sLevels || sIndex[modelId * 2 + 1] == 0) {
-        return;
-    }
-    bytes = sIndex[modelId * 2 + 1];
-    block = memalign(32, bytes);
+    block = nat_pack_read(modelId);
     if (block == NULL) {
-        printf("native: malloc failed, %lu bytes for level model %ld\n", (unsigned long) bytes, (long) modelId);
-        return;
-    }
-    if (fs_seek(sPack, sIndex[modelId * 2], SEEK_SET) < 0 || fs_read(sPack, block, bytes) != (ssize_t) bytes) {
-        printf("native: level model %ld unread\n", (long) modelId);
-        free(block);
         return;
     }
     sLevel = (NatLevelHeader *) block;
@@ -185,6 +217,7 @@ void pc_nat_level_load(s32 modelId) {
 /** Video memory was rebuilt: every address a mat holds is gone. */
 void pc_nat_vram_lost(void) {
     sResolved = FALSE;
+    sVramGeneration++;
 }
 
 /**
@@ -366,7 +399,7 @@ static inline s32 nat_transform(const f32 *xyz, s32 count, f32 sx, f32 sy, f32 t
 }
 
 /** Writes strips to the opaque list. */
-static inline void nat_write_sq(const NatCorner *c, s32 count, u32 offset) {
+static inline void nat_write_sq(const NatCorner *c, s32 count, u32 offset, s32 lit) {
     u32 sq = pvr_dr_addr;
     const NatCorner *end = c + count;
 
@@ -376,20 +409,20 @@ static inline void nat_write_sq(const NatCorner *c, s32 count, u32 offset) {
 
         sq ^= 32;
         vt = (pvr_vertex_t *) sq;
-        nat_vertex_put(vt, FALSE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, c->argb, offset);
+        nat_vertex_put(vt, FALSE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, lit ? p->argb : c->argb, offset);
         nat_sq_flush(vt);
     }
     pvr_dr_addr = sq;
 }
 
 /** Writes strips to a recording: a line is written whole, so it need not be read first. */
-static inline pvr_vertex_t *nat_write_record(pvr_vertex_t *vt, const NatCorner *c, s32 count, u32 offset) {
+static inline pvr_vertex_t *nat_write_record(pvr_vertex_t *vt, const NatCorner *c, s32 count, u32 offset, s32 lit) {
     const NatCorner *end = c + count;
 
     for (; c < end; c++, vt++) {
         const NatPoint *p = &sPoints[c->word & 0xFFFF];
 
-        nat_vertex_put(vt, TRUE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, c->argb, offset);
+        nat_vertex_put(vt, TRUE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, lit ? p->argb : c->argb, offset);
     }
     return vt;
 }
@@ -418,6 +451,21 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_write_faded(pvr_vertex_
     }
     pvr_dr_addr = sq;
     return record;
+}
+
+/** Strips with a position behind the near plane, whose positions are compiled: their matrix is in XMTRX. */
+static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_level(const NatChunk *chunk, const NatCorner *corners, s32 count,
+                                                                    s32 cull, pvr_vertex_t *record, f32 scaleX, f32 scaleY,
+                                                                    f32 zMul, u32 offset, s32 textured) {
+    shz_vec4_t clip[NAT_MAX_POSITIONS];
+    s32 i;
+
+    for (i = 0; i < chunk->numPositions; i++) {
+        const f32 *p = &chunk->xyz[i * 3];
+
+        clip[i] = shz_xmtrx_transform_vec4(shz_vec4_init(p[0], p[1], p[2], 1.0f));
+    }
+    return pc_nat_clip(corners, count, clip, NULL, cull, record, scaleX, scaleY, zMul, offset, textured);
 }
 
 /** An animated texture: the mat with this frame's image, as the batch stands now. */
@@ -506,14 +554,14 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, u32 w0, u32 w1) {
                     continue;
                 }
                 if (behind) {
-                    rec = pc_nat_clip(corners, count, chunk->xyz, !part, rec, scaleX, scaleY, zMul, offset,
-                                      info->texture >= 0);
+                    rec = nat_clip_level(chunk, corners, count, !part, rec, scaleX, scaleY, zMul, offset,
+                                         info->texture >= 0);
                 } else if (fade) {
                     rec = nat_write_faded(rec, corners, count, offset, info->texture >= 0);
                 } else if (rec != NULL) {
-                    rec = nat_write_record(rec, corners, count, offset);
+                    rec = nat_write_record(rec, corners, count, offset, FALSE);
                 } else {
-                    nat_write_sq(corners, count, offset);
+                    nat_write_sq(corners, count, offset, FALSE);
                 }
                 corners += count;
             }
@@ -521,6 +569,433 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, u32 w0, u32 w1) {
     }
     gfx_nat_end(rec);
 }
+
+// An object model's block (dreamcast/build_native_meshes.py), and what the
+// console worked out from it.
+typedef struct {
+    char magic[4];
+    u32 fileSize, numMats, numChunks, matsAt, infosAt, chunksAt, cornersAt;
+    f32 centre[3], half;
+} NatModelHeader;
+
+typedef struct {
+    u16 firstVertex, numVertices, oneSided, twoSided, flags, unused;
+    union {
+        u32 cornersAt;
+        const NatCorner *corners;
+    };
+    u16 mat[4]; // by variant
+    u32 unused2[2];
+} NatModelChunk;
+
+_Static_assert(sizeof(NatModelChunk) == 32, "NatModelChunk is what the pack holds");
+
+typedef struct {
+    NatModelHeader *block;
+    pvr_poly_hdr_t *mats;
+    const NatMatInfo *infos;
+    NatModelChunk *chunks;
+    s32 generation; // the video memory its mats are good for
+    s32 variants;   // bit per variant: every batch has its mat
+} NatModel;
+
+#define NAT_MODEL(model) (*(NatModel **) (model)->pad34)
+#define NAT_VARIANT_FADING 1
+#define NAT_VARIANT_DIRECTIONAL 2
+#define NAT_CHUNK_ENVMAP 8
+
+void pc_nat_model_free(ObjectModel *model) {
+    NatModel *nat = NAT_MODEL(model);
+
+    if (nat != NULL) {
+        free(nat->block);
+        free(nat);
+        NAT_MODEL(model) = NULL;
+    }
+}
+
+/** Reads a model's block from the pack, for a model the game has just loaded. */
+void pc_nat_model_load(ObjectModel *model, s32 modelId) {
+    u8 *block;
+    NatModel *nat;
+    s32 i;
+
+    NAT_MODEL(model) = NULL;
+    block = nat_pack_read(sPackIndex != NULL || nat_pack_open() ? sPackLevels + modelId : 0xFFFFFFFFu);
+    if (block == NULL) {
+        return;
+    }
+    if (__builtin_memcmp(block, "DNMO", 4) != 0 || ((NatModelHeader *) block)->fileSize != (u32) model->fileSize ||
+        ((NatModelHeader *) block)->numChunks != (u32) model->numberOfBatches) {
+        free(block);
+        return;
+    }
+    nat = malloc(sizeof(*nat));
+    if (nat == NULL) {
+        printf("native: malloc failed for object model %ld\n", (long) modelId);
+        free(block);
+        return;
+    }
+    nat->block = (NatModelHeader *) block;
+    nat->mats = (pvr_poly_hdr_t *) (block + nat->block->matsAt);
+    nat->infos = (const NatMatInfo *) (block + nat->block->infosAt);
+    nat->chunks = (NatModelChunk *) (block + nat->block->chunksAt);
+    nat->generation = 0;
+    for (i = 0; i < model->numberOfBatches; i++) {
+        nat->chunks[i].corners = (const NatCorner *) (block + nat->chunks[i].cornersAt);
+    }
+    NAT_MODEL(model) = nat;
+}
+
+/** The textures' words in the mats, and which variants can be drawn. */
+static __attribute__((noinline, cold)) void nat_model_resolve(const ObjectModel *model, NatModel *nat) {
+    u32 i;
+    s32 c, v;
+
+    nat->generation = sVramGeneration;
+    nat->variants = 15;
+    for (i = 0; i < nat->block->numMats; i++) {
+        const NatMatInfo *info = &nat->infos[i];
+        u32 mode2, mode3;
+
+        if (info->texture < 0) {
+            continue;
+        }
+        if (!pc_nat_texture_words(model->textures[info->texture].texture, &mode2, &mode3)) {
+            nat->variants = 0;
+            return;
+        }
+        nat->mats[i].mode2 = (nat->mats[i].mode2 & ~(PVR_TA_PM2_USIZE_MASK | PVR_TA_PM2_VSIZE_MASK)) | mode2;
+        nat->mats[i].mode3 = mode3;
+    }
+    for (c = 0; c < model->numberOfBatches; c++) {
+        for (v = 0; v < 4; v++) {
+            if (nat->chunks[c].mat[v] == 0xFFFF && !(model->batches[c].flags & RENDER_HIDDEN)) {
+                nat->variants &= ~(1 << v);
+            }
+        }
+    }
+}
+
+s32 pc_nat_model_draw(Gfx **dl, ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts) {
+    extern s32 cam_get_viewport_layout(void);
+    extern s32 gBlockedRenderFlags;
+    extern s16 gUseDirectionalLighting;
+    NatModel *nat = NAT_MODEL(model);
+    s32 variant, i;
+
+    if (nat == NULL || gBlockedRenderFlags != 0 || cam_get_viewport_layout() != 0) {
+        return -2;
+    }
+    if (nat->generation != sVramGeneration) {
+        nat_model_resolve(model, nat);
+    }
+    variant = ((flags & RENDER_SEMI_TRANSPARENT) ? NAT_VARIANT_FADING : 0) |
+              (gUseDirectionalLighting ? NAT_VARIANT_DIRECTIONAL : 0);
+    if (!(nat->variants & (1 << variant))) {
+        return -2;
+    }
+    gDkrNative((*dl)++, NATIVE_MODEL, start | (variant << 8) | (overrideVerts ? 0x400 : 0), verts);
+    (*dl)->words.w0 = 0;
+    (*dl)->words.w1 = (u32) model;
+    (*dl)++;
+    // As render_mesh's walk over the batches would stop.
+    for (i = start; i < model->numberOfBatches; i++) {
+        if ((model->batches[i].flags & RENDER_SEMI_TRANSPARENT) && !(flags & RENDER_SEMI_TRANSPARENT)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * The vertices through the matrix in XMTRX, to sPoints from `out` on. Their
+ * positions change every frame, so these are the game's s16s.
+ */
+static inline s32 nat_transform_vertices(NatPoint *out, const Vertex *v, s32 count, f32 sx, f32 sy, f32 tx, f32 ty,
+                                         f32 zMul) {
+    const Vertex *end = v + count;
+    s32 behind = 0;
+
+    for (; v + 1 < end; v += 2, out += 2) {
+        shz_vec4_t c0 = shz_xmtrx_transform_vec4(shz_vec4_init(v[0].x, v[0].y, v[0].z, 1.0f));
+        shz_vec4_t c1 = nat_transform_fv4(v[1].x, v[1].y, v[1].z);
+        f32 inv0 = shz_invf_fsrra(c0.w);
+        f32 inv1 = shz_invf_fsrra(c1.w);
+
+        behind |= (c0.w < 1.0f) | (c1.w < 1.0f);
+        out[0].x = (c0.x * inv0 * sx) + tx;
+        out[0].y = ty - (c0.y * inv0 * sy);
+        out[0].z = inv0 * zMul;
+        out[1].x = (c1.x * inv1 * sx) + tx;
+        out[1].y = ty - (c1.y * inv1 * sy);
+        out[1].z = inv1 * zMul;
+    }
+    if (v < end) {
+        shz_vec4_t c = shz_xmtrx_transform_vec4(shz_vec4_init(v->x, v->y, v->z, 1.0f));
+        f32 inv = shz_invf_fsrra(c.w);
+
+        behind |= c.w < 1.0f;
+        out->x = (c.x * inv * sx) + tx;
+        out->y = ty - (c.y * inv * sy);
+        out->z = inv * zMul;
+    }
+    return behind;
+}
+
+/** A model's strips when a position lies behind the near plane: the clip space positions again, for the clipper. */
+static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_model(const NatView *view, const Vertex *v, s32 count, s32 split,
+                                                                    const NatCorner *corners, s32 numCorners, s32 cull,
+                                                                    pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul,
+                                                                    u32 offset, s32 textured) {
+    shz_vec4_t clip[NAT_MAX_POSITIONS];
+    u32 argb[NAT_MAX_POSITIONS];
+    s32 i;
+
+    shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix);
+    for (i = 0; i < count; i++) {
+        if (i == split) {
+            shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix2);
+        }
+        clip[i] = shz_xmtrx_transform_vec4(shz_vec4_init(v[i].x, v[i].y, v[i].z, 1.0f));
+        argb[i] = sPoints[i].argb;
+    }
+    return pc_nat_clip(corners, numCorners, clip, argb, cull, record, scaleX, scaleY, zMul, offset, textured);
+}
+
+/** Environment-mapped corners: their coordinates as the object's lighting left them in the model. */
+static __attribute__((noinline, cold)) const NatCorner *nat_envmap_corners(const ObjectModel *model, const NatCorner *c,
+                                                                           s32 count, NatCorner *out) {
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        const Triangle *t = &model->triangles[c[i].argb >> 2];
+        const TexCoords *uv = (c[i].argb & 3) == 0 ? &t->uv0 : (c[i].argb & 3) == 1 ? &t->uv1 : &t->uv2;
+
+        out[i].u = uv->u * c[i].u;
+        out[i].v = uv->v * c[i].v;
+        out[i].argb = 0;
+        out[i].word = c[i].word;
+    }
+    return out;
+}
+
+/** A texture's other frame: the mat with its image. */
+static __attribute__((noinline, cold)) const pvr_poly_hdr_t *nat_frame_header(const pvr_poly_hdr_t *mat, const TextureHeader *tex,
+                                                                              s32 frame, pvr_poly_hdr_t *out) {
+    u32 mode2, mode3;
+
+    shz_memcpy32(out, mat, sizeof(*out));
+    if (pc_nat_texture_words((const u8 *) tex + frame * tex->textureSize, &mode2, &mode3)) {
+        out->mode3 = mode3;
+    }
+    return out;
+}
+
+/** The vertices' colours, from a combiner that does not collapse, or with a fade drawn into the frame. */
+static __attribute__((noinline, cold)) void nat_colours_slow(const Vertex *v, s32 count, s32 fast, s32 textured) {
+    u32 argb[NAT_MAX_POSITIONS];
+    s32 i;
+
+    if (!fast) {
+        pc_nat_colours_mux(argb, v, count);
+        for (i = 0; i < count; i++) {
+            sPoints[i].argb = argb[i];
+        }
+    }
+    if (gDcFadeOn) {
+        for (i = 0; i < count; i++) {
+            sPoints[i].argb = gfx_frame_argb(sPoints[i].argb, textured);
+        }
+    }
+}
+
+DKR_NAT_CODE void pc_nat_model_run(const NatView *view, u32 w0, u32 w1, u32 w1b) {
+    const ObjectModel *model = (const ObjectModel *) w1b;
+    const NatModel *nat = NAT_MODEL(model);
+    const Vertex *verts = (const Vertex *) w1;
+    const s32 variant = (w0 >> 8) & 3;
+    const s32 fading = variant & NAT_VARIANT_FADING;
+    const s32 overrideVerts = (w0 >> 10) & 1;
+    const u32 glare = gDcGlareAdd;
+    const s32 fade = gDcFadeOn;
+    const NatMatInfo *lastInfo = NULL;
+    s32 i = w0 & 0xFF;
+    s32 lastMat = -1;
+    s32 fast = TRUE;
+    u32 keep = 0, konst = 0;
+    f32 scaleX, scaleY;
+    f32 sx, sy, tx, ty;
+    pvr_vertex_t *rec = NULL;
+
+    // The whole model, at rest, against the view: animation moves its vertices,
+    // so the box is taken at twice the size.
+    {
+        const NatModelHeader *block = nat->block;
+        NatChunk box;
+
+        box.centre[0] = block->centre[0];
+        box.centre[1] = block->centre[1];
+        box.centre[2] = block->centre[2];
+        box.half[0] = box.half[1] = box.half[2] = block->half * 2.0f;
+        if (sPlanesFor != view->serial) {
+            nat_planes(view);
+        }
+        if (nat_outside(&box)) {
+            return;
+        }
+    }
+    gfx_nat_scale(&scaleX, &scaleY);
+    sx = view->vpScaleX * scaleX;
+    sy = view->vpScaleY * scaleY;
+    tx = view->vpTransX * scaleX;
+    ty = view->vpTransY * scaleY;
+
+    for (; i < model->numberOfBatches; i++) {
+        const TriangleBatchInfo *batch = &model->batches[i];
+        const NatModelChunk *chunk = &nat->chunks[i];
+        const NatMatInfo *info;
+        const NatCorner *corners = chunk->corners;
+        NatCorner env[NAT_MAX_CORNERS];
+        const Vertex *v;
+        s32 count, split, part, behind, m;
+        const u32 flags = batch->flags;
+        f32 zMul;
+        u32 offset;
+
+        if ((flags & RENDER_SEMI_TRANSPARENT) && !fading) {
+            break;
+        }
+        if (flags & RENDER_HIDDEN) {
+            continue;
+        }
+        info = &nat->infos[chunk->mat[variant]];
+        count = chunk->numVertices;
+        v = &verts[chunk->firstVertex];
+        zMul = info->decal ? 1.003f : 1.0f;
+        offset = info->texture >= 0 ? glare : 0;
+        split = overrideVerts ? batch->vertOverride : count;
+        split = split < 0 ? 0 : split > count ? count : split;
+        behind = 0;
+        if (split > 0) {
+            shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix);
+            behind |= nat_transform_vertices(sPoints, v, split, sx, sy, tx, ty, zMul);
+        }
+        if (split < count) {
+            shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix2);
+            behind |= nat_transform_vertices(&sPoints[split], &v[split], count - split, sx, sy, tx, ty, zMul);
+        }
+        if (lastInfo == NULL || info->combine0 != lastInfo->combine0 || info->combine1 != lastInfo->combine1 ||
+            info->cycle != lastInfo->cycle) {
+            fast = pc_nat_classify(info->combine0, info->combine1, info->cycle, view->prim, view->env, &keep, &konst);
+            lastInfo = info;
+        }
+        for (m = 0; m < count; m++) {
+            sPoints[m].argb = ((((u32) v[m].a << 24) | ((u32) v[m].r << 16) | ((u32) v[m].g << 8) | (u32) v[m].b) & keep) |
+                              konst;
+        }
+        if (!fast || fade) {
+            nat_colours_slow(v, count, fast, info->texture >= 0);
+        }
+        for (part = 0; part < 2; part++) {
+            s32 numCorners = part ? chunk->twoSided : chunk->oneSided;
+            s32 mat = chunk->mat[variant] + part;
+            s32 words = behind ? (6 * numCorners) + 6 : numCorners;
+            s32 frame = 0;
+
+            if (numCorners == 0) {
+                continue;
+            }
+            if (info->texture >= 0 && batch->texOffset != 0) {
+                TextureHeader *tex = model->textures[info->texture].texture;
+                s32 texOffset = batch->texOffset << 14;
+
+                if (texOffset < (tex->numOfTextures << 8)) {
+                    frame = texOffset >> 16;
+                }
+            }
+            if (mat != lastMat || frame != 0) {
+                pvr_poly_hdr_t framed __attribute__((aligned(32)));
+                const pvr_poly_hdr_t *hdr = &nat->mats[mat];
+                int ok;
+
+                if (frame != 0) {
+                    hdr = nat_frame_header(hdr, model->textures[info->texture].texture, frame, &framed);
+                }
+                gfx_nat_end(rec);
+                rec = gfx_nat_header(hdr, info->route, words, &ok);
+                if (!ok) {
+                    rec = NULL;
+                    lastMat = -1;
+                    corners += numCorners;
+                    continue;
+                }
+                lastMat = frame != 0 ? -1 : mat;
+            } else if (rec != NULL && !gfx_nat_room(rec, words)) {
+                corners += numCorners;
+                continue;
+            }
+            {
+                const NatCorner *c = (chunk->flags & NAT_CHUNK_ENVMAP) ? nat_envmap_corners(model, corners, numCorners, env)
+                                                                       : corners;
+
+                if (behind) {
+                    rec = nat_clip_model(view, v, count, split, c, numCorners, !part, rec, scaleX, scaleY, zMul, offset,
+                                         info->texture >= 0);
+                } else if (rec != NULL) {
+                    rec = nat_write_record(rec, c, numCorners, offset, TRUE);
+                } else {
+                    nat_write_sq(c, numCorners, offset, TRUE);
+                }
+            }
+            corners += numCorners;
+        }
+    }
+    gfx_nat_end(rec);
+}
+
+#if DKR_NATIVE_CHECK
+void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags) {
+    extern s16 gUseDirectionalLighting;
+    NatModel *nat = NAT_MODEL(model);
+
+    if (nat != NULL) {
+        if (nat->generation != sVramGeneration) {
+            nat_model_resolve(model, nat);
+        }
+        gDkrNative((*dl)++, NATIVE_CHECK_MODEL,
+                   batch | ((flags & RENDER_SEMI_TRANSPARENT) ? 0x100 : 0) | (gUseDirectionalLighting ? 0x200 : 0), model);
+    }
+}
+
+void pc_nat_check_model_run(u32 w0, u32 w1) {
+    const ObjectModel *model = (const ObjectModel *) w1;
+    const NatModel *nat = NAT_MODEL(model);
+    s32 mat = nat->chunks[w0 & 0xFF].mat[(w0 >> 8) & 3];
+    const pvr_poly_hdr_t *hdr;
+    u32 got[4];
+    s32 route;
+
+    if (mat == 0xFFFF || !(nat->variants & (1 << ((w0 >> 8) & 3)))) {
+        return;
+    }
+    hdr = &nat->mats[mat];
+    gfx_nat_last(got, &route);
+    sChecked++;
+    if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
+        got[2] != hdr->mode2 || (model->batches[w0 & 0xFF].texOffset == 0 && got[3] != hdr->mode3) ||
+        route != nat->infos[mat].route) {
+        if (sCheckBad++ < 40) {
+            printf("NATCHK model %08lx batch %lu variant %lu header %08lx %08lx %08lx %08lx route %ld, compiled "
+                   "%08lx %08lx %08lx %08lx route %d\n",
+                   (unsigned long) w1, (unsigned long) (w0 & 0xFF), (unsigned long) ((w0 >> 8) & 3), (unsigned long) got[0],
+                   (unsigned long) got[1], (unsigned long) got[2], (unsigned long) got[3], (long) route,
+                   (unsigned long) hdr->cmd, (unsigned long) hdr->mode1, (unsigned long) hdr->mode2,
+                   (unsigned long) hdr->mode3, nat->infos[mat].route);
+        }
+    }
+}
+#endif
 
 #if DKR_NATIVE_CHECK
 void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch) {
@@ -537,7 +1012,6 @@ void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch) {
  * the same? The culling differs by design: the walk culled on the CPU.
  */
 void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
-    static u32 sChecked, sBad;
     const NatSegment *seg = &sSegs[w0 & 0xFFFF];
     const u16 *table = (const u16 *) ((const u8 *) sLevel + seg->tableAt);
     u16 at = table[w1];
@@ -556,7 +1030,7 @@ void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
     if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
         got[2] != hdr->mode2 || (!(chunk->flags & NAT_CHUNK_TEX_ANIM) && got[3] != hdr->mode3) ||
         route != sInfos[chunk->matOne].route) {
-        if (sBad++ < 40) {
+        if (sCheckBad++ < 40) {
             printf("NATCHK seg %lu batch %lu header %08lx %08lx %08lx %08lx route %ld, compiled %08lx %08lx %08lx %08lx "
                    "route %d\n",
                    (unsigned long) (w0 & 0xFFFF), (unsigned long) w1, (unsigned long) got[0], (unsigned long) got[1],
@@ -569,15 +1043,12 @@ void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
     for (i = 0; i < n; i++) {
         for (j = 0; j < count && colours[j] != chunk->corners[i].argb; j++) {}
         if (j == count) {
-            if (sBad++ < 40) {
+            if (sCheckBad++ < 40) {
                 printf("NATCHK seg %lu batch %lu colour %08lx not among the walk's %ld\n", (unsigned long) (w0 & 0xFFFF),
                        (unsigned long) w1, (unsigned long) chunk->corners[i].argb, (long) count);
             }
             break;
         }
-    }
-    if ((sChecked & 0xFFFFF) == 0) {
-        printf("NATCHK %lu batches, %lu differ\n", (unsigned long) sChecked, (unsigned long) sBad);
     }
 }
 #endif

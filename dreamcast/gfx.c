@@ -1975,7 +1975,7 @@ DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, fl
     return 1;
 }
 
-DKR_HOT_CODE void *gfx_nat_header(const void *hdr, int route, int words, int *ok) {
+DKR_NAT_CODE void *gfx_nat_header(const void *hdr, int route, int words, int *ok) {
     int *dirty = (route == ROUTE_PT) ? &sScisDirtyPt : (route == ROUTE_TR) ? &sScisDirty : &sScisDirtyOp;
     pvr_poly_hdr_t scissored;
 

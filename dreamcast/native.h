@@ -15,6 +15,8 @@
 #define G_NATIVE 0x0A
 #define NATIVE_LEVEL 0 // w0 low half: segment, bit 16: water hidden; w1: chunks first, end
 #define NATIVE_CHECK_LEVEL 1 // NATIVE_CHECK=1: w0 low half: segment; w1: batch
+#define NATIVE_MODEL 2 // w0: first batch, variant, vertices split; w1: vertices; then a word with w1 the model
+#define NATIVE_CHECK_MODEL 3 // NATIVE_CHECK=1: w0: batch, variant; w1: the model
 
 #define gDkrNative(pkt, kind, a, b)                                                                     \
     do {                                                                                                \
@@ -26,6 +28,8 @@
 // What a frame's chunk draws through.
 typedef struct {
     const f32 *matrix;    // the 4x4 the positions go through, columns first
+    const f32 *matrix2;   // a racer's head (slot 2)
+    u32 prim, env;        // as the combiner keys them, RGBA
     f32 vpScaleX, vpScaleY, vpTransX, vpTransY; // the N64 viewport
     s32 serial;           // changes when any of the above does
 } NatView;
@@ -86,14 +90,28 @@ void pc_nat_vram_lost(void);
 s32 pc_nat_level_batches(Gfx **dl, s32 segment, s32 batch, s32 end, s32 waterHidden);
 void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch);
 
+// Object models (src/object_models.c, src/objects.c). render_mesh's return, or -2
+// if the walk has to draw it.
+void pc_nat_model_load(ObjectModel *model, s32 modelId);
+void pc_nat_model_free(ObjectModel *model);
+s32 pc_nat_model_draw(Gfx **dl, ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
+void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags);
+
 // The walk's side (dreamcast/main.c).
 void pc_nat_level_run(const NatView *view, u32 w0, u32 w1);
 void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count);
+void pc_nat_model_run(const NatView *view, u32 w0, u32 w1, u32 w1b);
+void pc_nat_check_model_run(u32 w0, u32 w1);
+// How a combiner treats the shade under these colours. TRUE: a colour is
+// (shade & keep) | konst. FALSE: pc_nat_colours_mux does it, vertex by vertex.
+s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst);
+void pc_nat_colours_mux(u32 *argb, const Vertex *verts, s32 count);
 
 // The texture a frame's pixels went to the PVR as: the bits of the polygon header
 // the texture decides. 0 if the texture is not in video memory.
 s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3);
-pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const f32 *xyz, s32 cull, pvr_vertex_t *record, f32 scaleX,
-                          f32 scaleY, f32 zMul, u32 offset, s32 textured);
+// `clip`: the clip space positions; `argb`: their colours, or NULL for the corners' own.
+pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip, const u32 *argb, s32 cull,
+                          pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul, u32 offset, s32 textured);
 
 #endif

@@ -62,6 +62,7 @@ static OSThread sHostThread;
 // A printf over dcload is a round trip to the host: printed mid-scene, the
 // lines about a long frame made the next frames long too.
 #include <stdarg.h>
+#include <malloc.h>
 static char sProfLog[64 * 1024];
 static u32 sProfLogLength, sProfLogDropped;
 
@@ -2480,13 +2481,12 @@ static __attribute__((noinline)) void blast_clip_tri(const BlastClipVert *in, s3
 
 /**
  * A compiled run of strips with a position behind the near plane: triangle by
- * triangle through the near-clipper, out of the native writers' way. The
- * positions go through the matrix native.c left in XMTRX. Returns where a
- * recording stands, or NULL for the opaque list.
+ * triangle through the near-clipper, out of the native writers' way. Returns
+ * where a recording stands, or NULL for the opaque list.
  */
-__attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const f32 *xyz, s32 cull,
-                                                          pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul,
-                                                          u32 offset, s32 textured) {
+__attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip,
+                                                          const u32 *argb, s32 cull, pvr_vertex_t *record, f32 scaleX,
+                                                          f32 scaleY, f32 zMul, u32 offset, s32 textured) {
     BlastClipVert cv[3];
     s32 step = 0;
     s32 i;
@@ -2499,7 +2499,7 @@ __attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corne
     sBlastOffset = offset;
     for (i = 0; i < count; i++) {
         const NatCorner *c = &corners[i];
-        const f32 *p = &xyz[(c->word & 0xFFFF) * 3];
+        s32 at = c->word & 0xFFFF;
         // Strips alternate winding: every other triangle has its first two corners swapped.
         BlastClipVert *out = &cv[step < 3 ? step : 2];
 
@@ -2507,10 +2507,14 @@ __attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corne
             cv[0] = cv[1];
             cv[1] = cv[2];
         }
-        out->c = shz_xmtrx_transform_vec4(shz_vec4_init(p[0], p[1], p[2], 1.0f));
+        out->c = clip[at];
         out->u = c->u;
         out->v = c->v;
-        out->argb = gDcFadeOn ? gfx_frame_argb(c->argb, textured) : c->argb;
+        if (argb != NULL) {
+            out->argb = argb[at]; // a frame's own, faded already
+        } else {
+            out->argb = gDcFadeOn ? gfx_frame_argb(c->argb, textured) : c->argb;
+        }
         step++;
         if (step >= 3) {
             if (step & 1) {
@@ -2913,6 +2917,10 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
  * the state allows and no corner is behind the near plane; returns FALSE to
  * leave the batch to the emulated path otherwise.
  */
+void pc_nat_colours_mux(u32 *argb, const Vertex *verts, s32 count) {
+    blast_colors_mux(argb, verts, count);
+}
+
 static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled) {
     u32 texture = 0;
     f32 uMul = 0.0f, vMul = 0.0f;
@@ -3205,6 +3213,28 @@ static u8 clamp_u8(f32 v) {
  */
 #define CC_DIRLIGHT_W0 0xFC1596A4u
 #define CC_DIRLIGHT_W1 0x30FDFE38u
+
+s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst) {
+    u32 savedW0 = sCombineW0, savedW1 = sCombineW1, savedH = sOtherModeH;
+
+    (void) prim;
+    (void) env; // the walk's own, for as long as it holds them
+    sCombineW0 = w0;
+    sCombineW1 = w1;
+    sOtherModeH = (sOtherModeH & ~(3u << G_MDSFT_CYCLETYPE)) | cycle;
+    combiner_classify();
+    *keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
+            (sCcPass[2] ? 0x000000FFu : 0);
+    *konst = (((u32) sCcConst[3] << 24) | ((u32) sCcConst[0] << 16) | ((u32) sCcConst[1] << 8) | (u32) sCcConst[2]) &
+             ~*keep;
+    if (!sCcFast) {
+        cc_prog_sync_current();
+    }
+    sCombineW0 = savedW0;
+    sCombineW1 = savedW1;
+    sOtherModeH = savedH;
+    return sCcFast;
+}
 
 /**
  * The colours of a run of vertices through the real mux. Out of line, like
@@ -3502,6 +3532,7 @@ static void combiner_color(u8 lit[4], u8 unlit[3]) {
  * of the picture. Depth testing is off: the game clears G_ZBUFFER for its 2D and
  * relies on display-list order, and so do we.
  */
+/** One rectangle's two triangles, ready for gfx_draw_tris. */
 static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 lit[4],
                          const u8 unlit[3], u32 texture) {
     GfxTriVert q[6];
@@ -3716,23 +3747,35 @@ static __attribute__((noinline)) void prof_trin_why(u32 w0) {
  * a G_ENDDL, and G_DMADL likewise DMAs a fixed-size block. Zero means "run
  * until G_ENDDL", which is how nested G_DL lists terminate.
  */
-/** A native draw in the display list: dreamcast/native.c does the rest. */
-static __attribute__((noinline)) void handle_native(u32 w0, u32 w1) {
+/**
+ * A native draw in the display list: dreamcast/native.c does the rest. Returns
+ * how many words of the list it took beyond its own.
+ */
+static __attribute__((noinline)) s32 handle_native(u32 w0, u32 w1, const Gfx *next) {
     u32 kind = (w0 >> 20) & 0xF;
 
     sNatView.matrix = (const f32 *) sMatrices[sCurMatrix];
+    sNatView.matrix2 = (const f32 *) sMatrices[2];
+    sNatView.prim = CC_KEY_RGBA(sPrimColor);
+    sNatView.env = CC_KEY_RGBA(sEnvColor);
     sNatView.vpScaleX = sVpScaleX;
     sNatView.vpScaleY = sVpScaleY;
     sNatView.vpTransX = sVpTransX;
     sNatView.vpTransY = sVpTransY;
     if (kind == NATIVE_LEVEL) {
         pc_nat_level_run(&sNatView, w0 & 0xFFFFF, w1);
+    } else if (kind == NATIVE_MODEL) {
+        pc_nat_model_run(&sNatView, w0 & 0xFFFFF, w1, next->words.w1);
+        return 1;
     }
 #if DKR_NATIVE_CHECK
     else if (kind == NATIVE_CHECK_LEVEL) {
         pc_nat_check_level_run(w0 & 0xFFFFF, w1, sCheckArgb, sCheckArgbCount);
+    } else if (kind == NATIVE_CHECK_MODEL) {
+        pc_nat_check_model_run(w0 & 0xFFFFF, w1);
     }
 #endif
+    return 0;
 }
 
 static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
@@ -3766,7 +3809,7 @@ static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
         // display list actually holds.
         switch (cmd) {
             case G_NATIVE:
-                handle_native(w0, w1);
+                i += handle_native(w0, w1, &dl[i + 1]);
                 break;
             case G_MTX: {
                 s32 slot = (((w0 >> 16) & 0xFF) >> 6) & 3;
@@ -4319,6 +4362,14 @@ static void frame_walk(void *data) {
             prof_sample_frame_end(0);
         }
         sSceneVbl = vbl;
+    }
+    // A line every five seconds or so, to tell a run that stopped from one that
+    // only went quiet: the frame, and what the heap has left.
+    if ((sGfxFrameCount % 300) == 0) {
+        struct mallinfo heap = mallinfo();
+
+        printf("HEART t=%lu ms frames %lu map %ld heap free %lu\n", (unsigned long) (pc_uptime_ns() / 1000000u),
+               (unsigned long) sGfxFrameCount, (long) sScene.map, (unsigned long) heap.fordblks);
     }
     sCatCur = PC_PROF_CAT_OTHER;
     gfx_prof_set_category(sCatCur);

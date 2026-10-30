@@ -732,7 +732,9 @@ def compile_model(raw, tables, data, sec, tex_offsets, stats):
             key = (tri_index, which) if envmap else (index, u, v)
             if key not in ids:
                 ids[key] = len(corners)
-                corners.append((index, u * u_mul, v * v_mul, (batch["f"] + tri_index) * 4 + which))
+                # Its u and v are then the factors for what the frame's lighting left in the model.
+                corners.append((index, u_mul if envmap else u * u_mul, v_mul if envmap else v * v_mul,
+                                (batch["f"] + tri_index) * 4 + which))
             return ids[key]
 
         for k, t in enumerate(tris):
@@ -779,7 +781,7 @@ def compile_model(raw, tables, data, sec, tex_offsets, stats):
         out += mat_info_bytes(info)
     out += bytes(chunks_at - len(out))
     for first_vtx, count_vtx, one, two, flags, offset, variants in chunks:
-        out += struct.pack("<6HI4HI", first_vtx, count_vtx, one, two, flags, 0, corners_at + offset, *variants, 0)
+        out += struct.pack("<6HI4H2I", first_vtx, count_vtx, one, two, flags, 0, corners_at + offset, *variants, 0, 0)
     out += corner_bytes
     return bytes(out)
 
