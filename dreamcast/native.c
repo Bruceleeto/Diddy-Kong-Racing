@@ -111,6 +111,7 @@ static DKR_HOT NatPoint sPoints[NAT_MAX_POSITIONS] __attribute__((aligned(32)));
 extern LevelModel *gCurrentLevelModel;
 
 #if DKR_NATIVE_CHECK
+#define NAT_FOG_BITS PVR_TA_PM2_FOG_MASK // follows the game's G_FOG each frame (gfx_nat_set_fog)
 static u32 sChecked, sCheckBad;
 
 /** One line per kind of difference, or a batch repeated every frame would use them all up. */
@@ -1562,9 +1563,12 @@ void pc_nat_check_model_run(u32 w0, u32 w1) {
     if (!gfx_nat_last((unsigned int *) got, (int *) &route)) {
         return; // the walk dropped this batch
     }
+    if ((got[0] & 8) != (hdr->cmd & 8)) {
+        return; // what it holds is an earlier 2D batch's: this one drew nothing
+    }
     sChecked++;
     if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
-        got[2] != hdr->mode2 || (model->batches[w0 & 0xFF].texOffset == 0 && got[3] != hdr->mode3) ||
+        (got[2] | NAT_FOG_BITS) != (hdr->mode2 | NAT_FOG_BITS) || (model->batches[w0 & 0xFF].texOffset == 0 && got[3] != hdr->mode3) ||
         route != nat->infos[mat].route) {
         if (nat_check_report(got[2], hdr->mode2, route)) {
             printf("NATCHK model %08lx batch %lu variant %lu header %08lx %08lx %08lx %08lx route %ld, compiled "
@@ -1609,9 +1613,12 @@ void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
     if (!gfx_nat_last((unsigned int *) got, (int *) &route)) {
         return; // the walk dropped this batch
     }
+    if ((got[0] & 8) != (hdr->cmd & 8)) {
+        return; // what it holds is an earlier 2D batch's: this one drew nothing
+    }
     sChecked++;
     if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
-        got[2] != hdr->mode2 || (!(chunk->flags & NAT_CHUNK_TEX_ANIM) && got[3] != hdr->mode3) ||
+        (got[2] | NAT_FOG_BITS) != (hdr->mode2 | NAT_FOG_BITS) || (!(chunk->flags & NAT_CHUNK_TEX_ANIM) && got[3] != hdr->mode3) ||
         route != sInfos[chunk->matOne].route) {
         if (nat_check_report(got[2], hdr->mode2, route)) {
             printf("NATCHK seg %lu batch %lu header %08lx %08lx %08lx %08lx route %ld, compiled %08lx %08lx %08lx %08lx "
@@ -1622,7 +1629,7 @@ void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
                    sInfos[chunk->matOne].route);
         }
     }
-    n = chunk->oneSided + chunk->twoSided;
+    n = gDcFadeOn ? 0 : chunk->oneSided + chunk->twoSided; // a fade is on the walk's colours
     for (i = 0; i < n; i++) {
         for (j = 0; j < count && colours[j] != chunk->corners[i].argb; j++) {}
         if (j == count) {

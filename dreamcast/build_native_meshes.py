@@ -132,6 +132,12 @@ def table(data, sec, index):
     return list(words[: words.index(0xFFFFFFFF)] if 0xFFFFFFFF in words else words)
 
 
+# TexFormats: 0 RGBA32, 1 RGBA16, 4 IA16, 5 IA8, 6 IA4, 7 CI4.
+TEX_ALWAYS_TRANSPARENT = (4, 5, 6)
+TEX_MAYBE_TRANSPARENT = (0, 1, 7)
+TEX_MODES_TRANSPARENT = (0, 2)  # src/textures_sprites.h, TextureRenderModes
+
+
 def next_pot(value):
     """dreamcast/gfx.c: the smallest power of two >= v, within the PVR's [8, 1024]."""
     pot = 8
@@ -146,7 +152,14 @@ def texture_header(data, sec, offsets, index):
     width, height, fmt = data[start], data[start + 1], data[start + 2]
     flags = struct.unpack_from(">h", data, start + 6)[0] & 0xFFFF
     frames = struct.unpack_from(">H", data, start + 0x12)[0]
-    return {"width": width, "height": height, "format": fmt & 0xF, "flags": flags, "frames": frames}
+    # src/textures_sprites.c material_init: what the format says of its transparency.
+    kind = fmt & 0xF
+    mode = fmt >> 4
+    if kind in TEX_ALWAYS_TRANSPARENT or (kind in TEX_MAYBE_TRANSPARENT and mode in TEX_MODES_TRANSPARENT):
+        flags |= RENDER_SEMI_TRANSPARENT
+    if kind == 7:
+        flags |= RENDER_COLOUR_INDEX
+    return {"width": width, "height": height, "format": kind, "flags": flags, "frames": frames}
 
 
 def wrap_modes(tex):
@@ -716,8 +729,6 @@ def compile_model(raw, tables, data, sec, tex_offsets, stats):
             if state is None:
                 variants.append(0xFFFF)
                 continue
-            if directional and state["decal"]:
-                state["route"] = ROUTE_TR  # as the walk draws a racer's face (NATIVE_CHECK)
             variants.append(pair(state, tex, batch["tex"] if tex else -1, (w0, w1, omh & (3 << G_MDSFT_CYCLETYPE))))
         if variants[0] == 0xFFFF:
             stats["walk"]["model batch"] += 1
