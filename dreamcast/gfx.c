@@ -193,6 +193,7 @@ static int sPendingFreeCount;
 #define ROUTE_OP 2
 
 static DKR_HOT int sRoute;
+static DKR_HOT int sNatNoFog; // the game has G_FOG off: native headers go without
 
 #ifndef DKR_NATIVE_CHECK
 #define DKR_NATIVE_CHECK 0
@@ -2014,9 +2015,14 @@ DKR_NAT_CODE void *gfx_nat_header(const void *hdr, int list, int words, int *ok)
         }
         *dirty = 0;
     }
-    if (sScisEnable) {
+    if (sScisEnable || sNatNoFog) {
         shz_memcpy32(&scissored, hdr, sizeof(scissored));
-        scissored.cmd |= PVR_USERCLIP_INSIDE << 16;
+        if (sScisEnable) {
+            scissored.cmd |= PVR_USERCLIP_INSIDE << 16;
+        }
+        if (sNatNoFog) {
+            scissored.mode2 = (scissored.mode2 & ~PVR_TA_PM2_FOG_MASK) | (PVR_FOG_DISABLE << PVR_TA_PM2_FOG_SHIFT);
+        }
         hdr = &scissored;
     }
     if (route == ROUTE_OP) {
@@ -2034,6 +2040,10 @@ void gfx_nat_end(void *recordEnd) {
     if (recordEnd != NULL) {
         gfx_blast_end(recordEnd);
     }
+}
+
+void gfx_nat_set_fog(int enable) {
+    sNatNoFog = !enable;
 }
 
 int gfx_nat_exact(void) {

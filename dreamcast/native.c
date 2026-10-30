@@ -112,6 +112,26 @@ extern LevelModel *gCurrentLevelModel;
 
 #if DKR_NATIVE_CHECK
 static u32 sChecked, sCheckBad;
+
+/** One line per kind of difference, or a batch repeated every frame would use them all up. */
+static s32 nat_check_report(u32 walk2, u32 ours2, s32 route) {
+    static u32 sSeen[64];
+    static s32 sSeenCount;
+    u32 key = (walk2 * 33) ^ ours2 ^ ((u32) route << 28);
+    s32 i;
+
+    sCheckBad++;
+    for (i = 0; i < sSeenCount; i++) {
+        if (sSeen[i] == key) {
+            return FALSE;
+        }
+    }
+    if (sSeenCount == 64) {
+        return FALSE;
+    }
+    sSeen[sSeenCount++] = key;
+    return TRUE;
+}
 #endif
 
 void pc_nat_level_free(void) {
@@ -1546,7 +1566,7 @@ void pc_nat_check_model_run(u32 w0, u32 w1) {
     if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
         got[2] != hdr->mode2 || (model->batches[w0 & 0xFF].texOffset == 0 && got[3] != hdr->mode3) ||
         route != nat->infos[mat].route) {
-        if (sCheckBad++ < 40) {
+        if (nat_check_report(got[2], hdr->mode2, route)) {
             printf("NATCHK model %08lx batch %lu variant %lu header %08lx %08lx %08lx %08lx route %ld, compiled "
                    "%08lx %08lx %08lx %08lx route %d\n",
                    (unsigned long) w1, (unsigned long) (w0 & 0xFF), (unsigned long) ((w0 >> 8) & 3), (unsigned long) got[0],
@@ -1593,7 +1613,7 @@ void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
     if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
         got[2] != hdr->mode2 || (!(chunk->flags & NAT_CHUNK_TEX_ANIM) && got[3] != hdr->mode3) ||
         route != sInfos[chunk->matOne].route) {
-        if (sCheckBad++ < 40) {
+        if (nat_check_report(got[2], hdr->mode2, route)) {
             printf("NATCHK seg %lu batch %lu header %08lx %08lx %08lx %08lx route %ld, compiled %08lx %08lx %08lx %08lx "
                    "route %d\n",
                    (unsigned long) (w0 & 0xFFFF), (unsigned long) w1, (unsigned long) got[0], (unsigned long) got[1],
@@ -1606,7 +1626,7 @@ void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
     for (i = 0; i < n; i++) {
         for (j = 0; j < count && colours[j] != chunk->corners[i].argb; j++) {}
         if (j == count) {
-            if (sCheckBad++ < 40) {
+            if (nat_check_report(chunk->corners[i].argb, 0, route)) {
                 printf("NATCHK seg %lu batch %lu colour %08lx not among the walk's %ld\n", (unsigned long) (w0 & 0xFFFF),
                        (unsigned long) w1, (unsigned long) chunk->corners[i].argb, (long) count);
             }

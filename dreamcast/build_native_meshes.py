@@ -172,8 +172,9 @@ def material(tables, flags, tex, directional=False):
         flags &= (RENDER_VTX_ALPHA | RENDER_DECAL | RENDER_Z_UPDATE | RENDER_COLOUR_INDEX | RENDER_CUTOUT |
                   RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)
     flags = flags & ~RENDER_FOG_ACTIVE if flags & RENDER_VTX_ALPHA else flags & ~RENDER_Z_UPDATE
-    # Directional lighting goes without fog, as the walk draws it.
-    geometry = 0 if flags & RENDER_VTX_ALPHA or directional else G_FOG
+    # Fog is otherwise on: where the game has G_FOG off, a menu's models or a
+    # directional material left over from one, a frame clears it from the header.
+    geometry = 0 if flags & RENDER_VTX_ALPHA else G_FOG
     if flags & RENDER_Z_COMPARE:
         geometry |= G_ZBUFFER
     if tex is None:
@@ -715,6 +716,8 @@ def compile_model(raw, tables, data, sec, tex_offsets, stats):
             if state is None:
                 variants.append(0xFFFF)
                 continue
+            if directional and state["decal"]:
+                state["route"] = ROUTE_TR  # as the walk draws a racer's face (NATIVE_CHECK)
             variants.append(pair(state, tex, batch["tex"] if tex else -1, (w0, w1, omh & (3 << G_MDSFT_CYCLETYPE))))
         if variants[0] == 0xFFFF:
             stats["walk"]["model batch"] += 1

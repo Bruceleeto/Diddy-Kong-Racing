@@ -3829,6 +3829,7 @@ static __attribute__((noinline)) s32 handle_native(u32 w0, u32 w1, const Gfx *ne
     sNatView.matrix = (const f32 *) sMatrices[sCurMatrix];
     sNatView.matrix2 = (const f32 *) sMatrices[2];
     sNatView.exact = gfx_nat_exact();
+    gfx_nat_set_fog((sGeometryMode & G_FOG) != 0);
     sNatView.prim = CC_KEY_RGBA(sPrimColor);
     sNatView.env = CC_KEY_RGBA(sEnvColor);
     sNatView.vpScaleX = sVpScaleX;

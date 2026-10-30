@@ -141,6 +141,7 @@ void gfx_recorded_words(int *pt, int *tr);
 // queues, the opaque list being streamed; *ok is 0 when the list has no room.
 void *gfx_nat_header(const void *hdr, int route, int words, int *ok);
 void gfx_nat_end(void *recordEnd);
+void gfx_nat_set_fog(int enable); // off: headers go without, whatever they were compiled with
 int gfx_nat_room(void *record, int words); // room for `words` more in the open recording
 void gfx_nat_scale(float *x, float *y);
 // Whether the scissor can be left to the PVR's tiles alone, as native draws do.
