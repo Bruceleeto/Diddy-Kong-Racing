@@ -13,6 +13,12 @@ struct Gfx;
 void pc_scrawl_after_batch(int segment, int batch, void *dl);
 // The display-list walk found the marker: draws it.
 void pc_scrawl_draw(void);
+// Where a native run of batches from `batch` has to stop for the marker to fall after the logo.
+int pc_scrawl_batch_limit(int segment, int batch, int end);
+
 #endif
+
+// Where a native run of batches from `batch` has to stop for the marker to fall after the logo.
+int pc_scrawl_batch_limit(int segment, int batch, int end);
 
 #endif

@@ -8,6 +8,7 @@
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
 #include "gfx.h"
+#include "native.h"
 #include <enDjinn/enj_texture.h>
 
 
@@ -738,6 +739,14 @@ typedef struct {
 #define GFX_FRONT_FACE_SIGN (-1.0f)
 
 static DKR_HOT u32 sGfxFrameCount = 0;
+static DKR_HOT NatView sNatView; // what a native draw goes through, as the walk has it now
+#ifndef DKR_NATIVE_CHECK
+#define DKR_NATIVE_CHECK 0
+#endif
+#if DKR_NATIVE_CHECK
+static u32 sCheckArgb[64]; // the colours the last blast batch went out with
+static s32 sCheckArgbCount;
+#endif
 
 // Aligns the hot data section (DKR_HOT) to the operand cache's size, so its
 // lines land on the same cache sets whatever else grows or shrinks, and an A/B
@@ -1103,6 +1112,7 @@ static s32 bundle_claim(void *first, s32 id, s32 frames) {
  * load again when drawn.
  */
 void pc_textures_vram_lost(void) {
+    pc_nat_vram_lost();
     sTexCacheCount = 0;
     memset(sTexHint, 0, sizeof(sTexHint));
     sPrebuiltCount = 0;
@@ -1301,6 +1311,15 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         sTexLoadsInFrame++;
         sTexLoadNsInFrame += timer_ns_gettime64() - started;
     }
+}
+
+s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3) {
+    s32 p = prebuilt_find((u32) ((const TextureHeader *) textureHeader + 1));
+
+    if (p < 0) {
+        return FALSE;
+    }
+    return gfx_texture_words(sPrebuilt[p].handle, (unsigned int *) mode2, (unsigned int *) mode3);
 }
 
 /** Prints and resets what loading prebuilt textures cost; the scene gate calls it. */
@@ -2358,31 +2377,6 @@ static __attribute__((noinline, cold)) void blast_fade_colors(u32 *argb, s32 cou
     }
 }
 
-static inline void blast_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v,
-                             u32 argb, u32 oargb) {
-    u8 *top = (u8 *) vt + 32;
-
-    if (alloc) {
-        __asm__ __volatile__("movca.l r0, @%1" : "=m"(*vt) : "r"(vt), "z"(flags));
-    }
-    __asm__ __volatile__("mov.l %[oargb], @-%[p]\n\t"
-                         "mov.l %[argb], @-%[p]\n\t"
-                         "fmov.s %[v], @-%[p]\n\t"
-                         "fmov.s %[u], @-%[p]\n\t"
-                         "fmov.s %[z], @-%[p]\n\t"
-                         "fmov.s %[y], @-%[p]\n\t"
-                         "fmov.s %[x], @-%[p]\n\t"
-                         "mov.l %[flags], @-%[p]"
-                         : [p] "+r"(top), "+m"(*vt)
-                         : [oargb] "r"(oargb), [argb] "r"(argb), [v] "f"(v), [u] "f"(u), [z] "f"(z), [y] "f"(y),
-                           [x] "f"(x), [flags] "r"(flags));
-}
-
-/** Send a store queue's vertex to the TA. The asm reads the vertex, which orders the stores before it. */
-static inline void blast_sq_flush(pvr_vertex_t *vt) {
-    __asm__ __volatile__("pref @%0" : : "r"(vt), "m"(*vt));
-}
-
 /** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
     pvr_vertex_t *rec = sBlastRecord;
@@ -2392,15 +2386,15 @@ static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u
 #endif
     // color is final: the callers have faded it (and added an untextured batch's glare).
     if (rec) {
-        blast_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
+        nat_vertex_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
                   sBlastOffset);
         sBlastRecord = rec + 1;
     } else {
         pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
 
-        blast_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
+        nat_vertex_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
                   sBlastOffset);
-        blast_sq_flush(vt);
+        nat_sq_flush(vt);
     }
 }
 
@@ -2484,6 +2478,58 @@ static __attribute__((noinline)) void blast_clip_tri(const BlastClipVert *in, s3
     }
 }
 
+/**
+ * A compiled run of strips with a position behind the near plane: triangle by
+ * triangle through the near-clipper, out of the native writers' way. The
+ * positions go through the matrix native.c left in XMTRX. Returns where a
+ * recording stands, or NULL for the opaque list.
+ */
+__attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const f32 *xyz, s32 cull,
+                                                          pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul,
+                                                          u32 offset, s32 textured) {
+    BlastClipVert cv[3];
+    s32 step = 0;
+    s32 i;
+
+    sBlastRecord = record;
+    sBlastSX = scaleX;
+    sBlastSY = scaleY;
+    sBlastZMul = zMul;
+    sBlastZAdd = 0.0f;
+    sBlastOffset = offset;
+    for (i = 0; i < count; i++) {
+        const NatCorner *c = &corners[i];
+        const f32 *p = &xyz[(c->word & 0xFFFF) * 3];
+        // Strips alternate winding: every other triangle has its first two corners swapped.
+        BlastClipVert *out = &cv[step < 3 ? step : 2];
+
+        if (step >= 3) {
+            cv[0] = cv[1];
+            cv[1] = cv[2];
+        }
+        out->c = shz_xmtrx_transform_vec4(shz_vec4_init(p[0], p[1], p[2], 1.0f));
+        out->u = c->u;
+        out->v = c->v;
+        out->argb = gDcFadeOn ? gfx_frame_argb(c->argb, textured) : c->argb;
+        step++;
+        if (step >= 3) {
+            if (step & 1) {
+                blast_clip_tri(cv, cull);
+            } else {
+                BlastClipVert swapped[3] = { cv[1], cv[0], cv[2] };
+
+                blast_clip_tri(swapped, cull);
+            }
+        }
+        if ((c->word & 0xF0000000u) == PVR_CMD_VERTEX_EOL) {
+            step = 0;
+        }
+    }
+    record = sBlastRecord;
+    sBlastRecord = NULL;
+    return record;
+}
+
 /** A blast triangle with a corner behind the near plane, to the clipper; out of line, off the hot loop. */
 static __attribute__((noinline)) void blast_clip_corners(const Triangle *t, const shz_vec4_t *cp, const u32 *argb,
                                                          f32 uMul, f32 vMul) {
@@ -2525,20 +2571,6 @@ static __attribute__((noinline)) void prof_slow_cc(u32 verts) {
     }
 }
 #endif
-
-/**
- * shz_xmtrx_transform_vec4 on fv4 rather than fv8, with w = 1: a second vector
- * register, so two vertices can be in the transform at once.
- */
-static inline shz_vec4_t blast_transform_fv4(f32 x, f32 y, f32 z) {
-    register f32 rx __asm__("fr4") = x;
-    register f32 ry __asm__("fr5") = y;
-    register f32 rz __asm__("fr6") = z;
-    register f32 rw __asm__("fr7") = 1.0f;
-
-    __asm__ __volatile__("ftrv xmtrx, fv4" : "+f"(rx), "+f"(ry), "+f"(rz), "+f"(rw));
-    return shz_vec4_init(rx, ry, rz, rw);
-}
 
 /**
  * The combiner mixes shade with something else: run the real mux, once per
@@ -2716,7 +2748,7 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
                     triPref += 32;
                 }
                 c0 = shz_xmtrx_transform_vec4(shz_vec4_init(v[0].x, v[0].y, v[0].z, 1.0f));
-                c1 = blast_transform_fv4(v[1].x, v[1].y, v[1].z);
+                c1 = nat_transform_fv4(v[1].x, v[1].y, v[1].z);
                 inv0 = shz_invf_fsrra(c0.w);
                 inv1 = shz_invf_fsrra(c1.w);
                 cp[i] = c0;
@@ -2764,6 +2796,12 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
     if (gDcFadeOn) {
         blast_fade_colors(argb, total, texture != 0);
     }
+#if DKR_NATIVE_CHECK
+    sCheckArgbCount = total;
+    for (i = 0; i < total; i++) {
+        sCheckArgb[i] = argb[i];
+    }
+#endif
 
     PROF_LAP(tXform);
 #if DKR_GFX_PROFILE
@@ -2842,20 +2880,20 @@ static DKR_HOT_CODE void blast_render(const Vertex *verts, s32 numVerts, const V
                 o1 = (pvr_vertex_t *) sq;
                 o2 = (pvr_vertex_t *) (sq ^ 32);
             }
-            blast_put(o0, rec != NULL, PVR_CMD_VERTEX, px[i0], py[i0], pz[i0], t->uv0.u * uMul, t->uv0.v * vMul,
+            nat_vertex_put(o0, rec != NULL, PVR_CMD_VERTEX, px[i0], py[i0], pz[i0], t->uv0.u * uMul, t->uv0.v * vMul,
                       argb[i0], offset);
             if (!rec) {
-                blast_sq_flush(o0);
+                nat_sq_flush(o0);
             }
-            blast_put(o1, rec != NULL, PVR_CMD_VERTEX, px[i1], py[i1], pz[i1], t->uv1.u * uMul, t->uv1.v * vMul,
+            nat_vertex_put(o1, rec != NULL, PVR_CMD_VERTEX, px[i1], py[i1], pz[i1], t->uv1.u * uMul, t->uv1.v * vMul,
                       argb[i1], offset);
             if (!rec) {
-                blast_sq_flush(o1);
+                nat_sq_flush(o1);
             }
-            blast_put(o2, rec != NULL, PVR_CMD_VERTEX_EOL, px[i2], py[i2], pz[i2], t->uv2.u * uMul, t->uv2.v * vMul,
+            nat_vertex_put(o2, rec != NULL, PVR_CMD_VERTEX_EOL, px[i2], py[i2], pz[i2], t->uv2.u * uMul, t->uv2.v * vMul,
                       argb[i2], offset);
             if (!rec) {
-                blast_sq_flush(o2);
+                nat_sq_flush(o2);
                 // Three flips from sq leave it where the third vertex went.
                 sq ^= 32;
             }
@@ -3545,6 +3583,7 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
 
 /** gSPViewport: the viewport map, and the rectangle it confines drawing to. */
 static __attribute__((noinline, cold)) void set_viewport(const Vp *vp) {
+    sNatView.serial++;
     f32 halfW, halfH;
 
     sVpScaleX = vp->vp.vscale[0] / 4.0f;
@@ -3597,6 +3636,25 @@ static __attribute__((noinline)) void prof_trin_why(u32 w0) {
  * a G_ENDDL, and G_DMADL likewise DMAs a fixed-size block. Zero means "run
  * until G_ENDDL", which is how nested G_DL lists terminate.
  */
+/** A native draw in the display list: dreamcast/native.c does the rest. */
+static __attribute__((noinline)) void handle_native(u32 w0, u32 w1) {
+    u32 kind = (w0 >> 20) & 0xF;
+
+    sNatView.matrix = (const f32 *) sMatrices[sCurMatrix];
+    sNatView.vpScaleX = sVpScaleX;
+    sNatView.vpScaleY = sVpScaleY;
+    sNatView.vpTransX = sVpTransX;
+    sNatView.vpTransY = sVpTransY;
+    if (kind == NATIVE_LEVEL) {
+        pc_nat_level_run(&sNatView, w0 & 0xFFFFF, w1);
+    }
+#if DKR_NATIVE_CHECK
+    else if (kind == NATIVE_CHECK_LEVEL) {
+        pc_nat_check_level_run(w0 & 0xFFFFF, w1, sCheckArgb, sCheckArgbCount);
+    }
+#endif
+}
+
 static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
     s32 i;
 
@@ -3627,11 +3685,15 @@ static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
         // G_IMMFIRST-7 = -72), so every case has to be masked to the byte the
         // display list actually holds.
         switch (cmd) {
+            case G_NATIVE:
+                handle_native(w0, w1);
+                break;
             case G_MTX: {
                 s32 slot = (((w0 >> 16) & 0xFF) >> 6) & 3;
                 if (w1 != 0 && slot < 3) {
                     PROF_TIME(tMtx, mtx_to_float((const Mtx *) w1, sMatrices[slot]));
                     sCurMatrix = slot;
+                    sNatView.serial++;
                 }
                 break;
             }
@@ -3639,6 +3701,7 @@ static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
                 u32 index = w0 & 0xFF;
                 if (index == G_MW_MVPMATRIX) {
                     sCurMatrix = (w1 >> 6) & 3;
+                    sNatView.serial++;
                 } else if (index == G_MW_BILLBOARD) {
                     sBillboard = (w1 != 0);
                 } else if (index == G_MW_FOG) {

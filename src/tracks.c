@@ -29,6 +29,11 @@
 #include "../dreamcast/prof.h"
 #ifdef TARGET_DC
 #include "../dreamcast/scrawl.h"
+// dreamcast/native.c; its header brings the console's own, which do not mix with these.
+extern void pc_nat_level_load(s32 modelId);
+extern void pc_nat_level_free(void);
+extern s32 pc_nat_level_batches(Gfx **dl, s32 segment, s32 batch, s32 end, s32 waterHidden);
+extern void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch);
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -2060,6 +2065,19 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         endPos = segment->numberofOpaqueBatches;
     }
     for (i = startPos; i < endPos; i++) {
+#if defined(TARGET_DC) && DKR_NATIVE && !DKR_NATIVE_CHECK
+        {
+            // As many batches from this one on as are compiled (dreamcast/native.c).
+            s32 natBatches =
+                pc_nat_level_batches(&gTrackDL, segmentId, i, pc_scrawl_batch_limit(segmentId, i, endPos), sp78);
+
+            if (natBatches) {
+                i += natBatches - 1;
+                pc_scrawl_after_batch(segmentId, i, &gTrackDL);
+                continue;
+            }
+        }
+#endif
         batchInfo = &segment->batches[i];
         textureFlags = RENDER_NONE;
         isInvisible = batchInfo->flags & RENDER_HIDDEN;
@@ -2140,6 +2158,9 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }
 #ifdef TARGET_DC
+#if DKR_NATIVE_CHECK
+        pc_nat_check_level(&gTrackDL, segmentId, i);
+#endif
         pc_scrawl_after_batch(segmentId, i, &gTrackDL); // "Nintendon't" (dreamcast/scrawl.c)
 #endif
     }
@@ -3184,6 +3205,9 @@ void generate_track(s32 modelId) {
         }
     }
     set_texture_colour_tag(COLOUR_TAG_MAGENTA);
+#if defined(TARGET_DC) && DKR_NATIVE
+    pc_nat_level_load(modelId);
+#endif
     stubbed_printf("generate_track end\n");
 }
 
@@ -3220,6 +3244,9 @@ LevelModel *get_current_level_model(void) {
 void free_track(void) {
     s32 i;
 
+#if defined(TARGET_DC) && DKR_NATIVE
+    pc_nat_level_free();
+#endif
     racerfx_free();
     if (gWaveBlockCount != 0) {
         waves_free();

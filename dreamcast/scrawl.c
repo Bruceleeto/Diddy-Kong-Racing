@@ -95,6 +95,13 @@ void pc_scrawl_after_batch(int segment, int batch, void *dl) {
     }
 }
 
+int pc_scrawl_batch_limit(int segment, int batch, int end) {
+    if (segment == SCRAWL_SEGMENT && batch <= SCRAWL_BATCH && SCRAWL_BATCH < end && pc_scene_level() == SCRAWL_LEVEL) {
+        return SCRAWL_BATCH + 1;
+    }
+    return end;
+}
+
 void pc_scrawl_draw(void) {
     float screen[SCRAWL_GRID_U * SCRAWL_GRID_V][3];
     pvr_vertex_t strip[2 * SCRAWL_GRID_U];

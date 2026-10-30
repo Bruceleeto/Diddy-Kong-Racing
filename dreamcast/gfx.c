@@ -1788,6 +1788,21 @@ int gfx_blast_viable(void) {
 }
 
 static DKR_HOT int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
+#ifndef DKR_NATIVE_CHECK
+#define DKR_NATIVE_CHECK 0
+#endif
+#if DKR_NATIVE_CHECK
+static pvr_poly_hdr_t sCheckHdr __attribute__((aligned(32))); // what the last blast batch went out under
+static int sCheckRoute;
+
+void gfx_nat_last(unsigned int words[4], int *route) {
+    words[0] = sCheckHdr.cmd;
+    words[1] = sCheckHdr.mode1;
+    words[2] = sCheckHdr.mode2;
+    words[3] = sCheckHdr.mode3;
+    *route = sCheckRoute;
+}
+#endif
 
 // Profile only: what the fast path sends to the blended list, in batches and
 // reserved words, by whether it needed to blend. Classes: 0 no depth test (2D,
@@ -1943,6 +1958,91 @@ DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, fl
     // cross-file call per vertex.
     *scaleX = sScaleX;
     *scaleY = sScaleY;
+#if DKR_NATIVE_CHECK
+    compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : (route == ROUTE_TR) ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY,
+                       &sCheckHdr);
+    sCheckRoute = route;
+#endif
+    return 1;
+}
+
+DKR_HOT_CODE void *gfx_nat_header(const void *hdr, int route, int words, int *ok) {
+    int *dirty = (route == ROUTE_PT) ? &sScisDirtyPt : (route == ROUTE_TR) ? &sScisDirty : &sScisDirtyOp;
+    pvr_poly_hdr_t scissored;
+
+    sSeenDepth = 1;
+    *ok = 1;
+    if ((route == ROUTE_PT && sPtCount + words + 2 > PT_MAX_WORDS) ||
+        (route == ROUTE_TR && sTrCount + words + 2 > TR_MAX_WORDS)) {
+        *ok = 0;
+        return NULL;
+    }
+    sBlastRoute = route;
+    sRoute = route;
+    if (*dirty) {
+        if (sScisEnable) {
+            submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY), (int) (sScisX1 * sScaleX),
+                             (int) (sScisY1 * sScaleY));
+        } else {
+            submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
+        }
+        *dirty = 0;
+    }
+    if (sScisEnable) {
+        shz_memcpy32(&scissored, hdr, sizeof(scissored));
+        scissored.cmd |= PVR_USERCLIP_INSIDE << 16;
+        hdr = &scissored;
+    }
+    if (route == ROUTE_OP) {
+        shz_sq_memcpy32_1(pvr_ta_sq_addr, hdr);
+        sRoute = ROUTE_OP;
+        return NULL;
+    }
+    shz_memcpy32(ta_target(), hdr, 32);
+    ta_commit(NULL);
+    sRoute = ROUTE_OP;
+    return (route == ROUTE_PT) ? sPtBuf[sPtCount] : sTrBuf[sTrCount];
+}
+
+void gfx_nat_end(void *recordEnd) {
+    if (recordEnd != NULL) {
+        gfx_blast_end(recordEnd);
+    }
+}
+
+int gfx_nat_room(void *record, int words) {
+    if (sBlastRoute == ROUTE_PT) {
+        return (int) ((unsigned char (*)[32]) record - sPtBuf) + words + 2 <= PT_MAX_WORDS;
+    }
+    return (int) ((unsigned char (*)[32]) record - sTrBuf) + words + 2 <= TR_MAX_WORDS;
+}
+
+void gfx_nat_scale(float *x, float *y) {
+    *x = sScaleX;
+    *y = sScaleY;
+}
+
+int gfx_nat_viable(void) {
+    return sInScene && !scissor_needs_exact_clip() && !sCover;
+}
+
+int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3) {
+    pvr_poly_cxt_t cxt;
+    pvr_poly_hdr_t hdr __attribute__((aligned(32)));
+    DcTexture *t;
+
+    if (handle == 0 || handle > MAX_TEXTURES || sTextures[handle - 1].data == NULL) {
+        return 0;
+    }
+    t = &sTextures[handle - 1];
+    pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
+                     t->linear < 0 ? t->format
+                                   : (t->format | (t->linear ? PVR_TXRFMT_NONTWIDDLED : PVR_TXRFMT_TWIDDLED)),
+                     t->padded_w, t->padded_h, t->data, PVR_FILTER_NEAREST);
+    cxt.txr.mipmap = t->mipmapped ? PVR_MIPMAP_ENABLE : PVR_MIPMAP_DISABLE;
+    pvr_poly_compile(&hdr, &cxt);
+    *mode2 = hdr.mode2 & (PVR_TA_PM2_USIZE_MASK | PVR_TA_PM2_VSIZE_MASK);
+    *mode3 = hdr.mode3;
     return 1;
 }
 

@@ -81,6 +81,12 @@ FSAA_PARTICLE_NEAR ?= 1
 FSAA_PARTICLE_NEAR_FADE ?= 50
 FSAA_PARTICLE_NEAR_CULL ?= 100
 DEBUG_VIEW ?= 0
+# 1 draws what dreamcast/build_native_meshes.py compiled natively (dreamcast/native.c);
+# 0 leaves the whole frame to the display-list walk.
+NATIVE ?= 1
+# 1 with NATIVE=1: the walk draws everything, and each compiled batch is checked
+# against what it did (NATCHK lines). Measurement only.
+NATIVE_CHECK ?= 0
 # 1 skips level batches whose bounding box is wholly outside the view (src/tracks.c).
 LEVEL_CULL ?= 1
 # 1 paces frames on the vblank interrupt instead of a sleep to a clock time.
@@ -165,7 +171,7 @@ cdi:
 	# The swirl's chime, when the build has one (SWIRL_CHIME_LEFT).
 	if [ -f $(CHIME_DIR)/chime.afb ]; then mkdir -p cdrom/build/dc/aicaflow/chime && \
 		cp $(CHIME_DIR)/chime.afb $(CHIME_DIR)/chime.afx cdrom/build/dc/aicaflow/chime/; fi
-	cp $(TEXTURE_PACK) cdrom/build/dc/
+	cp $(TEXTURE_PACK) $(NATIVE_PACK) cdrom/build/dc/
 	cp $(MODEL_SCENES) $(SONG_SCENES) cdrom/build/dc/
 	rm -rf cdrom/build/dc/texscenes cdrom/build/dc/assetscenes
 	cp -R $(BUILD)/texscenes cdrom/build/dc/
@@ -203,6 +209,21 @@ $(TEXTURE_PACK): dreamcast/build_pvr_textures.py dreamcast/textures.scenes asset
 	$(PYTHON) dreamcast/build_pvr_textures.py . $(PVRTEX) $@ --scenes $(BUILD)/texscenes \
 		--recorded dreamcast/textures.scenes $(if $(strip $(TEXTURE_PVRTEX_FLAGS)),--pvrtex-flags="$(TEXTURE_PVRTEX_FLAGS)")
 $(TARGET): $(TEXTURE_PACK)
+# The render-mode tables as src/textures_sprites.c has them, cut out of it and
+# printed by a host program, for the native mesh compiler.
+MATERIAL_TABLES := $(BUILD)/material_tables.json
+$(MATERIAL_TABLES): tools/dump_material_tables.c src/textures_sprites.c src/textures_sprites.h include/f3ddkr.h
+	@mkdir -p $(dir $@)
+	sed -n '/^Gfx dRenderSettingsVtxAlpha/,/^Gfx dBasicRenderSettingsZBOff/p' src/textures_sprites.c | sed '$$d' > $(BUILD)/material_tables.inc
+	cc -w -DMATERIAL_TABLES='"$(CURDIR)/$(BUILD)/material_tables.inc"' -D_LANGUAGE_C -DF3DDKR_GBI -DGBI_FLOAT_MTX \
+		-I. -Iinclude -Iinclude/PR -Iinclude/sys -Isrc -Ilibultra $< -o $(BUILD)/dump_material_tables
+	$(BUILD)/dump_material_tables > $@
+# Level geometry as ready PVR data; see dreamcast/build_native_meshes.py.
+NATIVE_PACK := $(BUILD)/native.pack
+$(NATIVE_PACK): dreamcast/build_native_meshes.py $(MATERIAL_TABLES) assets/assets.bin assets/assets.lut.bin
+	$(PYTHON) dreamcast/build_native_meshes.py assets/assets.bin assets/assets.lut.bin $(MATERIAL_TABLES) $@
+$(TARGET): $(NATIVE_PACK)
+$(BUILD)/dreamcast/native.o: $(BUILD)/dkr_asset_mount.h
 # The object models each scene's gate loads and holds (dreamcast/models.scenes).
 MODEL_SCENES := $(BUILD)/models.scenes
 $(MODEL_SCENES): dreamcast/models.scenes

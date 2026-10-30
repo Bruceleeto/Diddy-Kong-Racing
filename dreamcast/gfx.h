@@ -1,6 +1,11 @@
 #ifndef LINUX_GFX_H
 #define LINUX_GFX_H
 
+// The native renderer's hot code (dreamcast/native.c): together, away from the
+// walk's, so that what the walk still does and what it no longer does can be
+// told apart.
+#define DKR_NAT_CODE __attribute__((section(".text.dkr_native")))
+
 // The state every batch reads, in the display-list walk (main.c) and here, is
 // some sixty small variables. Left to the linker they land in as many cache
 // lines, scattered among the big tables, and the operand cache is small and
@@ -129,6 +134,21 @@ void gfx_blast_end(void *recordEnd);
 // TA words recorded so far this frame for the punch-through and translucent
 // lists (32 bytes each; a triangle is three). For the frame profile.
 void gfx_recorded_words(int *pt, int *tr);
+
+// The native renderer (dreamcast/native.c). Opens a run of vertices under a
+// compiled header in the list `route` (0 opaque, 1 punch-through, 2 translucent).
+// Returns the recording to write up to `words` vertices to, or NULL for the store
+// queues, the opaque list being streamed; *ok is 0 when the list has no room.
+void *gfx_nat_header(const void *hdr, int route, int words, int *ok);
+void gfx_nat_end(void *recordEnd);
+int gfx_nat_room(void *record, int words); // room for `words` more in the open recording
+void gfx_nat_scale(float *x, float *y);
+// Whether the scissor can be left to the PVR's tiles alone, as native draws do.
+int gfx_nat_viable(void);
+// The bits of a polygon header that come from a texture.
+int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3);
+// What the blast path last sent, for NATIVE_CHECK=1.
+void gfx_nat_last(unsigned int words[4], int *route);
 
 // A native polygon in the translucent list, at this point of the display list
 // (dreamcast/scrawl.c). Vertex x/y are N64 pixels. 0 if the recording is full.
