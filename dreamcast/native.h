@@ -17,6 +17,8 @@
 #define NATIVE_CHECK_LEVEL 1 // NATIVE_CHECK=1: w0 low half: segment; w1: batch
 #define NATIVE_MODEL 2 // w0: first batch, variant, vertices split; w1: vertices; then a word with w1 the model
 #define NATIVE_CHECK_MODEL 3 // NATIVE_CHECK=1: w0: batch, variant; w1: the model
+#define NATIVE_SPRITE 5 // w0: frame, z buffer; w1: sprite; then words with the anchor, the matrix, the render table's entry
+#define NATIVE_TRIS 4 // w0: vertices, triangles; w1: vertices; then a word with the material and the triangles
 
 #define gDkrNative(pkt, kind, a, b)                                                                     \
     do {                                                                                                \
@@ -97,11 +99,23 @@ void pc_nat_model_free(ObjectModel *model);
 s32 pc_nat_model_draw(Gfx **dl, ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
 void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags);
 
+// What a frame makes up: particles, shadows, the water. The material for
+// material_set's arguments, or for two commands of the game's own and its
+// geometry mode; NULL if the walk has to draw it.
+typedef struct NatMaterial NatMaterial;
+const NatMaterial *pc_nat_material(TextureHeader *tex, s32 flags, s32 texOffset);
+const NatMaterial *pc_nat_material_state(TextureHeader *tex, const Gfx *state, s32 zBuffer, s32 fog);
+void pc_nat_tris(Gfx **dl, const NatMaterial *mat, const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris);
+void pc_nat_materials_forget(void);
+s32 pc_nat_sprite(Gfx **dl, const Sprite *sprite, s32 frame, s32 flags, const Vertex *anchor, const Mtx *billboard);
+
 // The walk's side (dreamcast/main.c).
 void pc_nat_level_run(const NatView *view, u32 w0, u32 w1);
 void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count);
 void pc_nat_model_run(const NatView *view, u32 w0, u32 w1, u32 w1b);
 void pc_nat_check_model_run(u32 w0, u32 w1);
+void pc_nat_sprite_run(const NatView *view, u32 w0, u32 w1, const Gfx *next);
+void pc_nat_tris_run(const NatView *view, u32 w0, u32 w1, const NatMaterial *mat, const Triangle *tris);
 // How a combiner treats the shade under these colours. TRUE: a colour is
 // (shade & keep) | konst. FALSE: pc_nat_colours_mux does it, vertex by vertex.
 s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst);
@@ -110,6 +124,7 @@ void pc_nat_colours_mux(u32 *argb, const Vertex *verts, s32 count);
 // The texture a frame's pixels went to the PVR as: the bits of the polygon header
 // the texture decides. 0 if the texture is not in video memory.
 s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3);
+void pc_nat_texture_scale(const void *textureHeader, f32 *u, f32 *v);
 // `clip`: the clip space positions; `argb`: their colours, or NULL for the corners' own.
 pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip, const u32 *argb, s32 cull,
                           pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul, u32 offset, s32 textured);

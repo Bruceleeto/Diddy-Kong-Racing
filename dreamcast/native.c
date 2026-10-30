@@ -29,6 +29,16 @@
 #define DKR_NATIVE_CHECK 0
 #endif
 
+struct NatMaterial {
+    pvr_poly_hdr_t hdr; // no culling: these go out as triangles, culled here
+    f32 uMul, vMul;
+    u32 combine0, combine1, cycle;
+    const void *texture;
+    u32 otherL, otherH;
+    u8 route, decal, textured, geometry;
+    u32 used;
+} __attribute__((aligned(32)));
+
 // A level's block, as the pack holds it (dreamcast/build_native_meshes.py).
 typedef struct {
     char magic[4];
@@ -185,6 +195,7 @@ void pc_nat_level_load(s32 modelId) {
     u32 i;
 
     pc_nat_level_free();
+    pc_nat_materials_forget();
     block = nat_pack_read(modelId);
     if (block == NULL) {
         return;
@@ -218,6 +229,7 @@ void pc_nat_level_load(s32 modelId) {
 void pc_nat_vram_lost(void) {
     sResolved = FALSE;
     sVramGeneration++;
+    pc_nat_materials_forget();
 }
 
 /**
@@ -763,6 +775,34 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_model(const NatVie
     return pc_nat_clip(corners, numCorners, clip, argb, cull, record, scaleX, scaleY, zMul, offset, textured);
 }
 
+/** A made-up batch's triangles past the near plane, one by one through the clipper. */
+static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_tris(const NatView *view, const Vertex *v, s32 count, const Triangle *tris,
+                                                                   s32 numTris, const NatMaterial *mat, pvr_vertex_t *record, f32 scaleX,
+                                                                   f32 scaleY, f32 zMul, u32 offset) {
+    shz_vec4_t clip[NAT_MAX_POSITIONS];
+    u32 argb[NAT_MAX_POSITIONS];
+    s32 i;
+
+    for (i = 0; i < count; i++) {
+        clip[i] = shz_xmtrx_transform_vec4(shz_vec4_init(v[i].x, v[i].y, v[i].z, 1.0f));
+        argb[i] = sPoints[i].argb;
+    }
+    for (i = 0; i < numTris; i++) {
+        const Triangle *t = &tris[i];
+        NatCorner corners[3];
+
+        if (t->vi0 >= count || t->vi1 >= count || t->vi2 >= count) {
+            continue;
+        }
+        corners[0] = (NatCorner) { t->uv0.u * mat->uMul, t->uv0.v * mat->vMul, 0, PVR_CMD_VERTEX | t->vi0 };
+        corners[1] = (NatCorner) { t->uv1.u * mat->uMul, t->uv1.v * mat->vMul, 0, PVR_CMD_VERTEX | t->vi1 };
+        corners[2] = (NatCorner) { t->uv2.u * mat->uMul, t->uv2.v * mat->vMul, 0, PVR_CMD_VERTEX_EOL | t->vi2 };
+        record = pc_nat_clip(corners, 3, clip, argb, !(t->flags & BACKFACE_DRAW), record, scaleX, scaleY, zMul, offset,
+                             mat->textured);
+    }
+    return record;
+}
+
 /** Environment-mapped corners: their coordinates as the object's lighting left them in the model. */
 static __attribute__((noinline, cold)) const NatCorner *nat_envmap_corners(const ObjectModel *model, const NatCorner *c,
                                                                            s32 count, NatCorner *out) {
@@ -952,6 +992,415 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, u32 w0, u32 w1, u32 w1b)
         }
     }
     gfx_nat_end(rec);
+}
+
+// Materials that are not known offline: a particle's, a shadow's, the water's.
+// One is compiled the first time the game asks for it, as its scene starts drawing,
+// and kept until the textures change.
+#define NAT_MATERIALS 256
+
+static NatMaterial sMaterials[NAT_MATERIALS];
+
+void pc_nat_materials_forget(void) {
+    s32 i;
+
+    for (i = 0; i < NAT_MATERIALS; i++) {
+        sMaterials[i].used = FALSE;
+    }
+}
+
+/**
+ * As the walk's render-mode code and gfx.c's header compile would come out for
+ * these commands. NULL if that takes more than the native path has: no depth test
+ * (the 2D layer), or a texture that is not in video memory.
+ */
+static __attribute__((noinline, cold)) const NatMaterial *nat_material_compile(NatMaterial *m, u32 w0, u32 w1, u32 omh, u32 oml,
+                                                                               const TextureHeader *tex, s32 zBuffer, s32 fog) {
+    pvr_poly_cxt_t cxt;
+    u32 mode2 = 0, mode3 = 0;
+    s32 depthTest = zBuffer && (oml & Z_CMP);
+    s32 depthWrite = zBuffer && (oml & Z_UPD);
+    s32 twoCycle = (omh & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
+    u32 p = (oml >> (twoCycle ? 28 : 30)) & 3;
+    u32 q = (oml >> (twoCycle ? 20 : 22)) & 3;
+    s32 blend = (oml & FORCE_BL) && (p == G_BL_CLR_MEM || q == G_BL_CLR_MEM);
+    s32 alphaTest = (oml & CVG_X_ALPHA) || (oml & 3) == G_AC_THRESHOLD;
+    s32 route;
+
+    if (alphaTest) {
+        route = 1;
+    } else if (depthTest) {
+        route = blend ? 2 : 0;
+    } else {
+        return NULL;
+    }
+    if (tex != NULL && !pc_nat_texture_words(tex, &mode2, &mode3)) {
+        return NULL;
+    }
+    pvr_poly_cxt_col(&cxt, route == 0 ? PVR_LIST_OP_POLY : route == 1 ? PVR_LIST_PT_POLY : PVR_LIST_TR_POLY);
+    if (tex != NULL) {
+        s32 size, uClamp = TRUE, vClamp = TRUE;
+
+        cxt.txr.enable = TRUE;
+        cxt.txr.filter = ((omh >> G_MDSFT_TEXTFILT) & 3) == 0 ? PVR_FILTER_NEAREST : PVR_FILTER_BILINEAR;
+        cxt.txr.env = PVR_TXRENV_MODULATEALPHA;
+        cxt.txr.alpha = PVR_TXRALPHA_ENABLE;
+        cxt.txr.width = 8;
+        cxt.txr.height = 8;
+        cxt.txr.format = 0;
+        cxt.txr.base = NULL;
+        cxt.txr.mipmap = PVR_MIPMAP_DISABLE;
+        cxt.txr.mipmap_bias = PVR_MIPBIAS_NORMAL;
+        cxt.txr.uv_flip = PVR_UVFLIP_NONE;
+        for (size = 1; size <= 64; size *= 2) {
+            uClamp = uClamp && size != tex->width;
+            vClamp = vClamp && size != tex->height;
+        }
+        uClamp = uClamp || (tex->flags & RENDER_CLAMP_X);
+        vClamp = vClamp || (tex->flags & RENDER_CLAMP_Y);
+        cxt.txr.uv_clamp = uClamp ? (vClamp ? PVR_UVCLAMP_UV : PVR_UVCLAMP_U) : (vClamp ? PVR_UVCLAMP_V : PVR_UVCLAMP_NONE);
+    }
+    cxt.gen.culling = PVR_CULLING_NONE;
+    cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
+    cxt.gen.specular = PVR_SPECULAR_ENABLE;
+    cxt.gen.fog_type = fog ? PVR_FOG_TABLE : PVR_FOG_DISABLE;
+    cxt.depth.comparison = PVR_DEPTHCMP_GEQUAL;
+    cxt.depth.write = depthWrite ? PVR_DEPTHWRITE_ENABLE : PVR_DEPTHWRITE_DISABLE;
+    if (route == 0) {
+        cxt.gen.alpha = PVR_ALPHA_DISABLE;
+        cxt.txr.alpha = PVR_TXRALPHA_DISABLE;
+        cxt.txr.env = PVR_TXRENV_MODULATE;
+        cxt.blend.src = PVR_BLEND_ONE;
+        cxt.blend.dst = PVR_BLEND_ZERO;
+    } else {
+        cxt.gen.alpha = PVR_ALPHA_ENABLE;
+        cxt.blend.src = PVR_BLEND_SRCALPHA;
+        cxt.blend.dst = PVR_BLEND_INVSRCALPHA;
+    }
+    pvr_poly_compile(&m->hdr, &cxt);
+    m->hdr.mode2 |= mode2;
+    m->hdr.mode3 = mode3;
+    m->uMul = m->vMul = 0.0f;
+    if (tex != NULL) {
+        f32 uScale, vScale;
+
+        pc_nat_texture_scale(tex, &uScale, &vScale);
+        m->uMul = uScale / (32.0f * tex->width);
+        m->vMul = vScale / (32.0f * tex->height);
+    }
+    m->combine0 = w0;
+    m->combine1 = w1;
+    m->cycle = omh & (3 << G_MDSFT_CYCLETYPE);
+    m->otherH = omh;
+    m->otherL = oml;
+    m->texture = tex;
+    m->route = route;
+    m->decal = zBuffer && (oml & ZMODE_DEC) == ZMODE_DEC;
+    m->textured = tex != NULL;
+    m->geometry = (zBuffer ? 1 : 0) | (fog ? 2 : 0);
+    m->used = TRUE;
+    return m;
+}
+
+/** The material for these commands, compiled if it is new. */
+static const NatMaterial *nat_material(u32 w0, u32 w1, u32 omh, u32 oml, const TextureHeader *tex, s32 zBuffer, s32 fog) {
+    u32 geometry = (zBuffer ? 1 : 0) | (fog ? 2 : 0);
+    u32 hash = (w0 * 0x9E3779B1u) ^ (w1 * 0x85EBCA6Bu) ^ (omh * 0xC2B2AE35u) ^ (oml * 0x27D4EB2Fu) ^
+               (((u32) tex) * 0x165667B1u) ^ geometry;
+    u32 at = (hash ^ (hash >> 15) ^ (hash >> 7)) & (NAT_MATERIALS - 1);
+    s32 probe;
+
+    for (probe = 0; probe < 8; probe++) {
+        NatMaterial *m = &sMaterials[(at + probe) & (NAT_MATERIALS - 1)];
+
+        if (!m->used) {
+            return nat_material_compile(m, w0, w1, omh, oml, tex, zBuffer, fog);
+        }
+        if (m->combine0 == w0 && m->combine1 == w1 && m->otherH == omh && m->otherL == oml && m->texture == tex &&
+            m->geometry == geometry) {
+            return m;
+        }
+    }
+    return NULL;
+}
+
+const NatMaterial *pc_nat_material(TextureHeader *tex, s32 flags, s32 texOffset) {
+    extern const Gfx *material_lookup(TextureHeader *texhead, s32 flags, s32 *zBuffer, s32 *fog);
+    extern s32 cam_get_viewport_layout(void);
+    const Gfx *entry;
+    s32 zBuffer, fog;
+
+    if (cam_get_viewport_layout() != 0) {
+        return NULL; // the split-screen scissors: see pc_nat_level_batches
+    }
+    if (tex != NULL && texOffset && (texOffset < tex->numOfTextures << 8)) {
+        tex = (TextureHeader *) ((s8 *) tex + ((texOffset >> 16) * tex->textureSize));
+    }
+    if (tex != NULL && (TEX_FORMAT(tex->format) == TEX_FORMAT_CI4 || TEX_FORMAT(tex->format) == TEX_FORMAT_CI8)) {
+        return NULL;
+    }
+    entry = material_lookup(tex, flags, &zBuffer, &fog);
+    return nat_material(entry[0].words.w0, entry[0].words.w1, entry[1].words.w0 & 0x00FFFFFF, entry[1].words.w1, tex, zBuffer, fog);
+}
+
+const NatMaterial *pc_nat_material_state(TextureHeader *tex, const Gfx *state, s32 zBuffer, s32 fog) {
+    extern s32 cam_get_viewport_layout(void);
+
+    if (cam_get_viewport_layout() != 0) {
+        return NULL;
+    }
+    return nat_material(state[0].words.w0, state[0].words.w1, state[1].words.w0 & 0x00FFFFFF, state[1].words.w1, tex, zBuffer,
+                        fog);
+}
+
+void pc_nat_tris(Gfx **dl, const NatMaterial *mat, const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris) {
+    gDkrNative((*dl)++, NATIVE_TRIS, numVerts | (numTris << 8), verts);
+    (*dl)->words.w0 = (u32) mat;
+    (*dl)->words.w1 = (u32) tris;
+    (*dl)++;
+}
+
+/**
+ * One batch of what a frame makes up: the walk's blast path, with its
+ * material decided. Triangles do not share corners here (their coordinates differ
+ * and the batch is short), and are culled on the CPU, so no strip to break.
+ */
+DKR_NAT_CODE void pc_nat_tris_run(const NatView *view, u32 w0, u32 w1, const NatMaterial *mat, const Triangle *tris) {
+    const Vertex *v = (const Vertex *) w1;
+    const s32 numVerts = w0 & 0xFF;
+    const s32 numTris = (w0 >> 8) & 0xFFF;
+    const u32 offset = mat->textured ? gDcGlareAdd : 0;
+    const f32 uMul = mat->uMul, vMul = mat->vMul;
+    const f32 zMul = mat->decal ? 1.003f : 1.0f;
+    f32 scaleX, scaleY;
+    f32 sx, sy, tx, ty;
+    u32 keep, konst;
+    s32 fast, behind, i;
+    int ok;
+    pvr_vertex_t *rec;
+    u32 sq;
+
+    if (numVerts > NAT_MAX_POSITIONS || numVerts == 0) {
+        return;
+    }
+    gfx_nat_scale(&scaleX, &scaleY);
+    sx = view->vpScaleX * scaleX;
+    sy = view->vpScaleY * scaleY;
+    tx = view->vpTransX * scaleX;
+    ty = view->vpTransY * scaleY;
+    shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix);
+    behind = nat_transform_vertices(sPoints, v, numVerts, sx, sy, tx, ty, zMul);
+    fast = pc_nat_classify(mat->combine0, mat->combine1, mat->cycle, view->prim, view->env, &keep, &konst);
+    for (i = 0; i < numVerts; i++) {
+        sPoints[i].argb = ((((u32) v[i].a << 24) | ((u32) v[i].r << 16) | ((u32) v[i].g << 8) | (u32) v[i].b) & keep) | konst;
+    }
+    if (!fast || gDcFadeOn) {
+        nat_colours_slow(v, numVerts, fast, mat->textured);
+    }
+    rec = gfx_nat_header(&mat->hdr, mat->route, numTris * 6, &ok);
+    if (!ok) {
+        return;
+    }
+    if (behind) {
+        rec = nat_clip_tris(view, v, numVerts, tris, numTris, mat, rec, scaleX, scaleY, zMul, offset);
+        gfx_nat_end(rec);
+        return;
+    }
+    sq = pvr_dr_addr;
+    for (i = 0; i < numTris; i++) {
+        const Triangle *t = &tris[i];
+        const NatPoint *p0, *p1, *p2;
+
+        if (t->vi0 >= numVerts || t->vi1 >= numVerts || t->vi2 >= numVerts) {
+            continue;
+        }
+        p0 = &sPoints[t->vi0];
+        p1 = &sPoints[t->vi1];
+        p2 = &sPoints[t->vi2];
+        if (!(t->flags & BACKFACE_DRAW)) {
+            f32 area = ((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y));
+
+            if (area >= 0.0f) {
+                continue;
+            }
+        }
+        if (rec != NULL) {
+            nat_vertex_put(rec, TRUE, PVR_CMD_VERTEX, p0->x, p0->y, p0->z, t->uv0.u * uMul, t->uv0.v * vMul, p0->argb, offset);
+            nat_vertex_put(rec + 1, TRUE, PVR_CMD_VERTEX, p1->x, p1->y, p1->z, t->uv1.u * uMul, t->uv1.v * vMul, p1->argb, offset);
+            nat_vertex_put(rec + 2, TRUE, PVR_CMD_VERTEX_EOL, p2->x, p2->y, p2->z, t->uv2.u * uMul, t->uv2.v * vMul, p2->argb, offset);
+            rec += 3;
+        } else {
+            pvr_vertex_t *o = (pvr_vertex_t *) (sq ^ 32);
+
+            nat_vertex_put(o, FALSE, PVR_CMD_VERTEX, p0->x, p0->y, p0->z, t->uv0.u * uMul, t->uv0.v * vMul, p0->argb, offset);
+            nat_sq_flush(o);
+            o = (pvr_vertex_t *) sq;
+            nat_vertex_put(o, FALSE, PVR_CMD_VERTEX, p1->x, p1->y, p1->z, t->uv1.u * uMul, t->uv1.v * vMul, p1->argb, offset);
+            nat_sq_flush(o);
+            o = (pvr_vertex_t *) (sq ^ 32);
+            nat_vertex_put(o, FALSE, PVR_CMD_VERTEX_EOL, p2->x, p2->y, p2->z, t->uv2.u * uMul, t->uv2.v * vMul, p2->argb, offset);
+            nat_sq_flush(o);
+            sq ^= 32;
+        }
+    }
+    pvr_dr_addr = sq;
+    gfx_nat_end(rec);
+}
+
+/** A sprite's material for one of its tiles. */
+static const NatMaterial *nat_sprite_material(const Gfx *entry, s32 zBuffer, const TextureHeader *tex) {
+    return nat_material(entry[0].words.w0, entry[0].words.w1, entry[1].words.w0 & 0x00FFFFFF, entry[1].words.w1, tex, zBuffer, TRUE);
+}
+
+s32 pc_nat_sprite(Gfx **dl, const Sprite *sprite, s32 frame, s32 flags, const Vertex *anchor, const Mtx *billboard) {
+    extern const Gfx *material_simple_lookup(s32 flags, s32 *zBuffer);
+    extern s32 cam_get_viewport_layout(void);
+    const u16 *tiles = (const u16 *) &sprite->textures[sprite->numberOfTextures];
+    const Gfx *entry;
+    s32 zBuffer, i;
+
+    if (cam_get_viewport_layout() != 0 || frame < 0 || frame >= sprite->numberOfFrames) {
+        return FALSE;
+    }
+    entry = material_simple_lookup(flags, &zBuffer);
+    if (dl == NULL) {
+        // Only asking whether it can be done.
+        for (i = tiles[frame]; i < tiles[frame + 1]; i++) {
+            const TextureHeader *tex = sprite->textures[i];
+
+            if (TEX_FORMAT(tex->format) == TEX_FORMAT_CI4 || TEX_FORMAT(tex->format) == TEX_FORMAT_CI8 ||
+                nat_sprite_material(entry, zBuffer, tex) == NULL) {
+                return FALSE;
+            }
+        }
+        return TRUE;
+    }
+    gDkrNative((*dl)++, NATIVE_SPRITE, frame | (zBuffer ? 0x10000 : 0), sprite);
+    (*dl)->words.w0 = (u32) anchor;
+    (*dl)->words.w1 = (u32) billboard;
+    (*dl)++;
+    (*dl)->words.w0 = (u32) entry;
+    (*dl)->words.w1 = 0;
+    (*dl)++;
+    return TRUE;
+}
+
+/** A sprite's corner past the near plane: through the clipper, the quad as two triangles. */
+static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_quad(const shz_vec4_t *clip, const u32 *argb, const NatCorner *c,
+                                                                   pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul, u32 offset) {
+    return pc_nat_clip(c, 4, clip, argb, FALSE, record, scaleX, scaleY, zMul, offset, TRUE);
+}
+
+/**
+ * A billboard: an anchor in the world, and tiles of four corners each offset from
+ * it in clip space through the billboard's own matrix. A vehicle part has no
+ * anchor, its corners going through that matrix alone.
+ */
+DKR_NAT_CODE void pc_nat_sprite_run(const NatView *view, u32 w0, u32 w1, const Gfx *next) {
+    const Sprite *sprite = (const Sprite *) w1;
+    const Vertex *anchor = (const Vertex *) next[0].words.w0;
+    const f32 *billboard = (const f32 *) next[0].words.w1;
+    const Gfx *entry = (const Gfx *) next[1].words.w0;
+    const s32 frame = w0 & 0xFFFF;
+    const s32 zBuffer = (w0 >> 16) & 1;
+    const u16 *tiles = (const u16 *) &sprite->textures[sprite->numberOfTextures];
+    const Vertex *verts = (const Vertex *) sprite->textures - (sprite->numberOfTextures * 4);
+    shz_vec4_t base = shz_vec4_init(0.0f, 0.0f, 0.0f, 0.0f);
+    f32 scaleX, scaleY;
+    f32 sx, sy, tx, ty;
+    s32 i, lastCombine = FALSE;
+    u32 keep = 0, konst = 0, combine0 = 0, combine1 = 0, cycle = 0;
+    s32 fast = TRUE;
+
+    gfx_nat_scale(&scaleX, &scaleY);
+    sx = view->vpScaleX * scaleX;
+    sy = view->vpScaleY * scaleY;
+    tx = view->vpTransX * scaleX;
+    ty = view->vpTransY * scaleY;
+    if (anchor != NULL) {
+        shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix);
+        base = shz_xmtrx_transform_vec4(shz_vec4_init(anchor->x, anchor->y, anchor->z, 1.0f));
+    }
+    shz_xmtrx_load_4x4((const shz_mat4x4_t *) billboard);
+    for (i = tiles[frame]; i < tiles[frame + 1]; i++) {
+        const TextureHeader *tex = sprite->textures[i];
+        const NatMaterial *mat = nat_sprite_material(entry, zBuffer, tex);
+        const Vertex *v = &verts[i * 4];
+        shz_vec4_t clip[4];
+        NatCorner c[4];
+        u32 argb[4];
+        const u32 offset = gDcGlareAdd;
+        f32 zMul;
+        pvr_vertex_t *rec;
+        s32 behind = 0, k;
+        int ok;
+        f32 uMax, vMax, uMin;
+
+        if (mat == NULL) {
+            continue;
+        }
+        zMul = mat->decal ? 1.003f : 1.0f;
+        if (!lastCombine || mat->combine0 != combine0 || mat->combine1 != combine1 || mat->cycle != cycle) {
+            fast = pc_nat_classify(mat->combine0, mat->combine1, mat->cycle, view->prim, view->env, &keep, &konst);
+            combine0 = mat->combine0;
+            combine1 = mat->combine1;
+            cycle = mat->cycle;
+            lastCombine = TRUE;
+        }
+        for (k = 0; k < 4; k++) {
+            clip[k] = shz_vec4_add(shz_xmtrx_transform_vec4(shz_vec4_init(v[k].x, v[k].y, v[k].z, 1.0f)), base);
+            behind |= clip[k].w < 1.0f;
+        }
+        for (k = 0; k < 4; k++) {
+            sPoints[k].argb = (0xFFFFFFFFu & keep) | konst;
+        }
+        if (!fast || gDcFadeOn) {
+            nat_colours_slow(v, 4, fast, TRUE);
+        }
+        for (k = 0; k < 4; k++) {
+            argb[k] = sPoints[k].argb;
+        }
+        uMax = ((tex->width - 1) << 5) * mat->uMul;
+        vMax = ((tex->height - 1) << 5) * mat->vMul;
+        uMin = mat->uMul; // S10.5: the tile's own one, not quite its edge
+        // As sprite_init_frame's two triangles, around the shared diagonal.
+        c[0] = (NatCorner) { uMax, 0.0f, 0, PVR_CMD_VERTEX | 1 };
+        c[1] = (NatCorner) { uMax, vMax, 0, PVR_CMD_VERTEX | 2 };
+        c[2] = (NatCorner) { uMin, 0.0f, 0, PVR_CMD_VERTEX | 0 };
+        c[3] = (NatCorner) { uMin, vMax, 0, PVR_CMD_VERTEX_EOL | 3 };
+        rec = gfx_nat_header(&mat->hdr, mat->route, behind ? 12 : 4, &ok);
+        if (!ok) {
+            continue;
+        }
+        if (behind) {
+            rec = nat_clip_quad(clip, argb, c, rec, scaleX, scaleY, zMul, offset);
+        } else {
+            u32 sq = pvr_dr_addr;
+
+            for (k = 0; k < 4; k++) {
+                const shz_vec4_t *p = &clip[c[k].word & 3];
+                f32 inv = shz_invf_fsrra(p->w);
+                f32 x = (p->x * inv * sx) + tx;
+                f32 y = ty - (p->y * inv * sy);
+                u32 cmd = c[k].word & 0xF0000000u;
+                u32 colour = argb[c[k].word & 3];
+
+                if (rec != NULL) {
+                    nat_vertex_put(rec, TRUE, cmd, x, y, inv * zMul, c[k].u, c[k].v, colour, offset);
+                    rec++;
+                } else {
+                    pvr_vertex_t *vt;
+
+                    sq ^= 32;
+                    vt = (pvr_vertex_t *) sq;
+                    nat_vertex_put(vt, FALSE, cmd, x, y, inv * zMul, c[k].u, c[k].v, colour, offset);
+                    nat_sq_flush(vt);
+                }
+            }
+            pvr_dr_addr = sq;
+        }
+        gfx_nat_end(rec);
+    }
 }
 
 #if DKR_NATIVE_CHECK

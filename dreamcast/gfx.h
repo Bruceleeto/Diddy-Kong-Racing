@@ -147,6 +147,7 @@ void gfx_nat_scale(float *x, float *y);
 int gfx_nat_viable(void);
 // The bits of a polygon header that come from a texture.
 int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3);
+void gfx_texture_scale(unsigned int handle, float *u, float *v);
 // What the blast path last sent, for NATIVE_CHECK=1.
 void gfx_nat_last(unsigned int words[4], int *route);
 

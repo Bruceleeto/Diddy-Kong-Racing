@@ -42,6 +42,7 @@
 #include "weather.h"
 #include "pc_swap.h"
 #include "../dreamcast/prof.h"
+#include "../dreamcast/native_game.h"
 
 #ifdef TARGET_DC
 #   include <sh4zam/shz_sh4zam.h>
@@ -3538,9 +3539,11 @@ void render_misc_model(Object *obj, Vertex *verts, u32 numVertices, Triangle *tr
     if (tex != NULL) {
         hasTexture = TRUE;
     }
-    material_set(&gObjectCurrDisplayList, tex, flags, texOffset);
-    gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVertices, 0);
-    gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(triangles), numTriangles, hasTexture);
+    if (!nat_mesh(&gObjectCurrDisplayList, tex, flags, texOffset, verts, numVertices, triangles, numTriangles)) {
+        material_set(&gObjectCurrDisplayList, tex, flags, texOffset);
+        gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVertices, 0);
+        gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(triangles), numTriangles, hasTexture);
+    }
     mtx_pop(&gObjectCurrDisplayList);
 }
 
@@ -4262,8 +4265,6 @@ void func_800135B8(Object *boostObj) {
                             (Object *) &objTransform, asset->sprite,
                             (RENDER_Z_COMPARE | RENDER_FOG_ACTIVE | RENDER_Z_UPDATE));
     if (boost->unk70 == 2) {
-        material_set(&gObjectCurrDisplayList, asset->tex,
-                     (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0);
         if (asset->tex != NULL) {
             hasTexture = TRUE;
         } else {
@@ -4272,8 +4273,14 @@ void func_800135B8(Object *boostObj) {
 
         vtx = &gBoostVerts[gBoostVertFlip][(boostObj->properties.boost.indexes >> 14) & 0x3FFF];
         tri = &gBoostTris[gBoostVertFlip][boostObj->properties.boost.indexes & 0x3FFF];
-        gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(vtx), BOOST_VERT_COUNT, 0);
-        gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(tri), BOOST_TRI_COUNT, hasTexture);
+        if (!nat_mesh(&gObjectCurrDisplayList, asset->tex,
+                      (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0, vtx, BOOST_VERT_COUNT, tri,
+                      BOOST_TRI_COUNT)) {
+            material_set(&gObjectCurrDisplayList, asset->tex,
+                         (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0);
+            gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(vtx), BOOST_VERT_COUNT, 0);
+            gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(tri), BOOST_TRI_COUNT, hasTexture);
+        }
     }
     mtx_pop(&gObjectCurrDisplayList);
 }

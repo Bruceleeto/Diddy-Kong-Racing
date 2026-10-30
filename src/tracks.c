@@ -27,6 +27,7 @@
 #include "weather.h"
 #include "pc_swap.h"
 #include "../dreamcast/prof.h"
+#include "../dreamcast/native_game.h"
 #ifdef TARGET_DC
 #include "../dreamcast/scrawl.h"
 // dreamcast/native.c; its header brings the console's own, which do not mix with these.
@@ -3576,7 +3577,6 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, alpha);
             }
             while (i < shadow->meshEnd) {
-                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 // I hope we can clean this part up.
                 tri2 = triCount = gCurrShadowHeapData[i].triCount; // Fakematch
                 vtx2 = vtxCount = gCurrShadowHeapData[i].vtxCount;
@@ -3584,8 +3584,11 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 numVerts = gCurrShadowHeapData[i + 1].vtxCount - vtxCount;
                 tri = &gCurrShadowTris[triCount];
                 vtx = &gCurrShadowVerts[vtx2];
-                gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
-                gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
+                if (!nat_mesh(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0, vtx, numVerts, tri, numTris)) {
+                    material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
+                    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
+                    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
+                }
                 i++;
             }
 
@@ -3626,15 +3629,17 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
             gCurrShadowTris = gShadowHeapTris[gWaterEffectIndex];
             gCurrShadowVerts = gShadowHeapVerts[gWaterEffectIndex];
             while (i < effect->meshEnd) {
-                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 triCount = gCurrShadowHeapData[i].triCount; // Fakematch
                 vtxCount = gCurrShadowHeapData[i].vtxCount; // Fakematch
                 numTris = gCurrShadowHeapData[i + 1].triCount - gCurrShadowHeapData[i].triCount;
                 numVerts = gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount;
                 tri = &gCurrShadowTris[gCurrShadowHeapData[i].triCount];
                 vtx = &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount];
-                gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
-                gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
+                if (!nat_mesh(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0, vtx, numVerts, tri, numTris)) {
+                    material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
+                    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
+                    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
+                }
                 i++;
             }
         }

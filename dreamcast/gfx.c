@@ -2055,6 +2055,11 @@ int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mo
     return 1;
 }
 
+void gfx_texture_scale(unsigned int handle, float *u, float *v) {
+    *u = sTextures[handle - 1].u_scale;
+    *v = sTextures[handle - 1].v_scale;
+}
+
 /**
  * Appends a polygon header (when hdr is not NULL) and vertices to the
  * translucent recording, in display-list order. Vertex x/y arrive in N64

@@ -1066,6 +1066,10 @@ void cam_set_sprite_anim_mode(s32 setting) {
  *
  * For regular sprites, it sets up a standard billboard that always faces the camera.
  */
+#ifdef TARGET_DC
+#include "../dreamcast/native_game.h"
+#endif
+
 s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, Sprite *sprite, s32 flags) {
     f32 diffX;
     f32 diffY;
@@ -1080,6 +1084,11 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
     s32 tiltAngle;
     s32 result;
     s32 frameID;
+#if defined(TARGET_DC) && DKR_NATIVE
+    Gfx *natStart = *dList;
+    Vertex *natAnchor = NULL;
+    s32 natFlags;
+#endif
 
     if (obj == NULL) {
         stubbed_printf("\nCam do 2D sprite called with NULL pointer!");
@@ -1168,6 +1177,9 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         v->g = 255;
         v->b = 255;
         v->a = 255;
+#if defined(TARGET_DC) && DKR_NATIVE
+        natAnchor = v;
+#endif
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
         (*vtx)++;
 
@@ -1201,6 +1213,20 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         flags |= RENDER_ANTI_ALIASING;
     }
 
+#if defined(TARGET_DC) && DKR_NATIVE
+    // Drawn from the sprite directly (dreamcast/native.c): none of the commands
+    // so far are wanted, and the anchor and the matrix go with the draw instead.
+    natFlags = sprite->drawFlags |
+               (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING));
+    if (pc_nat_sprite(NULL, sprite, frameID, natFlags, natAnchor, gModelMatrix[gModelMatrixStackPos])) {
+        *dList = natStart;
+        if (!(flags & RENDER_Z_UPDATE)) {
+            gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+        }
+        pc_nat_sprite(dList, sprite, frameID, natFlags, natAnchor, gModelMatrix[gModelMatrixStackPos]);
+    } else
+#endif
+    {
     // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
     material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
                                                               RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)));
@@ -1209,6 +1235,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
     }
     gSPDisplayList((*dList)++, sprite->frames[frameID]);
+    }
 
     // Pop the model matrix stack and select the appropriate matrix index for rendering
     gModelMatrixStackPos--;

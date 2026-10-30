@@ -11,6 +11,9 @@
 #include "tracks.h"
 #include "types.h"
 #include <ultra64.h>
+#ifdef TARGET_DC
+#include "../dreamcast/native_game.h"
+#endif
 
 /************ .data ************/
 
@@ -977,6 +980,24 @@ void wave_load_material(TextureHeader *tex, s32 rtile) {
     }
 }
 
+#if defined(TARGET_DC) && DKR_NATIVE
+#define WAVE_DRAW(vtx, numVerts, tri, numTris)                                                  \
+    do {                                                                                        \
+        if (natMat != NULL) {                                                                   \
+            pc_nat_tris(&gWaveDL, natMat, (vtx), (numVerts), (tri), (numTris));                 \
+        } else {                                                                                \
+            gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), (numVerts), 0);                     \
+            gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), (numTris), TRIN_ENABLE_TEXTURE);      \
+        }                                                                                       \
+    } while (0)
+#else
+#define WAVE_DRAW(vtx, numVerts, tri, numTris)                                                  \
+    do {                                                                                        \
+        gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), (numVerts), 0);                         \
+        gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), (numTris), TRIN_ENABLE_TEXTURE);          \
+    } while (0)
+#endif
+
 /**
  * Renders waves in the current viewport.
  */
@@ -995,6 +1016,10 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
     s32 i;
     TextureHeader *tex1;
     TextureHeader *tex2;
+#if defined(TARGET_DC) && DKR_NATIVE
+    const NatMaterial *natMat = NULL;
+    Gfx natState[2];
+#endif
 
     if (viewportID != VIEWPORT_LAYOUT_2_PLAYERS || gWavePlayerCount != 2) {
         viewportID = 0;
@@ -1026,6 +1051,18 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                 gDPSetOtherMode(gWaveDL++, DKR_OMH_2CYC_BILERP, DKR_OML_COMMON | G_RM_AA_ZB_OPA_SURF2);
             }
             gDPSetPrimColor(gWaveDL++, 0, 0, 255, 255, 255, 0);
+#if defined(TARGET_DC) && DKR_NATIVE
+            // The commands above, for the native renderer (dreamcast/native.c): its
+            // texture is the one on the render tile, as the walk draws it.
+            gDPSetCombineMode(&natState[0], G_CC_BLENDTEX_MODULATEA_1_PRIM, G_CC_BLENDI_ENV_ALPHA_MODULATEA2);
+            if (TEX_FORMAT(tex1->format) == TEX_FORMAT_RGBA32 &&
+                cam_get_viewport_layout() <= VIEWPORT_LAYOUT_1_PLAYER) {
+                gDPSetOtherMode(&natState[1], DKR_OMH_2CYC_BILERP, DKR_OML_COMMON | G_RM_AA_ZB_XLU_INTER2);
+            } else {
+                gDPSetOtherMode(&natState[1], DKR_OMH_2CYC_BILERP, DKR_OML_COMMON | G_RM_AA_ZB_OPA_SURF2);
+            }
+            natMat = pc_nat_material_state(tex2, natState, TRUE, FALSE);
+#endif
             if (D_800E3180 != NULL) {
                 gDPSetEnvColor(gWaveDL++, D_800E3180->rgba.r, D_800E3180->rgba.g, D_800E3180->rgba.b,
                                D_800E3180->rgba.a);
@@ -1039,6 +1076,11 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
             gDPSetCombineMode(gWaveDL++, G_CC_BLENDT_ENV_ALPHA_A_PRIM, G_CC_MODULATEIDECALA2);
             gDPSetOtherMode(gWaveDL++, DKR_OMH_2CYC_BILERP, DKR_OML_COMMON | G_RM_FOG_SHADE_A | G_RM_AA_ZB_OPA_SURF2);
             gDPSetPrimColor(gWaveDL++, 0, 0, 255, 255, 255, 255);
+#if defined(TARGET_DC) && DKR_NATIVE
+            gDPSetCombineMode(&natState[0], G_CC_BLENDT_ENV_ALPHA_A_PRIM, G_CC_MODULATEIDECALA2);
+            gDPSetOtherMode(&natState[1], DKR_OMH_2CYC_BILERP, DKR_OML_COMMON | G_RM_FOG_SHADE_A | G_RM_AA_ZB_OPA_SURF2);
+            natMat = pc_nat_material_state(tex1, natState, TRUE, TRUE);
+#endif
             if (D_800E3180 != NULL) {
                 gDPSetEnvColor(gWaveDL++, D_800E3180->rgba.r, D_800E3180->rgba.g, D_800E3180->rgba.b,
                                D_800E3180->rgba.a);
@@ -1079,15 +1121,12 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                                 tri = &gWaveTriangles[gWaveVertexFlip + viewportID]
                                                      [j * (gWaveController.subdivisions << 1)];
 
-                                gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                                gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                                WAVE_DRAW(vtx, numVerts << 1, tri, numTris);
 
                                 var_t0 += gWaveController.subdivisions + 1;
                             }
                         } else {
-                            gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(&D_8012A028[gWaveVertexFlip]), 4, 0);
-                            gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip << 1]), 2,
-                                       TRIN_ENABLE_TEXTURE);
+                            WAVE_DRAW(&D_8012A028[gWaveVertexFlip], 4, &D_800E3090[gWaveVertexFlip << 1], 2);
                         }
                         mtx_pop(&gWaveDL);
                         sp104 >>= 8;
@@ -1104,8 +1143,7 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                     vtx = &gWaveVertices[gWaveVertexFlip + viewportID][var_t0];
                     tri = &gWaveTriangles[gWaveVertexFlip + viewportID][j * (gWaveController.subdivisions << 1)];
 
-                    gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                    gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                    WAVE_DRAW(vtx, numVerts << 1, tri, numTris);
 
                     var_t0 += gWaveController.subdivisions + 1;
                 }

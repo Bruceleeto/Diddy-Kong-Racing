@@ -1032,6 +1032,7 @@ static void prebuilt_forget(u32 lo, u32 hi) {
                 gfx_delete_texture(sPrebuilt[i].handle);
             }
             sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
+            pc_nat_materials_forget();
         } else {
             i++;
         }
@@ -1321,6 +1322,12 @@ s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3) {
         return FALSE;
     }
     return gfx_texture_words(sPrebuilt[p].handle, (unsigned int *) mode2, (unsigned int *) mode3);
+}
+
+void pc_nat_texture_scale(const void *textureHeader, f32 *u, f32 *v) {
+    s32 p = prebuilt_find((u32) ((const TextureHeader *) textureHeader + 1));
+
+    gfx_texture_scale(sPrebuilt[p].handle, u, v);
 }
 
 /** Prints and resets what loading prebuilt textures cost; the scene gate calls it. */
@@ -3766,6 +3773,12 @@ static __attribute__((noinline)) s32 handle_native(u32 w0, u32 w1, const Gfx *ne
         pc_nat_level_run(&sNatView, w0 & 0xFFFFF, w1);
     } else if (kind == NATIVE_MODEL) {
         pc_nat_model_run(&sNatView, w0 & 0xFFFFF, w1, next->words.w1);
+        return 1;
+    } else if (kind == NATIVE_SPRITE) {
+        pc_nat_sprite_run(&sNatView, w0 & 0xFFFFF, w1, next);
+        return 2;
+    } else if (kind == NATIVE_TRIS) {
+        pc_nat_tris_run(&sNatView, w0 & 0xFFFFF, w1, (const NatMaterial *) next->words.w0, (const Triangle *) next->words.w1);
         return 1;
     }
 #if DKR_NATIVE_CHECK

@@ -984,6 +984,108 @@ void material_set(Gfx **dList, TextureHeader *texhead, s32 flags, s32 texOffset)
     }
 }
 
+#ifdef TARGET_DC
+/** material_load_simple's decisions without its state, as material_lookup for material_set's. */
+const Gfx *material_simple_lookup(s32 flags, s32 *zBuffer) {
+    flags &= ~RENDER_VTX_ALPHA;
+    flags &= ~gBlockedRenderFlags;
+    *zBuffer = (flags & RENDER_Z_COMPARE) != 0;
+    if (gSpriteOpaque == FALSE) {
+        s32 tileFlags = flags;
+
+        flags &= ~RENDER_DECAL;
+        if (tileFlags & RENDER_PRESERVE_COVERAGE) {
+            return dRenderSettingsSpriteCld[(flags >> 1) & 1];
+        }
+        return dRenderSettingsSpriteXlu[(flags - RENDER_CUTOUT) ^ 0];
+    }
+    flags &= ~RENDER_DECAL;
+    return dRenderSettingsCommon[flags];
+}
+
+/**
+ * material_set's decisions without its state: what it would have set for this
+ * texture and these flags, for the native renderer (dreamcast/native.c). The two
+ * commands of a render table's entry, and the geometry mode bits it comes with.
+ */
+const Gfx *material_lookup(TextureHeader *texhead, s32 flags, s32 *zBuffer, s32 *fog) {
+    s32 dlIndex;
+
+    if (texhead != NULL) {
+        flags |= texhead->flags;
+    }
+    flags = (gUseDirectionalLighting)
+                ? (flags & (RENDER_DECAL | RENDER_COLOUR_INDEX | RENDER_ANTI_ALIASING | RENDER_Z_COMPARE |
+                            RENDER_SEMI_TRANSPARENT))
+                : (flags & (RENDER_VTX_ALPHA | RENDER_DECAL | RENDER_Z_UPDATE | RENDER_COLOUR_INDEX | RENDER_CUTOUT |
+                            RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING));
+    flags &= ~gBlockedRenderFlags;
+    flags = (flags & RENDER_VTX_ALPHA) ? flags & ~RENDER_FOG_ACTIVE : flags & ~RENDER_Z_UPDATE;
+    *fog = !(flags & RENDER_VTX_ALPHA);
+    *zBuffer = (flags & RENDER_Z_COMPARE) != 0;
+    if (texhead == NULL) {
+        if (flags & RENDER_VTX_ALPHA) {
+            return dRenderSettingsSolidColourVtxAlpha[flags & (RENDER_ANTI_ALIASING | RENDER_Z_COMPARE)];
+        }
+        return dRenderSettingsSolidColour[flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE |
+                                                   RENDER_ANTI_ALIASING)];
+    }
+    if (gUseDirectionalLighting) {
+        if ((flags & RENDER_DECAL) && (flags & RENDER_Z_COMPARE)) {
+            dlIndex = 0;
+            if (flags & RENDER_ANTI_ALIASING) {
+                dlIndex |= 1;
+            }
+            if (flags & RENDER_SEMI_TRANSPARENT) {
+                dlIndex |= 2;
+            }
+            if (flags & RENDER_COLOUR_INDEX) {
+                dlIndex |= 4;
+            }
+            return dRenderSettingsPrimOverlay[dlIndex];
+        }
+        if (flags & RENDER_COLOUR_INDEX) {
+            flags = (flags ^ RENDER_COLOUR_INDEX) | 8;
+        }
+        return dRenderSettingsDirectionalLighting[flags];
+    }
+    if ((flags & RENDER_DECAL) && (flags & RENDER_Z_COMPARE)) {
+        dlIndex = 0;
+        if (flags & RENDER_ANTI_ALIASING) {
+            dlIndex |= 1;
+        }
+        if (flags & RENDER_SEMI_TRANSPARENT) {
+            dlIndex |= 2;
+        }
+        if (flags & RENDER_FOG_ACTIVE) {
+            dlIndex |= 4;
+        }
+        if (flags & RENDER_COLOUR_INDEX) {
+            dlIndex |= 8;
+        }
+        return dRenderSettingsDecal[dlIndex];
+    }
+    if (flags & RENDER_CUTOUT) {
+        dlIndex = flags & (RENDER_ANTI_ALIASING | RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT);
+        if (flags & RENDER_FOG_ACTIVE) {
+            dlIndex |= 8;
+        }
+        return dRenderSettingsCutout[dlIndex];
+    }
+    flags &= ~RENDER_DECAL;
+    if (flags & RENDER_VTX_ALPHA) {
+        dlIndex = flags & (RENDER_ANTI_ALIASING | RENDER_Z_COMPARE);
+        if (flags & RENDER_Z_UPDATE) {
+            dlIndex |= 4;
+        } else {
+            *zBuffer = TRUE;
+        }
+        return dRenderSettingsVtxAlpha[dlIndex];
+    }
+    return dRenderSettingsCommon[flags];
+}
+#endif
+
 /**
  * Loads the texture and render settings for the blinking lights seen in Spaceport Alpha.
  */
@@ -1155,6 +1257,10 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
     allocSize += numTextures * 4;
     allocSize += (s32) align16((u8 *) 0x10);
     allocSize += (s32) align16((u8 *) (spriteAsset->numberOfFrames * 4));
+#ifdef TARGET_DC
+    // Where each frame's tiles start, after the texture pointers, for the native renderer.
+    allocSize += (spriteAsset->numberOfFrames + 1) * sizeof(u16);
+#endif
     sprite = (Sprite *) mempool_alloc(allocSize, COLOUR_TAG_MAGENTA);
 #ifdef TARGET_DC
     if (sprite == NULL && pc_textures_release_held()) {
@@ -1211,6 +1317,11 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
 
     sprite->numberOfTextures = numTextures;
     sprite->numberOfFrames = spriteAsset->numberOfFrames;
+#ifdef TARGET_DC
+    for (i = 0; i <= spriteAsset->numberOfFrames; i++) {
+        ((u16 *) &sprite->textures[numTextures])[i] = spriteAsset->frameTexOffsets[i];
+    }
+#endif
     for (i = 0; i < spriteAsset->numberOfFrames; i++) {
         sprite->frames[i] = gSpriteDLists;
         sprite_init_frame(spriteAsset, sprite, i);

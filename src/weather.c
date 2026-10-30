@@ -1,4 +1,5 @@
 #include "weather.h"
+#include "../dreamcast/native_game.h"
 #include "asset_loading.h"
 #include "audio.h"
 #include "audio_spatial.h"
@@ -541,17 +542,24 @@ void snow_render(void) {
             mtx = get_projection_matrix_s16();
             gSPMatrixDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(mtx), G_MTX_DKR_INDEX_0);
             gSPSelectMatrixDKR(gCurrWeatherDisplayList++, G_MTX_DKR_INDEX_0);
-            material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
             while (i + gSnowVertOffset < gSnowVertCount) {
                 vtx = &gSnowVerts[i];
-                gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), gSnowVertOffset, 0);
-                gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles), gSnowTriCount, 1);
+                if (!nat_mesh(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE, 0, vtx, gSnowVertOffset,
+                              gSnowTriangles, gSnowTriCount)) {
+                    material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
+                    gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), gSnowVertOffset, 0);
+                    gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles), gSnowTriCount, 1);
+                }
                 i += gSnowVertOffset;
             }
             vtx = &gSnowVerts[i];
-            gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), (gSnowVertCount - i), 0);
-            gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles), ((s32) (gSnowVertCount - i) >> 1),
-                       1);
+            if (!nat_mesh(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE, 0, vtx, gSnowVertCount - i,
+                          gSnowTriangles, (s32) (gSnowVertCount - i) >> 1)) {
+                material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
+                gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), (gSnowVertCount - i), 0);
+                gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles),
+                           ((s32) (gSnowVertCount - i) >> 1), 1);
+            }
         }
     }
 }
