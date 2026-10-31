@@ -87,11 +87,6 @@ TOUR_PLAYERS ?= 1
 LEVEL_CULL ?= 1
 # 1 paces frames on the vblank interrupt instead of a sleep to a clock time.
 VBL_PACER ?= 1
-# 1 submits each frame through enDjinn's render lists (enj_state_startup,
-# enj_render_scene) instead of the port's own PVR scene calls.
-ENJ_RENDER ?= 0
-# 1 runs the game inside enDjinn's loop (enj_state_run); needs ENJ_RENDER=1.
-ENJ_LOOP ?= 0
 # 1 reads all four controller ports through enDjinn's controller layer.
 ENJ_INPUT ?= 0
 # 1 logs which parts of assets.bin a run reads (ASSET TRACE lines at auto-exit).

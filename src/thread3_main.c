@@ -54,6 +54,9 @@ extern void pc_nat_frame_reset(s32 task);
 #define NAT_FRAME_RESET() ((void) 0)
 #endif
 #include "../dreamcast/scene_gate.h"
+#ifdef TARGET_DC
+extern void pc_gfx_task_hold(void); // dreamcast/main.c
+#endif
 #ifdef DKR_AICAFLOW
 #include "../dreamcast/audio_aicaflow.h"
 #endif
@@ -190,9 +193,9 @@ void thread3_main(UNUSED void *unused) {
     gSaveDataFlags = input_update(gSaveDataFlags, 0);
     sBootDelayTimer = 0;
     gGameMode = GAMEMODE_INTRO;
-#if defined(TARGET_PC) && DKR_ENJ_LOOP
-    // enDjinn runs the loop (ENJ_LOOP=1): each of its frames calls
-    // thread3_frame, then submits the display list the frame built.
+#ifdef TARGET_DC
+    // enDjinn runs the loop: each of its frames calls thread3_frame, then submits
+    // what the frame queued.
     {
         extern void pc_enj_loop_run(void (*frame)(void *));
         pc_enj_loop_run(thread3_frame);
@@ -312,7 +315,7 @@ void main_game_loop(void) {
         rsp_segment(&gCurrDisplayList, SEGMENT_ZBUFFER, (s32) gVideoLastDepthBuffer);
         rsp_segment(&gCurrDisplayList, SEGMENT_FRAMEBUFFER_OFFSET, (s32) gVideoCurrFramebuffer - VI_OFFSET); // Unused
     }
-#if !(defined(TARGET_PC) && DKR_ENJ_LOOP)
+#ifndef TARGET_DC
     if (gDrawFrameTimer == 0) {
         gfxtask_run_xbus(gDisplayLists[gSPTaskNum], gCurrDisplayList, 0);
         gSPTaskNum += 1;
@@ -418,15 +421,17 @@ void main_game_loop(void) {
 #if REGION == REGION_JP
     func_800C78E0_C84E0();
 #endif
-#if defined(TARGET_PC) && DKR_ENJ_LOOP
-    // Under enDjinn's loop the frame's own display list is queued here and
-    // drawn as soon as this iteration returns, after the pacer's wait: the
-    // same place in time as at the top of the next iteration, where the plain
-    // loop draws it. Nothing changes gDrawFrameTimer in between.
+#ifdef TARGET_DC
+    // Under enDjinn's loop the frame goes out as soon as this iteration returns,
+    // after the pacer's wait: the same place in time as at the top of the next
+    // iteration, where the N64 hands it over. A frame the blackout timer drops
+    // is no scene at all: the picture on screen stays.
     if (gDrawFrameTimer == 0) {
         gfxtask_run_xbus(gDisplayLists[gSPTaskNum], gCurrDisplayList, 0);
         gSPTaskNum += 1;
         gSPTaskNum &= 1;
+    } else {
+        pc_gfx_task_hold();
     }
 #endif
 }

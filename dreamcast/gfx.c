@@ -14,9 +14,7 @@
 #include <enDjinn/enj_font.h>
 #include <enDjinn/enj_qfont.h>
 #include <enDjinn/enj_state.h>
-#if DKR_ENJ_RENDER
 #include <enDjinn/enj_render.h>
-#endif
 
 // ---------------------------------------------------------------------------
 // State mirrored from the gfx.h setters
@@ -817,15 +815,6 @@ static void frame_state_reset(void) {
     sCoverLayer = 0;
     sOverlayDraw = 0;
     sRoute = ROUTE_OP;
-}
-
-void gfx_frame_begin(void) {
-    if (!sPvrReady) {
-        return;
-    }
-    pvr_scene_begin();
-    pvr_list_begin(PVR_LIST_OP_POLY);
-    frame_state_reset();
 }
 
 // User clip is specified in 32-pixel tiles, lower-right inclusive.
@@ -2045,19 +2034,6 @@ static void replay_words(unsigned char (*buf)[32], int count) {
     }
 }
 
-/** Open a list, push a recording into it verbatim, add `extra`, close it. */
-static void replay_list(int list, unsigned char (*buf)[32], int count, void (*extra)(void)) {
-    if (count <= 0 && extra == NULL) {
-        return;
-    }
-    pvr_list_begin(list);
-    replay_words(buf, count);
-    if (extra != NULL) {
-        extra();
-    }
-    pvr_list_finish();
-}
-
 // ---------------------------------------------------------------------------
 // FPS measurement and its on-screen readout
 // ---------------------------------------------------------------------------
@@ -2120,28 +2096,9 @@ static void frame_done(void) {
     }
 }
 
-void gfx_frame_end(void) {
-    if (!sInScene) {
-        return;
-    }
-    fps_tick();
-    pvr_list_finish(); // OP
-
-    // Neither PT nor TR was opened this frame, so opening them now is legal — the
-    // rule is that a list cannot be opened *again*, not that lists must go in order.
-    replay_list(PVR_LIST_PT_POLY, sPtBuf, sProfSkip == 1 ? 0 : sPtCount, DKR_SHOW_FPS && sFpsFont ? fps_draw : NULL);
-    replay_list(PVR_LIST_TR_POLY, sTrBuf, sProfSkip == 2 ? 0 : sTrCount, NULL);
-
-    fog_registers_set();
-    pvr_scene_finish();
-    frame_done();
-}
-
-#if DKR_ENJ_RENDER
-// ENJ_RENDER=1: enDjinn's render lists submit the scene. The display-list walk
-// runs inside the opaque list, as between gfx_frame_begin and gfx_frame_end;
-// the punch-through and translucent recordings it makes are replayed by the
-// later lists.
+// enDjinn's render lists submit the scene. The display-list walk runs inside
+// the opaque list; the punch-through and translucent recordings it makes are
+// replayed by the later lists.
 static void (*sFrameWalk)(void *);
 static void *sFrameWalkData;
 
@@ -2179,16 +2136,6 @@ void gfx_frame_queue(void (*walk)(void *), void *data) {
     enj_render_list_add(PVR_LIST_PT_POLY, frame_pt, NULL);
 }
 
-void gfx_frame_render(void (*walk)(void *), void *data) {
-    if (!sPvrReady) {
-        return;
-    }
-    gfx_frame_queue(walk, data);
-    enj_render_scene();
-    frame_done();
-}
-
 void gfx_frame_submitted(void) {
     frame_done();
 }
-#endif

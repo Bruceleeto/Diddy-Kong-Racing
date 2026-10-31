@@ -36,7 +36,7 @@
 #include <enDjinn/enj_state.h>
 
 // enDjinn's controller layer (ENJ_INPUT=1): one snapshot of every port a
-// frame, taken by enDjinn's loop (ENJ_LOOP=1) or by input_host_poll.
+// frame, taken by enDjinn's loop.
 extern void enj_ctrl_init_local_devices(void);
 static int sEnjInputReady;
 
@@ -50,9 +50,6 @@ void input_host_poll(void) {
             enj_ctrl_init_local_devices();
         }
     }
-#if !DKR_ENJ_LOOP
-    enj_ctrl_map_states();
-#endif
 }
 
 #define HELD(s, b) (((s)->button.b) & ENJ_BUTTON_DOWN)
@@ -262,7 +259,4 @@ void input_rumble_flush(void) {
         }
         sRumbleSent[i] = (unsigned char) strength;
     }
-#if !DKR_ENJ_LOOP
-    enj_rumble_update(); // enDjinn's own loop sends them otherwise
-#endif
 }

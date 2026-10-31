@@ -73,8 +73,6 @@ typedef struct {
 // size the interpreter draws in; the window is that times `scale`.
 void gfx_window_init(int width, int height, int scale);
 
-void gfx_frame_begin(void);
-
 // Uploads an RGBA8888 image and returns a handle for gfx_bind_texture().
 // `cmS`/`cmT` are the RDP's raw 2-bit clamp/mirror fields for each axis
 // (G_TX_WRAP / G_TX_MIRROR / G_TX_CLAMP).
@@ -243,13 +241,8 @@ void gfx_set_scissor(float x0, float y0, float x1, float y1);
 // Drops back to drawing over the whole framebuffer.
 void gfx_disable_scissor(void);
 
-// Presents the frame and pumps the event queue (exits the process on quit).
-void gfx_frame_end(void);
-// ENJ_RENDER=1: submit a frame through enDjinn's render lists, calling `walk`
-// inside the opaque list where gfx_frame_begin/gfx_frame_end would bracket it.
-void gfx_frame_render(void (*walk)(void *), void *data);
-// ENJ_LOOP=1: queue the same renderers for enDjinn's loop to submit, and finish
-// the frame once it has (enDjinn's post-render callback).
+// Queue a frame for enDjinn's loop to submit, `walk` running inside the opaque
+// list, and finish it once it has (enDjinn's post-render callback).
 void gfx_frame_queue(void (*walk)(void *), void *data);
 void gfx_frame_submitted(void);
 

@@ -3189,31 +3189,6 @@ static void debug_view_draw(void) {
 }
 #endif
 
-static void gfx_task_draw(void *dlBegin, void *dlEnd);
-
-#if DKR_ENJ_LOOP
-static void gfx_task_queue(void *dlBegin, void *dlEnd);
-#endif
-
-void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
-#if DKR_ENJ_LOOP
-    // enDjinn draws it once the frame's iteration returns (pc_enj_loop_run).
-    gfx_task_queue(dlBegin, dlEnd);
-    return;
-#endif
-    gfx_task_draw(dlBegin, dlEnd);
-    pc_scene_frame_shown();
-#if DKR_DEBUG_VIEW
-    // The game does not run while a frame is held: its last display list is
-    // drawn again each field, so a mode change shows on the same picture.
-    debug_view_poll();
-    while (sDebugHold) {
-        gfx_task_draw(dlBegin, dlEnd);
-        debug_view_poll();
-    }
-#endif
-}
-
 typedef struct {
     void *begin, *end;
 } FrameDl;
@@ -3229,7 +3204,7 @@ static void frame_walk(void *data) {
 #if DKR_GFX_PROFILE
     sProfT1 = pc_uptime_ns();
     {
-        // The previous scene was flipped by now (gfx_frame_begin waits for the
+        // The previous scene was flipped by now (pvr_wait_ready waited for the
         // PVR), so the vblank count between two frame starts is how many
         // fields the frame before took.
         u32 vbl = (u32) pvr_get_vbl_count();
@@ -3416,36 +3391,49 @@ static void shp_finish(void) {
 }
 #endif
 
-static void gfx_task_draw(void *dlBegin, void *dlEnd) {
-    FrameDl frame = { dlBegin, dlEnd };
+#include <enDjinn/enj_mode.h>
+#include <enDjinn/enj_render.h>
+#include <enDjinn/enj_state.h>
+// enDjinn's enj_state_run is the game loop. Each frame it calls the game's
+// iteration (thread3_frame), which queues the display list it built through
+// pc_gfx_task_submit; enDjinn then submits the scene, and its post-render
+// callback finishes the frame.
+static FrameDl sQueuedFrame;
+#if DKR_DEBUG_VIEW
+static FrameDl sHeldFrame;
+#endif
 #if DKR_GFX_PROFILE
-    u64 profT0 = pc_uptime_ns();
+static u64 sQueuedT0;
+#endif
+
+void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
+    sQueuedFrame.begin = dlBegin;
+    sQueuedFrame.end = dlEnd;
+#if DKR_DEBUG_VIEW
+    sHeldFrame = sQueuedFrame;
+#endif
+#if DKR_GFX_PROFILE
+    sQueuedT0 = pc_uptime_ns();
 #endif
     sGfxFrameCount++;
+    gfx_frame_queue(frame_walk, &sQueuedFrame);
+}
 
-#if DKR_ENJ_RENDER
-    gfx_frame_render(frame_walk, &frame);
-#else
-    gfx_frame_begin();
-#if DKR_SHP
-    {
-        extern s32 gMapId;
-        s32 window = pc_scene_is_ready();
+/** The game drew no frame this iteration: what is on screen stays. */
+void pc_gfx_task_hold(void) {
+    enj_render_hold_frame();
+}
 
-        shp_phase(shp_map_phase(gMapId));
-        shp_section(SHP_SEC_WALK);
-        if (window) window = shp_pmu_open((u32) gMapId < SHP_PMU_BUCKETS ? (u32) gMapId : SHP_PMU_BUCKETS - 1);
-        frame_walk(&frame);
-        if (window) shp_pmu_close();
-        shp_section(SHP_SEC_OTHER);
+static void enj_frame_submitted(void *data) {
+    (void) data;
+    if (sQueuedFrame.begin == NULL) {
+        return; // nothing was drawn this frame
     }
-#else
-    frame_walk(&frame);
-#endif
-    gfx_frame_end();
-#endif
+    sQueuedFrame.begin = NULL;
+    gfx_frame_submitted();
+    pc_scene_frame_shown();
 #if DKR_GFX_PROFILE
-    prof_frame(profT0, sProfT1, sProfT2, pc_uptime_ns());
+    prof_frame(sQueuedT0, sProfT1, sProfT2, pc_uptime_ns());
 #endif
 #if DKR_AUTO_EXIT_SECONDS
     // Unattended measurement runs: return to the loader by ourselves.
@@ -3471,66 +3459,28 @@ static void gfx_task_draw(void *dlBegin, void *dlEnd) {
 #endif
 }
 
-#if DKR_ENJ_LOOP
-#include <enDjinn/enj_mode.h>
-#include <enDjinn/enj_render.h>
-#include <enDjinn/enj_state.h>
-// ENJ_LOOP=1: enDjinn's enj_state_run is the game loop. Each frame it calls
-// the game's iteration (thread3_frame), which queues the display list it built
-// through gfx_task_queue; enDjinn then submits the scene, and its post-render
-// callback finishes the frame as gfx_task_draw's tail does.
-static FrameDl sQueuedFrame;
-#if DKR_GFX_PROFILE
-static u64 sQueuedT0;
-#endif
+#if DKR_DEBUG_VIEW
+// The game does not run while a frame is held: its last draws are queued again
+// each field, so a mode change shows on the same picture.
+static void (*sGameFrame)(void *);
 
-static void gfx_task_queue(void *dlBegin, void *dlEnd) {
-    sQueuedFrame.begin = dlBegin;
-    sQueuedFrame.end = dlEnd;
-#if DKR_GFX_PROFILE
-    sQueuedT0 = pc_uptime_ns();
-#endif
-    sGfxFrameCount++;
-    gfx_frame_queue(frame_walk, &sQueuedFrame);
-}
-
-static void enj_frame_submitted(void *data) {
-    (void) data;
-    if (sQueuedFrame.begin == NULL) {
-        return; // nothing was drawn this frame
+static void debug_view_frame(void *data) {
+    debug_view_poll();
+    if (sDebugHold) {
+        pc_gfx_task_submit(sHeldFrame.begin, sHeldFrame.end);
+    } else {
+        sGameFrame(data);
     }
-    sQueuedFrame.begin = NULL;
-    gfx_frame_submitted();
-    pc_scene_frame_shown();
-#if DKR_GFX_PROFILE
-    prof_frame(sQueuedT0, sProfT1, sProfT2, pc_uptime_ns());
-#endif
-#if DKR_AUTO_EXIT_SECONDS
-    if (pc_uptime_ns() > (u64) DKR_AUTO_EXIT_SECONDS * 1000000000ull) {
-#if DKR_GFX_PROFILE
-        pc_scene_prof_report();
-#endif
-        prof_sample_write();
-#if DKR_SHP
-        shp_finish();
-#endif
-#if DKR_GFX_PROFILE
-        pc_prof_log_flush();
-#endif
-#if DKR_ASSET_TRACE
-        {
-            extern void pc_asset_trace_report(void);
-            pc_asset_trace_report();
-        }
-#endif
-        arch_exit();
-    }
-#endif
 }
+#endif
 
 void pc_enj_loop_run(void (*frame)(void *)) {
     static enj_mode_t sGameMode;
 
+#if DKR_DEBUG_VIEW
+    sGameFrame = frame;
+    frame = debug_view_frame;
+#endif
     sGameMode.mode_updater = frame;
     sGameMode.no_soft_reset = 1;
     strncpy(sGameMode.name, "dkr", sizeof(sGameMode.name) - 1);
@@ -3538,7 +3488,6 @@ void pc_enj_loop_run(void (*frame)(void *)) {
     enj_mode_push(&sGameMode);
     enj_state_run();
 }
-#endif
 
 static void cont_reset_btn_callback_(uint8_t addr, uint32_t btns) {
     extern s32 pc_save_exit_after_flush(void); // dreamcast/reimpl.c
