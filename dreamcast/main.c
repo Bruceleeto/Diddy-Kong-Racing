@@ -2433,6 +2433,8 @@ static u32 blast_argb_lerp(u32 a, u32 b, f32 t) {
     return out;
 }
 
+static s32 sBlastScissor; // pc_nat_clip, under a scissor that is not on the tiles
+
 /**
  * Near-clip one triangle in clip space (Sutherland-Hodgman against
  * w >= GFX_NEAR_W, same plane and interpolation as the emulated clipper),
@@ -2484,6 +2486,32 @@ static __attribute__((noinline)) void blast_clip_tri(const BlastClipVert *in, s3
             return;
         }
     }
+    if (sBlastScissor) {
+        // The native path, under a scissor off the tiles: through it as well.
+        for (j = 1; j + 1 < n; j++) {
+            const s32 at[3] = { 0, j, j + 1 };
+            GfxTriVert t[3];
+            s32 k;
+
+            for (k = 0; k < 3; k++) {
+                const BlastClipVert *o = &poly[at[k]];
+
+                t[k].x = px[at[k]];
+                t[k].y = py[at[k]];
+                t[k].z = 0.0f;
+                t[k].w = shz_invf_fsrra(iw[at[k]]);
+                t[k].u = o->u;
+                t[k].v = o->v;
+                t[k].fog = 0.0f;
+                t[k].a = o->argb >> 24;
+                t[k].r = o->argb >> 16;
+                t[k].g = o->argb >> 8;
+                t[k].b = o->argb;
+            }
+            gfx_nat_tri_exact(t, sBlastZMul, sBlastOffset);
+        }
+        return;
+    }
     for (j = 1; j + 1 < n; j++) {
         blast_emit(px[0], py[0], iw[0], poly[0].u, poly[0].v, poly[0].argb, PVR_CMD_VERTEX);
         blast_emit(px[j], py[j], iw[j], poly[j].u, poly[j].v, poly[j].argb, PVR_CMD_VERTEX);
@@ -2510,6 +2538,10 @@ __attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corne
     sBlastZMul = zMul;
     sBlastZAdd = 0.0f;
     sBlastOffset = offset;
+    sBlastScissor = gfx_nat_exact();
+    if (sBlastScissor) {
+        gfx_nat_end(record);
+    }
     for (i = 0; i < count; i++) {
         const NatCorner *c = &corners[i];
         s32 at = c->word & 0xFFFF;
@@ -2542,7 +2574,8 @@ __attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corne
             step = 0;
         }
     }
-    record = sBlastRecord;
+    record = sBlastScissor ? gfx_nat_position() : sBlastRecord;
+    sBlastScissor = FALSE;
     sBlastRecord = NULL;
     return record;
 }
