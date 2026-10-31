@@ -28,6 +28,7 @@
 #include "pc_swap.h"
 #include "../dreamcast/prof.h"
 #ifdef TARGET_DC
+#include "../dreamcast/cover.h"
 #include "../dreamcast/scrawl.h"
 // dreamcast/native.c; its header brings the console's own, which do not mix with these.
 extern void pc_nat_level_load(s32 modelId);
@@ -1578,6 +1579,9 @@ void trackbg_render_gradient(void) {
     headerBlue1 = gCurrentLevelHeader2->BGColourBottomB;
     rendermode_reset(&gTrackDL);
     material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE);
+    #ifdef TARGET_DC
+    gDPNoOpTag(gTrackDL++, PC_VIEW_BEGIN_TAG);
+#endif
     gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(verts), 4, 0);
     gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tris), 2, 0);
 

@@ -137,6 +137,7 @@ void gfx_nat_scale(float *x, float *y);
 // in N64 pixels with texture coordinates as written, after gfx_nat_end; the run goes
 // on from gfx_nat_position.
 int gfx_nat_exact(void);
+void gfx_view_begin(void); // a split-screen view starts: what comes next is its backdrop
 void gfx_nat_tri_exact(const GfxTriVert *tri, float zMul, unsigned int offset);
 void *gfx_nat_position(void);
 // The bits of a polygon header that come from a texture.

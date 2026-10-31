@@ -2903,6 +2903,8 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
         }
     } else if (w1 == PC_GLARE_END_TAG) {
         sGlareSkipRect = FALSE;
+    } else if (w1 == PC_VIEW_BEGIN_TAG) {
+        gfx_view_begin();
     }
 #if DKR_GFX_PROFILE
     if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {

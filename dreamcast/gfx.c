@@ -1869,6 +1869,12 @@ void gfx_nat_set_fog(int enable) {
     sNatNoFog = !enable;
 }
 
+// Depth seen is a view's, not the frame's: in split screen the second view's backdrop
+// comes after the first view's scene, and taken for 2D it went over its own view.
+void gfx_view_begin(void) {
+    sSeenDepth = 0;
+}
+
 int gfx_nat_exact(void) {
     return scissor_needs_exact_clip();
 }

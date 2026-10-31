@@ -28,4 +28,8 @@ void pc_fade_announce(int r, int g, int b, int alpha);
 #define PC_GLARE_END_TAG 0xD0CA7F09u
 void pc_glare_announce(int r, int g, int b, int alpha);
 
+// Before a split-screen view's backdrop (src/tracks.c trackbg_render_gradient): what
+// follows is a backdrop again, though the view before it has drawn depth.
+#define PC_VIEW_BEGIN_TAG 0xD0CA7F0Au
+
 #endif
