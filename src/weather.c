@@ -1,5 +1,4 @@
 #include "weather.h"
-#include "../dreamcast/native_game.h"
 #include "asset_loading.h"
 #include "audio.h"
 #include "audio_spatial.h"
@@ -55,6 +54,15 @@ Gfx dLensFlare[] = {
     gsDPSetRenderMode(G_RM_CLD_SURF, G_RM_CLD_SURF2),
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dLensFlare_nat(void) {
+    gDPSetCycleType(0, G_CYC_1CYCLE);
+    gDPSetTextureFilter(0, G_TF_BILERP);
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gDPSetRenderMode(0, G_RM_CLD_SURF, G_RM_CLD_SURF2);
+}
+#endif
 
 LensFlareData gLensPresetLarge[2] = { { 1, { { { 255, 255, 192, 144 } } }, 3.0f, 0.0f }, { NULL } };
 
@@ -544,22 +552,16 @@ void snow_render(void) {
             gSPSelectMatrixDKR(gCurrWeatherDisplayList++, G_MTX_DKR_INDEX_0);
             while (i + gSnowVertOffset < gSnowVertCount) {
                 vtx = &gSnowVerts[i];
-                if (!nat_mesh(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE, 0, vtx, gSnowVertOffset,
-                              gSnowTriangles, gSnowTriCount)) {
-                    material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
-                    gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), gSnowVertOffset, 0);
-                    gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles), gSnowTriCount, 1);
-                }
+                material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
+                gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), gSnowVertOffset, 0);
+                gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles), gSnowTriCount, 1);
                 i += gSnowVertOffset;
             }
             vtx = &gSnowVerts[i];
-            if (!nat_mesh(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE, 0, vtx, gSnowVertCount - i,
-                          gSnowTriangles, (s32) (gSnowVertCount - i) >> 1)) {
-                material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
-                gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), (gSnowVertCount - i), 0);
-                gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles),
-                           ((s32) (gSnowVertCount - i) >> 1), 1);
-            }
+            material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
+            gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), (gSnowVertCount - i), 0);
+            gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles),
+                       ((s32) (gSnowVertCount - i) >> 1), 1);
         }
     }
 }

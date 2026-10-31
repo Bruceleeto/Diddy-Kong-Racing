@@ -1066,8 +1066,8 @@ void cam_set_sprite_anim_mode(s32 setting) {
  *
  * For regular sprites, it sets up a standard billboard that always faces the camera.
  */
-#ifdef TARGET_DC
-#include "../dreamcast/native_game.h"
+#ifdef NAT_DIRECT
+extern s32 pc_nat_sprite(const Sprite *sprite, s32 frame, s32 flags, const Mtx *billboard);
 #endif
 
 s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, Sprite *sprite, s32 flags) {
@@ -1084,11 +1084,6 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
     s32 tiltAngle;
     s32 result;
     s32 frameID;
-#if defined(TARGET_DC) && DKR_NATIVE
-    Gfx *natStart = *dList;
-    Vertex *natAnchor = NULL;
-    s32 natFlags;
-#endif
 
     if (obj == NULL) {
         stubbed_printf("\nCam do 2D sprite called with NULL pointer!");
@@ -1177,9 +1172,6 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         v->g = 255;
         v->b = 255;
         v->a = 255;
-#if defined(TARGET_DC) && DKR_NATIVE
-        natAnchor = v;
-#endif
         gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(*vtx), 1, 0);
         (*vtx)++;
 
@@ -1213,20 +1205,15 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         flags |= RENDER_ANTI_ALIASING;
     }
 
-#if defined(TARGET_DC) && DKR_NATIVE
-    // Drawn from the sprite directly (dreamcast/native.c): none of the commands
-    // so far are wanted, and the anchor and the matrix go with the draw instead.
-    natFlags = sprite->drawFlags |
-               (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING));
-    if (pc_nat_sprite(NULL, sprite, frameID, natFlags, natAnchor, gModelMatrix[gModelMatrixStackPos])) {
-        *dList = natStart;
-        if (!(flags & RENDER_Z_UPDATE)) {
-            gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
-        }
-        pc_nat_sprite(dList, sprite, frameID, natFlags, natAnchor, gModelMatrix[gModelMatrixStackPos]);
-    } else
-#endif
-    {
+#ifdef NAT_DIRECT
+    // Drawn from the sprite directly (dreamcast/native.c).
+    if (!(flags & RENDER_Z_UPDATE)) {
+        gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+    }
+    pc_nat_sprite(sprite, frameID, sprite->drawFlags |
+                  (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)),
+                  gModelMatrix[gModelMatrixStackPos]);
+#else
     // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
     material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
                                                               RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)));
@@ -1235,7 +1222,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
     }
     gSPDisplayList((*dList)++, sprite->frames[frameID]);
-    }
+#endif
 
     // Pop the model matrix stack and select the appropriate matrix index for rendering
     gModelMatrixStackPos--;
@@ -1308,11 +1295,17 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     if (gSpriteAnimMode == SPRITE_ANIM_NORMALIZED) {
         index = (((u8) index) * sprite->numberOfFrames) >> 8;
     }
+#ifndef NAT_DIRECT
     material_load_simple(dList, sprite->drawFlags | flags);
+#endif
     if (index >= sprite->numberOfFrames) {
         index = sprite->numberOfFrames - 1;
     }
+#ifdef NAT_DIRECT
+    pc_nat_sprite(sprite, index, sprite->drawFlags | flags, gModelMatrix[gModelMatrixStackPos]);
+#else
     gSPDisplayList((*dList)++, sprite->frames[index]);
+#endif
     if (--gModelMatrixStackPos == 0) {
         index = G_MTX_DKR_INDEX_0;
     } else {

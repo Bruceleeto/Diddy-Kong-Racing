@@ -9,32 +9,79 @@
 #include "gfx.h"
 #include "types.h"
 
-// A native draw has its place in the frame's display list, for as long as
-// parts of the frame are still drawn by the walk: one command, which the walk
-// hands straight to dreamcast/native.c. Unused by the F3D microcode DKR ran.
-#define G_NATIVE 0x0A
-#define NATIVE_LEVEL 0 // w0 low half: segment, bit 16: water hidden; w1: chunks first, end
-#define NATIVE_CHECK_LEVEL 1 // NATIVE_CHECK=1: w0 low half: segment; w1: batch
-#define NATIVE_MODEL 2 // w0: first batch, variant, vertices split; w1: vertices; then a word with w1 the model
-#define NATIVE_CHECK_MODEL 3 // NATIVE_CHECK=1: w0: batch, variant; w1: the model
-#define NATIVE_SPRITE 5 // w0: frame, z buffer; w1: sprite; then words with the anchor, the matrix, the render table's entry
-#define NATIVE_RECT 6 // w1: texture; then words with ulx, uly, lrx, lry and s, t, dsdx, dtdy, 16 bits each
-#define NATIVE_TRIS 4 // w0: vertices, triangles; w1: vertices; then a word with the material and the triangles
+typedef struct NatMaterial NatMaterial;
 
-#define gDkrNative(pkt, kind, a, b)                                                                     \
-    do {                                                                                                \
-        Gfx *_g = (Gfx *) (pkt);                                                                        \
-        _g->words.w0 = ((u32) G_NATIVE << 24) | ((u32) (kind) << 20) | (u32) (a);                       \
-        _g->words.w1 = (u32) (b);                                                                       \
-    } while (0)
+// A texture as a draw needs it.
+typedef struct {
+    u32 handle;                // gfx.c's, 0 for none
+    const void *header;        // the game's, if it came from one
+    u16 width, height;
+    u8 cms, cmt;
+} NatTexture;
 
-// What a frame's chunk draws through.
+// What the game has set: a list's state, for the draws it makes.
+typedef struct {
+    const f32 *matrix[3];      // the Mtx of each slot
+    const f32 *matrixV, *matrixV2; // each vertex load's, as it was loaded
+    const void *verts, *verts2;
+    s32 numVerts, numVerts2;
+    s32 cur, billboard;
+    u32 prim, env, blend, fill;
+    u32 combine0, combine1;
+    u32 otherH, otherL, geometry;
+    NatTexture texture;
+    const void *lastHeader;
+} NatState;
+
+extern NatState gNat;
+
+enum {
+    NAT_REC_LEVEL,      // a: segment and water hidden, b: first chunk, c: end chunk
+    NAT_REC_MODEL,      // a: first batch, variant, split; p0: vertices; p1: model
+    NAT_REC_SPRITE,     // a: frame, z buffer; p0: sprite; p1: anchor (or NULL); p2: render table entry
+    NAT_REC_TRIS,       // mat; p0, a: vertices; p1, b: a second load; p2, c: triangles
+    NAT_REC_RECT,       // mat; f: corners; a, b: texture coordinates
+    NAT_REC_FILL,       // mat; f: corners; b: fill colour
+    NAT_REC_VIEWPORT,   // p0
+    NAT_REC_SCISSOR,    // f
+    NAT_REC_FOG_COLOUR, // b
+    NAT_REC_FOG_DEPTH,  // b: as gSPFogPosition packs it
+    NAT_REC_TAG         // b
+};
+
+// One thing to draw, with all it needs from the game's state.
+typedef struct {
+    u8 kind, fog;
+    u16 unused;
+    u32 prim, env;
+    const f32 *matrix, *matrix2;
+    const NatMaterial *mat;
+    union {
+        struct {
+            u32 a, b, c;
+            const void *p0, *p1, *p2;
+        };
+        struct {
+            u32 pad[2];
+            f32 f[4];
+        };
+    };
+} NatRec;
+
+#define NAT_RECORDS 4096
+extern NatRec gNatRecs[2][NAT_RECORDS];
+extern s32 gNatRecCount[2];
+NatRec *pc_nat_record(s32 kind);
+void pc_nat_frame_reset(s32 task);
+void pc_nat_frame_run(s32 task);
+void nat_ignore(s32 ignore);
+
+// What a record draws through, as the frame goes out.
 typedef struct {
     const f32 *matrix;    // the 4x4 the positions go through, columns first
     const f32 *matrix2;   // a racer's head (slot 2)
     u32 prim, env;        // as the combiner keys them, RGBA
     f32 vpScaleX, vpScaleY, vpTransX, vpTransY; // the N64 viewport
-    s32 serial;           // changes when any of the above does
     s32 exact;            // the scissor is not on the tiles
 } NatView;
 
@@ -89,39 +136,50 @@ static inline void nat_sq_flush(pvr_vertex_t *vt) {
 void pc_nat_level_load(s32 modelId);
 void pc_nat_level_free(void);
 void pc_nat_vram_lost(void);
-// Batch `batch` of a segment on: 0 if the walk has to draw it; otherwise how many
-// batches, from it, are done by the G_NATIVE command this adds to *dl.
-s32 pc_nat_level_batches(Gfx **dl, s32 segment, s32 batch, s32 end, s32 waterHidden);
+void pc_nat_materials_forget(void);
+// Batch `batch` of a segment on: 0 if the game has to draw it; otherwise how many
+// batches, from it, the record this adds draws.
+s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);
 void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch);
+#define NATIVE_CHECK_LEVEL 1
+#define NATIVE_CHECK_MODEL 3
+#define G_NATIVE 0x0A
 
 // Object models (src/object_models.c, src/objects.c). render_mesh's return, or -2
-// if the walk has to draw it.
+// if the batch has to go the way of any other mesh.
 void pc_nat_model_load(ObjectModel *model, s32 modelId);
 void pc_nat_model_free(ObjectModel *model);
-s32 pc_nat_model_draw(Gfx **dl, ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
+s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
 void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags);
 
-// What a frame makes up: particles, shadows, the water. The material for
-// material_set's arguments, or for two commands of the game's own and its
-// geometry mode; NULL if the walk has to draw it.
-typedef struct NatMaterial NatMaterial;
-const NatMaterial *pc_nat_material(TextureHeader *tex, s32 flags, s32 texOffset);
-const NatMaterial *pc_nat_material_state(TextureHeader *tex, const Gfx *state, s32 zBuffer, s32 fog);
-void pc_nat_tris(Gfx **dl, const NatMaterial *mat, const Vertex *verts, s32 numVerts, const Triangle *tris, s32 numTris);
-void pc_nat_materials_forget(void);
-s32 pc_nat_rect(Gfx **dl, TextureHeader *tex, s32 ulx, s32 uly, s32 lrx, s32 lry, s32 s, s32 t, s32 dsdx, s32 dtdy);
-s32 pc_nat_sprite(Gfx **dl, const Sprite *sprite, s32 frame, s32 flags, const Vertex *anchor, const Mtx *billboard);
-
 // The walk's side (dreamcast/main.c).
-void pc_nat_level_run(const NatView *view, u32 w0, u32 w1);
+void pc_nat_level_run(const NatView *view, const NatRec *rec);
+const NatMaterial *pc_nat_material_now(s32 textured);
+void pc_nat_texture_of(const void *textureHeader, NatTexture *out);
+void pc_nat_texture_image(const void *image, s32 fmt, s32 siz, s32 width, s32 height, s32 cms, s32 cmt, s32 swapped,
+                          NatTexture *out);
+s32 pc_nat_sprite(const Sprite *sprite, s32 frame, s32 flags, const Mtx *billboard);
+void pc_nat_run_viewport(const void *viewport, NatView *view);
+void pc_nat_run_scissor(const f32 *f);
+void pc_nat_run_fog_colour(u32 rgba);
+void pc_nat_run_fog_depth(u32 data);
+void pc_nat_run_tag(u32 tag, const f32 *matrix);
+s32 pc_nat_run_rects(const NatRec *rec, s32 count);
+void pc_nat_run_fill(const NatRec *rec);
+void pc_nat_draw_tris(const NatMaterial *mat, const GfxTriVert *verts, s32 count);
+u32 pc_nat_material_handle(const NatMaterial *mat);
 void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count);
-void pc_nat_model_run(const NatView *view, u32 w0, u32 w1, u32 w1b);
+void pc_nat_model_run(const NatView *view, const NatRec *rec);
 void pc_nat_check_model_run(u32 w0, u32 w1);
-void pc_nat_sprite_run(const NatView *view, u32 w0, u32 w1, const Gfx *next);
-void pc_nat_tris_run(const NatView *view, u32 w0, u32 w1, const NatMaterial *mat, const Triangle *tris);
+void pc_nat_sprite_run(const NatView *view, const NatRec *rec);
+void pc_nat_tris_run(const NatView *view, const NatRec *rec);
 // How a combiner treats the shade under these colours. TRUE: a colour is
 // (shade & keep) | konst. FALSE: pc_nat_colours_mux does it, vertex by vertex.
 s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst);
+void pc_nat_load_state(const NatMaterial *mat, u32 prim, u32 env);
+void pc_nat_set_modes(u32 w0, u32 w1, u32 otherH, u32 otherL, u32 prim, u32 env);
+void pc_nat_material_size(const NatMaterial *mat, s32 *w, s32 *h, s32 *cms, s32 *cmt);
+void pc_nat_material_flags(const NatMaterial *mat, s32 *depth, s32 *write, s32 *decal, s32 *blend, s32 *alpha, s32 *fog, s32 *point);
 void pc_nat_colours_mux(u32 *argb, const Vertex *verts, s32 count);
 
 // The texture a frame's pixels went to the PVR as: the bits of the polygon header

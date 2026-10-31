@@ -1605,6 +1605,15 @@ Gfx dCreditsFade[11] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dCreditsFade_nat(void) {
+    gDPSetCycleType(0, G_CYC_1CYCLE);
+    gDPSetTextureFilter(0, G_TF_BILERP);
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gDPSetRenderMode(0, G_RM_CLD_SURF, G_RM_CLD_SURF2);
+}
+#endif
+
 s16 gCreditsObjectIndices[12] = {
     0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B, -1, 0
 };
@@ -1882,6 +1891,13 @@ Gfx dMenuHudSettings[] = {
     gsSPClearGeometryMode(G_ZBUFFER | G_FOG),
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dMenuHudSettings_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+}
+#endif
 
 Gfx dMenuHudDrawModes[][2] = {
     {
@@ -2319,7 +2335,7 @@ void func_80080580(Gfx **dList, s32 startX, s32 startY, s32 width, s32 height, s
     }
     if (dList != NULL) {
         gMenuGeometry[gWoodPanelCount].unk18[gMenuTrisFlip] = 1;
-        gSPDisplayList((*dList)++, &dMenuHudSettings);
+        gSPDisplayList((*dList)++, dMenuHudSettings);
         if (tex != NULL) {
             gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(&dMenuHudDrawModes[1]), 2);
             gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
@@ -2345,7 +2361,7 @@ void func_80080BC8(Gfx **dList) {
     TextureHeader *tex;
     TextureHeader *lastTex;
 
-    gSPDisplayList((*dList)++, &dMenuHudSettings);
+    gSPDisplayList((*dList)++, dMenuHudSettings);
     var_t0 = -1;
     lastTex = NULL;
 
@@ -2402,7 +2418,7 @@ void func_80080E90(Gfx **dList, s32 startX, s32 startY, s32 width, s32 height, s
     s32 j;
     s32 index;
 
-    gSPDisplayList((*dList)++, &dMenuHudSettings);
+    gSPDisplayList((*dList)++, dMenuHudSettings);
     gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(&dMenuHudDrawModes[2]), 2);
 
     // Must be a while loop to match.

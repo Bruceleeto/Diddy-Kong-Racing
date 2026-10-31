@@ -141,6 +141,17 @@ Gfx dDebugFontSettings[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dDebugFontSettings_nat(void) {
+    gDPSetCycleType(0, G_CYC_1CYCLE);
+    gDPSetTextureFilter(0, G_TF_BILERP);
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gDPSetRenderMode(0, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+    gDPSetEnvColor(0, 255, 255, 255, 255);
+    gDPSetPrimColor(0, 0, 0, 0, 0, 0, 0);
+}
+#endif
+
 /*******************************/
 
 /************ .bss ************/

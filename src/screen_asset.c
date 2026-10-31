@@ -14,6 +14,13 @@ Gfx gRdpSetModeScreenAsset[] = {
     gsDPSetOtherMode(DKR_OMH_COPY_POINT_NOPERSP, DKR_OML_COMMON | G_RM_NOOP | G_RM_NOOP2),
 };
 
+#ifdef NAT_DIRECT
+static void gRdpSetModeScreenAsset_nat(void) {
+    gDPSetCombineMode(0, G_CC_DECAL_SCALE, G_CC_DECAL_SCALE);
+    gDPSetOtherMode(0, DKR_OMH_COPY_POINT_NOPERSP, DKR_OML_COMMON | G_RM_NOOP | G_RM_NOOP2);
+}
+#endif
+
 /**
  * Loads a 320x240 RGBA16 image to be displayed on the screen.
  * Returns the address of the screen asset, or 0x80100000 if no screen assets were found.
@@ -62,8 +69,12 @@ UNUSED u32 screenimage_load(s32 screenIndex) {
 UNUSED void screenimage_draw(Gfx **dList, u8 *screenAddress) {
     s32 y_pos;
 
+#ifdef NAT_DIRECT
+    gRdpSetModeScreenAsset_nat();
+#else
     gDkrDmaDisplayList((*dList)++, OS_PHYSICAL_TO_K0(&gRdpSetModeScreenAsset),
                        numberOfGfxCommands(gRdpSetModeScreenAsset));
+#endif
 
     // Screen header is 16 bytes.
     screenAddress += 16;

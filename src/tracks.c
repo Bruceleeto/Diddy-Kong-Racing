@@ -27,13 +27,12 @@
 #include "weather.h"
 #include "pc_swap.h"
 #include "../dreamcast/prof.h"
-#include "../dreamcast/native_game.h"
 #ifdef TARGET_DC
 #include "../dreamcast/scrawl.h"
 // dreamcast/native.c; its header brings the console's own, which do not mix with these.
 extern void pc_nat_level_load(s32 modelId);
 extern void pc_nat_level_free(void);
-extern s32 pc_nat_level_batches(Gfx **dl, s32 segment, s32 batch, s32 end, s32 waterHidden);
+extern s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);
 extern void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch);
 #endif
 
@@ -2066,11 +2065,11 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         endPos = segment->numberofOpaqueBatches;
     }
     for (i = startPos; i < endPos; i++) {
-#if defined(TARGET_DC) && DKR_NATIVE && !DKR_NATIVE_CHECK
+#ifdef NAT_DIRECT
         {
             // As many batches from this one on as are compiled (dreamcast/native.c).
             s32 natBatches =
-                pc_nat_level_batches(&gTrackDL, segmentId, i, pc_scrawl_batch_limit(segmentId, i, endPos), sp78);
+                pc_nat_level_batches(segmentId, i, pc_scrawl_batch_limit(segmentId, i, endPos), sp78);
 
             if (natBatches) {
                 i += natBatches - 1;
@@ -3584,11 +3583,9 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 numVerts = gCurrShadowHeapData[i + 1].vtxCount - vtxCount;
                 tri = &gCurrShadowTris[triCount];
                 vtx = &gCurrShadowVerts[vtx2];
-                if (!nat_mesh(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0, vtx, numVerts, tri, numTris)) {
-                    material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
-                    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
-                    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
-                }
+                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
+                gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
+                gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
                 i++;
             }
 
@@ -3635,11 +3632,9 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
                 numVerts = gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount;
                 tri = &gCurrShadowTris[gCurrShadowHeapData[i].triCount];
                 vtx = &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount];
-                if (!nat_mesh(&gTrackDL, gCurrShadowHeapData[i].texture, flags, 0, vtx, numVerts, tri, numTris)) {
-                    material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
-                    gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
-                    gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
-                }
+                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
+                gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
+                gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
                 i++;
             }
         }

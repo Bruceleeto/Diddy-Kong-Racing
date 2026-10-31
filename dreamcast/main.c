@@ -740,10 +740,13 @@ typedef struct {
 #define GFX_FRONT_FACE_SIGN (-1.0f)
 
 static DKR_HOT u32 sGfxFrameCount = 0;
-static DKR_HOT NatView sNatView; // what a native draw goes through, as the walk has it now
 #ifndef DKR_NATIVE_CHECK
 #define DKR_NATIVE_CHECK 0
 #endif
+#ifndef DKR_NATIVE
+#define DKR_NATIVE 0
+#endif
+#define DKR_DIRECT (DKR_NATIVE && !DKR_NATIVE_CHECK)
 #if DKR_NATIVE_CHECK
 static u32 sCheckArgb[64]; // the colours the last blast batch went out with
 static s32 sCheckArgbCount;
@@ -1324,10 +1327,46 @@ s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3) {
     return gfx_texture_words(sPrebuilt[p].handle, (unsigned int *) mode2, (unsigned int *) mode3);
 }
 
-u32 pc_nat_texture_handle(const void *textureHeader) {
-    s32 p = prebuilt_find((u32) ((const TextureHeader *) textureHeader + 1));
+static u32 texture_lookup(void);
+extern void material_wrap(const TextureHeader *tex, s32 *cms, s32 *cmt);
 
-    return p < 0 ? 0 : sPrebuilt[p].handle;
+void pc_nat_texture_image(const void *image, s32 fmt, s32 siz, s32 width, s32 height, s32 cms, s32 cmt, s32 swapped,
+                          NatTexture *out) {
+    sTexAddr = (u32) image;
+    sTlutAddr = 0;
+    sTileFmt = fmt;
+    sTileSiz = siz;
+    sTilePalette = 0;
+    sTileWidth = width;
+    sTileHeight = height;
+    sTileCmS = cms;
+    sTileCmT = cmt;
+    sTexSwapped = swapped != 0;
+    out->handle = texture_lookup();
+    out->header = NULL;
+    out->width = width;
+    out->height = height;
+    out->cms = cms;
+    out->cmt = cmt;
+}
+
+void pc_nat_texture_of(const void *textureHeader, NatTexture *out) {
+    static const u8 sFormats[9][2] = {
+        { G_IM_FMT_RGBA, G_IM_SIZ_32b }, { G_IM_FMT_RGBA, G_IM_SIZ_16b }, { G_IM_FMT_I, G_IM_SIZ_8b },
+        { G_IM_FMT_I, G_IM_SIZ_4b },     { G_IM_FMT_IA, G_IM_SIZ_16b },   { G_IM_FMT_IA, G_IM_SIZ_8b },
+        { G_IM_FMT_IA, G_IM_SIZ_4b },    { G_IM_FMT_CI, G_IM_SIZ_4b },    { G_IM_FMT_CI, G_IM_SIZ_8b },
+    };
+    const TextureHeader *tex = textureHeader;
+    u32 kind = tex->format & 0xF;
+    s32 cms, cmt;
+
+    material_wrap(tex, &cms, &cmt);
+    if (kind > 8) {
+        kind = 1;
+    }
+    pc_nat_texture_image(tex + 1, sFormats[kind][0], sFormats[kind][1], tex->width, tex->height, cms, cmt,
+                         (tex->flags & (1 << 10)) != 0, out); // RENDER_LINE_SWAP
+    out->header = tex;
 }
 
 void pc_nat_texture_scale(const void *textureHeader, f32 *u, f32 *v) {
@@ -3260,14 +3299,24 @@ static u8 clamp_u8(f32 v) {
 #define CC_DIRLIGHT_W0 0xFC1596A4u
 #define CC_DIRLIGHT_W1 0x30FDFE38u
 
-s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst) {
-    u32 savedW0 = sCombineW0, savedW1 = sCombineW1, savedH = sOtherModeH;
-
-    (void) prim;
-    (void) env; // the walk's own, for as long as it holds them
+/** What the frame's combiner and rectangle code read of the game's state. */
+void pc_nat_set_modes(u32 w0, u32 w1, u32 otherH, u32 otherL, u32 prim, u32 env) {
     sCombineW0 = w0;
     sCombineW1 = w1;
-    sOtherModeH = (sOtherModeH & ~(3u << G_MDSFT_CYCLETYPE)) | cycle;
+    sOtherModeH = otherH;
+    sOtherModeL = otherL;
+    sPrimColor[0] = prim >> 24;
+    sPrimColor[1] = prim >> 16;
+    sPrimColor[2] = prim >> 8;
+    sPrimColor[3] = prim;
+    sEnvColor[0] = env >> 24;
+    sEnvColor[1] = env >> 16;
+    sEnvColor[2] = env >> 8;
+    sEnvColor[3] = env;
+}
+
+s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst) {
+    pc_nat_set_modes(w0, w1, (sOtherModeH & ~(3u << G_MDSFT_CYCLETYPE)) | cycle, sOtherModeL, prim, env);
     combiner_classify();
     *keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
             (sCcPass[2] ? 0x000000FFu : 0);
@@ -3276,9 +3325,6 @@ s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32
     if (!sCcFast) {
         cc_prog_sync_current();
     }
-    sCombineW0 = savedW0;
-    sCombineW1 = savedW1;
-    sOtherModeH = savedH;
     return sCcFast;
 }
 
@@ -3579,8 +3625,6 @@ static void combiner_color(u8 lit[4], u8 unlit[3]) {
  * relies on display-list order, and so do we.
  */
 /** One rectangle's two triangles, ready for gfx_draw_tris. */
-extern void material_wrap(const TextureHeader *tex, s32 *cms, s32 *cmt);
-
 static void quad_fill(GfxTriVert *q, f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1, f32 v1, const u8 lit[4],
                       const u8 unlit[3], u32 texture) {
     s32 i;
@@ -3638,49 +3682,43 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
 #define NAT_RECT_RUN 32
 
 /**
- * A run of texture rectangles from the same texture, with nothing between them
- * to change their colours: text, mostly. One header and a strip of triangles,
- * where the walk's texture rectangles were one each. Returns the words it took.
+ * A run of texture rectangles under one material and colour, with nothing between
+ * them: text, mostly. One header and its triangles, where each glyph would be one
+ * of its own. Returns how many records it took.
  */
-static __attribute__((noinline)) s32 nat_rect_run(const Gfx *g) {
+s32 pc_nat_run_rects(const NatRec *rec, s32 count) {
     static GfxTriVert sRun[NAT_RECT_RUN * 6] __attribute__((aligned(32)));
-    const TextureHeader *tex = (const TextureHeader *) g->words.w1;
-    u32 texture = pc_nat_texture_handle(tex);
-    f32 w = tex->width, h = tex->height;
+    const NatMaterial *mat = rec->mat;
+    u32 texture = pc_nat_material_handle(mat);
     u8 lit[4], unlit[3];
-    s32 n = 0, cms, cmt;
-    s32 extra = 0;
+    s32 w, h, cms, cmt;
+    s32 n = 0;
 
     if (texture == 0) {
-        return 2;
+        return 1;
     }
-    material_wrap(tex, &cms, &cmt);
+    pc_nat_material_size(mat, &w, &h, &cms, &cmt);
+    pc_nat_load_state(mat, rec->prim, rec->env);
     gfx_texture_set_wrap(texture, cms, cmt);
     combiner_color(lit, unlit);
-    while (n < NAT_RECT_RUN) {
-        u32 pos0 = g[1].words.w0, pos1 = g[1].words.w1, tc0 = g[2].words.w0, tc1 = g[2].words.w1;
-        f32 x0 = (s32) (pos0 >> 16) / 4.0f;
-        f32 y0 = (s16) (pos0 & 0xFFFF) / 4.0f;
-        f32 x1 = (s32) (pos1 >> 16) / 4.0f;
-        f32 y1 = (s16) (pos1 & 0xFFFF) / 4.0f;
-        f32 s0 = (f32) (s16) (tc0 >> 16) / 32.0f;
-        f32 t0 = (f32) (s16) (tc0 & 0xFFFF) / 32.0f;
-        f32 dsdx = (f32) (s16) (tc1 >> 16) / 1024.0f;
-        f32 dtdy = (f32) (s16) (tc1 & 0xFFFF) / 1024.0f;
+    while (n < NAT_RECT_RUN && n < count) {
+        const NatRec *r = &rec[n];
+        f32 x0 = r->f[0], y0 = r->f[1], x1 = r->f[2], y1 = r->f[3];
+        f32 s0 = (f32) (s16) (r->a >> 16) / 32.0f;
+        f32 t0 = (f32) (s16) (r->a & 0xFFFF) / 32.0f;
+        f32 dsdx = (f32) (s16) (r->b >> 16) / 1024.0f;
+        f32 dtdy = (f32) (s16) (r->b & 0xFFFF) / 1024.0f;
         f32 s1 = s0 + ((x1 - x0) * dsdx);
         f32 t1 = t0 + ((y1 - y0) * dtdy);
 
-        quad_fill(&sRun[n * 6], x0, y0, x1, y1, s0 / w, t0 / h, s1 / w, t1 / h, lit, unlit, texture);
-        n++;
-        g += 3;
-        if (n == NAT_RECT_RUN || ((g->words.w0 >> 24) & 0xFF) != G_NATIVE || ((g->words.w0 >> 20) & 0xF) != NATIVE_RECT ||
-            g->words.w1 != (u32) tex) {
+        if (r->kind != NAT_REC_RECT || r->mat != mat || r->prim != rec->prim || r->env != rec->env) {
             break;
         }
-        extra += 3;
+        quad_fill(&sRun[n * 6], x0, y0, x1, y1, s0 / w, t0 / h, s1 / w, t1 / h, lit, unlit, texture);
+        n++;
     }
     draw_2d_quads(sRun, n * 6, lit, texture);
-    return extra + 2;
+    return n;
 }
 
 /**
@@ -3799,7 +3837,6 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
 
 /** gSPViewport: the viewport map, and the rectangle it confines drawing to. */
 static __attribute__((noinline, cold)) void set_viewport(const Vp *vp) {
-    sNatView.serial++;
     f32 halfW, halfH;
 
     sVpScaleX = vp->vp.vscale[0] / 4.0f;
@@ -3852,45 +3889,102 @@ static __attribute__((noinline)) void prof_trin_why(u32 w0) {
  * a G_ENDDL, and G_DMADL likewise DMAs a fixed-size block. Zero means "run
  * until G_ENDDL", which is how nested G_DL lists terminate.
  */
-/**
- * A native draw in the display list: dreamcast/native.c does the rest. Returns
- * how many words of the list it took beyond its own.
- */
-static __attribute__((noinline)) s32 handle_native(u32 w0, u32 w1, const Gfx *next) {
+#if DKR_NATIVE_CHECK
+/** NATIVE_CHECK=1: the walk has drawn a batch; dreamcast/native.c compares it. */
+static __attribute__((noinline)) void handle_native(u32 w0, u32 w1) {
     u32 kind = (w0 >> 20) & 0xF;
 
-    sNatView.matrix = (const f32 *) sMatrices[sCurMatrix];
-    sNatView.matrix2 = (const f32 *) sMatrices[2];
-    sNatView.exact = gfx_nat_exact();
-    gfx_nat_set_fog((sGeometryMode & G_FOG) != 0);
-    sNatView.prim = CC_KEY_RGBA(sPrimColor);
-    sNatView.env = CC_KEY_RGBA(sEnvColor);
-    sNatView.vpScaleX = sVpScaleX;
-    sNatView.vpScaleY = sVpScaleY;
-    sNatView.vpTransX = sVpTransX;
-    sNatView.vpTransY = sVpTransY;
-    if (kind == NATIVE_LEVEL) {
-        pc_nat_level_run(&sNatView, w0 & 0xFFFFF, w1);
-    } else if (kind == NATIVE_MODEL) {
-        pc_nat_model_run(&sNatView, w0 & 0xFFFFF, w1, next->words.w1);
-        return 1;
-    } else if (kind == NATIVE_RECT) {
-        return nat_rect_run(next - 1);
-    } else if (kind == NATIVE_SPRITE) {
-        pc_nat_sprite_run(&sNatView, w0 & 0xFFFFF, w1, next);
-        return 2;
-    } else if (kind == NATIVE_TRIS) {
-        pc_nat_tris_run(&sNatView, w0 & 0xFFFFF, w1, (const NatMaterial *) next->words.w0, (const Triangle *) next->words.w1);
-        return 1;
-    }
-#if DKR_NATIVE_CHECK
-    else if (kind == NATIVE_CHECK_LEVEL) {
+    if (kind == NATIVE_CHECK_LEVEL) {
         pc_nat_check_level_run(w0 & 0xFFFFF, w1, sCheckArgb, sCheckArgbCount);
     } else if (kind == NATIVE_CHECK_MODEL) {
         pc_nat_check_model_run(w0 & 0xFFFFF, w1);
     }
+}
 #endif
-    return 0;
+
+/** The frame's fill rectangles, as draw_2d_quad wants them. */
+void pc_nat_run_fill(const NatRec *rec) {
+    f32 x0 = rec->f[0], y0 = rec->f[1], x1 = rec->f[2], y1 = rec->f[3];
+    u8 color[4];
+    u8 unlit[3] = { 0, 0, 0 };
+
+    if (sFadeSkipRect || sGlareSkipRect) {
+        return;
+    }
+    pc_nat_load_state(rec->mat, rec->prim, rec->env);
+    if ((sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
+        u32 rgba = rgba16_to_rgba32(rec->b & 0xFFFF);
+
+        color[0] = rgba & 0xFF;
+        color[1] = (rgba >> 8) & 0xFF;
+        color[2] = (rgba >> 16) & 0xFF;
+        color[3] = 0xFF;
+        x1 += 1.0f;
+        y1 += 1.0f;
+    } else {
+        combiner_color(color, unlit);
+        if (color[3] == 0) {
+            return;
+        }
+    }
+    draw_2d_quad(x0, y0, x1, y1, 0.0f, 0.0f, 0.0f, 0.0f, color, unlit, 0);
+}
+
+void pc_nat_run_viewport(const void *viewport, NatView *view) {
+    if (viewport != NULL) {
+        set_viewport((const Vp *) viewport);
+    }
+    view->vpScaleX = sVpScaleX;
+    view->vpScaleY = sVpScaleY;
+    view->vpTransX = sVpTransX;
+    view->vpTransY = sVpTransY;
+}
+
+void pc_nat_run_scissor(const f32 *f) {
+    sScisX0 = f[0];
+    sScisY0 = f[1];
+    sScisX1 = f[2];
+    sScisY1 = f[3];
+    apply_clip_rect();
+}
+
+void pc_nat_run_fog_colour(u32 rgba) {
+    sFogColor[0] = rgba >> 24;
+    sFogColor[1] = rgba >> 16;
+    sFogColor[2] = rgba >> 8;
+    sFogColor[3] = rgba;
+    gfx_set_fog(TRUE, sFogColor);
+}
+
+void pc_nat_run_fog_depth(u32 data) {
+    sFogMul = (s16) (data >> 16);
+    sFogOfs = (s16) (data & 0xFFFF);
+    fog_depth_set();
+}
+
+void pc_nat_run_tag(u32 tag, const f32 *matrix) {
+    if (matrix != NULL) {
+        shz_mat4x4_copy((shz_mat4x4_t *) sMatrices[0], (const shz_mat4x4_t *) matrix);
+        sCurMatrix = 0;
+    }
+    handle_tag(tag);
+}
+
+/** A batch of the frame's that goes by gfx.c, in the 2D layer or as the backdrop. */
+void pc_nat_draw_tris(const NatMaterial *mat, const GfxTriVert *verts, s32 count) {
+    s32 depth, write, decal, blend, alpha, fog, point;
+
+    pc_nat_material_flags(mat, &depth, &write, &decal, &blend, &alpha, &fog, &point);
+    gfx_set_depth_test(depth);
+    gfx_set_depth_write(write);
+    gfx_set_depth_offset(decal);
+    gfx_set_blend(blend);
+    gfx_set_alpha_test(alpha ? 0.5f : 0.0f);
+    gfx_set_fog(fog, sFogColor);
+    gfx_bind_texture(pc_nat_material_handle(mat));
+    gfx_set_texture_filter(point);
+    gfx_set_texenv_modulate();
+    gfx_draw_tris(verts, count);
 }
 
 static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
@@ -3923,24 +4017,24 @@ static DKR_HOT_CODE void run_dl(const Gfx *dl, s32 count, s32 depth) {
         // G_IMMFIRST-7 = -72), so every case has to be masked to the byte the
         // display list actually holds.
         switch (cmd) {
+#if DKR_NATIVE_CHECK
             case G_NATIVE:
-                i += handle_native(w0, w1, &dl[i + 1]);
+                handle_native(w0, w1);
                 break;
+#endif
             case G_MTX: {
                 s32 slot = (((w0 >> 16) & 0xFF) >> 6) & 3;
                 if (w1 != 0 && slot < 3) {
                     PROF_TIME(tMtx, mtx_to_float((const Mtx *) w1, sMatrices[slot]));
                     sCurMatrix = slot;
-                    sNatView.serial++;
-                }
+                                }
                 break;
             }
             case (u8) G_MOVEWORD: {
                 u32 index = w0 & 0xFF;
                 if (index == G_MW_MVPMATRIX) {
                     sCurMatrix = (w1 >> 6) & 3;
-                    sNatView.serial++;
-                } else if (index == G_MW_BILLBOARD) {
+                                } else if (index == G_MW_BILLBOARD) {
                     sBillboard = (w1 != 0);
                 } else if (index == G_MW_FOG) {
                     // gSPFogPosition packs the multiplier in the high half and the
@@ -4552,7 +4646,15 @@ static void frame_walk(void *data) {
     sScisY1 = sVpClipY1 = (f32) N64_SCREEN_H;
     gfx_disable_scissor();
 
+#if DKR_DIRECT
+    {
+        extern Gfx *gDisplayLists[2];
+
+        pc_nat_frame_run(frame->begin == gDisplayLists[1]);
+    }
+#else
     run_dl((const Gfx *) frame->begin, (const Gfx *) frame->end - (const Gfx *) frame->begin, 0);
+#endif
 #if DKR_GFX_PROFILE
     scene_category(PC_PROF_CAT_OTHER);
 #endif

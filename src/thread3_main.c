@@ -47,6 +47,12 @@
 #include <PR/os_cont.h>
 #include <PR/os_time.h>
 #include "../dreamcast/prof.h"
+#ifdef NAT_DIRECT
+extern void pc_nat_frame_reset(s32 task);
+#define NAT_FRAME_RESET() pc_nat_frame_reset(gSPTaskNum)
+#else
+#define NAT_FRAME_RESET() ((void) 0)
+#endif
 #include "../dreamcast/scene_gate.h"
 #ifdef DKR_AICAFLOW
 #include "../dreamcast/audio_aicaflow.h"
@@ -280,6 +286,7 @@ void init_game(void) {
     gSPTaskNum = 0;
 
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gDPFullSync(gCurrDisplayList++);
     gSPEndDisplayList(gCurrDisplayList++);
 
@@ -299,6 +306,7 @@ void main_game_loop(void) {
 
     if (gScreenStatus == MESG_SKIP_BUFFER_SWAP) {
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         rsp_segment(&gCurrDisplayList, SEGMENT_MAIN, 0x00000000);
         rsp_segment(&gCurrDisplayList, SEGMENT_FRAMEBUFFER, (s32) gVideoCurrFramebuffer);
         rsp_segment(&gCurrDisplayList, SEGMENT_ZBUFFER, (s32) gVideoLastDepthBuffer);
@@ -316,6 +324,7 @@ void main_game_loop(void) {
     }
 
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gGameCurrMatrix = gMatrixHeap[gSPTaskNum];
     gGameCurrVertexList = gVertexHeap[gSPTaskNum];
     gGameCurrTriList = gTriangleHeap[gSPTaskNum];
@@ -479,6 +488,7 @@ void unload_level_game(void) {
     hud_free();
     free_game_text_table();
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gDPFullSync(gCurrDisplayList++);
     gSPEndDisplayList(gCurrDisplayList++);
     mempool_free_timer(2);
@@ -1063,6 +1073,7 @@ void mode_menu(s32 updateRate) {
     if (menuLoopResult != -1 && menuLoopResult & MENU_RESULT_FLAGS_200) {
         unload_level_menu();
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         gDPFullSync(gCurrDisplayList++);
         gSPEndDisplayList(gCurrDisplayList++);
         gPlayableMapId = menuLoopResult & 0x7F;
@@ -1129,6 +1140,7 @@ void mode_menu(s32 updateRate) {
     if (menuLoopResult & MENU_RESULT_FLAGS_80 && menuLoopResult != -1) {
         unload_level_menu();
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         gDPFullSync(gCurrDisplayList++);
         gSPEndDisplayList(gCurrDisplayList++);
 
@@ -1150,6 +1162,7 @@ void mode_menu(s32 updateRate) {
     if (menuLoopResult > 0) {
         unload_level_menu();
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         gDPFullSync(gCurrDisplayList++);
         gSPEndDisplayList(gCurrDisplayList++);
         gGameMode = GAMEMODE_INGAME;
@@ -1170,6 +1183,7 @@ void load_level_for_menu(s32 levelId, s32 numberOfPlayers, s32 cutsceneId) {
         unload_level_menu();
         if (bgload_active() == FALSE) {
             gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
             gDPFullSync(gCurrDisplayList++);
             gSPEndDisplayList(gCurrDisplayList++);
         }
@@ -1520,6 +1534,7 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
         mempool_free_timer(2);
     }
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gGameCurrMatrix = gMatrixHeap[gSPTaskNum];
     gGameCurrTriList = gTriangleHeap[gSPTaskNum];
     gGameCurrVertexList = gVertexHeap[gSPTaskNum];

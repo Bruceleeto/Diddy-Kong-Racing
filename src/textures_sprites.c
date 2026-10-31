@@ -324,6 +324,13 @@ Gfx dBasicRenderSettingsZBOff[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dBasicRenderSettingsZBOff_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+}
+#endif
+
 Gfx dBasicRenderSettingsZBOn[] = {
     gsDPPipeSync(),
     gsDPSetTextureLOD(G_TL_TILE),
@@ -333,6 +340,14 @@ Gfx dBasicRenderSettingsZBOn[] = {
     gsSPSetGeometryMode(G_ZBUFFER),
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dBasicRenderSettingsZBOn_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_FOG);
+    gSPSetGeometryMode(0, G_ZBUFFER);
+}
+#endif
 
 Gfx dBasicRenderModes[][2] = {
     DRAW_TABLE_ENTRY(G_CC_BLENDPE_A_PRIM, G_CC_BLENDPE_A_PRIM, DKR_OMH_1CYC_BILERP_NOPERSP, G_RM_ZB_CLD_SURF,
@@ -1339,10 +1354,16 @@ Sprite *tex_load_sprite(s32 spriteID, s32 arg1) {
         ((u16 *) &sprite->textures[numTextures])[i] = spriteAsset->frameTexOffsets[i];
     }
 #endif
+#ifdef NAT_DIRECT
+    nat_ignore(TRUE);
+#endif
     for (i = 0; i < spriteAsset->numberOfFrames; i++) {
         sprite->frames[i] = gSpriteDLists;
         sprite_init_frame(spriteAsset, sprite, i);
     }
+#ifdef NAT_DIRECT
+    nat_ignore(FALSE);
+#endif
 
     if (gSpriteCacheCount >= MAX_NUM_SPRITES) {
         stubbed_printf("Error: Sprite table overflow!!\n");
@@ -1783,6 +1804,9 @@ void material_init(TextureHeader *tex, Gfx *_dList) {
     s32 texLut;
     Gfx *dList;
 
+#ifdef NAT_DIRECT
+    nat_ignore(TRUE);
+#endif
     tex->cmd = dList = _dList;
     texFormat = TEX_FORMAT(tex->format);
     texRenderMode = TEX_RENDERMODE(tex->format);
@@ -1925,6 +1949,12 @@ void material_init(TextureHeader *tex, Gfx *_dList) {
         }
         tex->numberOfCommands = dList - tex->cmd;
     }
+#ifdef NAT_DIRECT
+    nat_ignore(FALSE);
+    // No list: the texture stands for itself, and nat_table takes it from this.
+    tex->cmd = (Gfx *) tex;
+    tex->numberOfCommands = 0;
+#endif
 }
 
 /**
@@ -2137,7 +2167,15 @@ void gfx_init_basic_xlu(Gfx **dList, u32 index, u32 primitiveColor, u32 environm
     }
 
     gfxTemp = *dList;
+#ifdef NAT_DIRECT
+    if (tempDlist == dBasicRenderSettingsZBOn) {
+        dBasicRenderSettingsZBOn_nat();
+    } else {
+        dBasicRenderSettingsZBOff_nat();
+    }
+#else
     gSPDisplayList(gfxTemp++, tempDlist);
+#endif
     gDkrDmaDisplayList(gfxTemp++, OS_K0_TO_PHYSICAL(dBasicRenderModes[tempIndex]),
                        numberOfGfxCommands(dBasicRenderModes[0]));
     gDPSetPrimColorRGBA(gfxTemp++, primitiveColor);

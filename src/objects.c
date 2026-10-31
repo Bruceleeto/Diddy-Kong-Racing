@@ -42,7 +42,6 @@
 #include "weather.h"
 #include "pc_swap.h"
 #include "../dreamcast/prof.h"
-#include "../dreamcast/native_game.h"
 
 #ifdef TARGET_DC
 #   include <sh4zam/shz_sh4zam.h>
@@ -3539,11 +3538,9 @@ void render_misc_model(Object *obj, Vertex *verts, u32 numVertices, Triangle *tr
     if (tex != NULL) {
         hasTexture = TRUE;
     }
-    if (!nat_mesh(&gObjectCurrDisplayList, tex, flags, texOffset, verts, numVertices, triangles, numTriangles)) {
-        material_set(&gObjectCurrDisplayList, tex, flags, texOffset);
-        gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVertices, 0);
-        gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(triangles), numTriangles, hasTexture);
-    }
+    material_set(&gObjectCurrDisplayList, tex, flags, texOffset);
+    gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(verts), numVertices, 0);
+    gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(triangles), numTriangles, hasTexture);
     mtx_pop(&gObjectCurrDisplayList);
 }
 
@@ -3940,6 +3937,26 @@ void func_80012C30(void) {
     D_8011ADA4 = 0;
 }
 
+#ifdef NAT_DIRECT
+// The cargo drawn after everything else: a stretch of the frame's list the game
+// jumps over and calls later, which here is a stretch of its draws set aside.
+void func_80012C3C(UNUSED Gfx **dList) {
+    nat_defer_flush();
+}
+
+void func_80012C98(UNUSED Gfx **dList) {
+    if (D_8011ADA4 < 9) {
+        nat_defer_begin();
+    }
+}
+
+void func_80012CE8(UNUSED Gfx **dList) {
+    if (D_8011ADA4 < 9) {
+        nat_defer_end();
+        D_8011ADA4++;
+    }
+}
+#else
 void func_80012C3C(Gfx **dList) {
     s32 i;
     for (i = 0; i < D_8011ADA4; i++) {
@@ -3961,6 +3978,7 @@ void func_80012CE8(Gfx **dList) {
         D_8011ADA4++;
     }
 }
+#endif
 
 /**
  * Update the object stack trace, set the draw pointers, then begin rendering the object.
@@ -4265,6 +4283,8 @@ void func_800135B8(Object *boostObj) {
                             (Object *) &objTransform, asset->sprite,
                             (RENDER_Z_COMPARE | RENDER_FOG_ACTIVE | RENDER_Z_UPDATE));
     if (boost->unk70 == 2) {
+        material_set(&gObjectCurrDisplayList, asset->tex,
+                     (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0);
         if (asset->tex != NULL) {
             hasTexture = TRUE;
         } else {
@@ -4273,14 +4293,8 @@ void func_800135B8(Object *boostObj) {
 
         vtx = &gBoostVerts[gBoostVertFlip][(boostObj->properties.boost.indexes >> 14) & 0x3FFF];
         tri = &gBoostTris[gBoostVertFlip][boostObj->properties.boost.indexes & 0x3FFF];
-        if (!nat_mesh(&gObjectCurrDisplayList, asset->tex,
-                      (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0, vtx, BOOST_VERT_COUNT, tri,
-                      BOOST_TRI_COUNT)) {
-            material_set(&gObjectCurrDisplayList, asset->tex,
-                         (RENDER_Z_COMPARE | RENDER_SEMI_TRANSPARENT | RENDER_FOG_ACTIVE), 0);
-            gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(vtx), BOOST_VERT_COUNT, 0);
-            gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(tri), BOOST_TRI_COUNT, hasTexture);
-        }
+        gSPVertexDKR(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(vtx), BOOST_VERT_COUNT, 0);
+        gSPPolygon(gObjectCurrDisplayList++, OS_K0_TO_PHYSICAL(tri), BOOST_TRI_COUNT, hasTexture);
     }
     mtx_pop(&gObjectCurrDisplayList);
 }
@@ -4544,7 +4558,7 @@ void obj_tick_anims(void) {
  */
 #ifdef TARGET_DC
 // dreamcast/native.c; its header brings the console's own, which do not mix with these.
-extern s32 pc_nat_model_draw(Gfx **dl, ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
+extern s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
 extern void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags);
 #endif
 s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s32 overrideVerts) {
@@ -4564,10 +4578,10 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     s32 vertOffset;
     Gfx *dList;
 
-#if defined(TARGET_DC) && DKR_NATIVE && !DKR_NATIVE_CHECK
+#ifdef NAT_DIRECT
     if (!gObjectTexAnim) {
         // Drawn from what build_native_meshes.py compiled (dreamcast/native.c).
-        i = pc_nat_model_draw(&gObjectCurrDisplayList, objModel, obj->curVertData, startIndex, flags, overrideVerts);
+        i = pc_nat_model_draw(objModel, obj->curVertData, startIndex, flags, overrideVerts);
         if (i != -2) {
             return i;
         }
