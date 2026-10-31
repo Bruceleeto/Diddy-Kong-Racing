@@ -7,7 +7,7 @@
 // normal map a PVR bump texture (build/dc/scrawl.dt).
 //
 // The level draw leaves a marker after the logo's batch (pc_scrawl_after_batch)
-// and the display-list walk draws the grid there (pc_scrawl_draw), through the
+// and the translucent list draws the grid there (pc_scrawl_draw), through the
 // same matrix as the level, into the translucent list. The PVR lights each
 // texel from its normal as I = K1 + K2 sin S + K3 cos S cos(R - Q), for a
 // texel elevation S and rotation R and a light at rotation Q, clamped to
@@ -139,7 +139,7 @@ void pc_scrawl_draw(void) {
                 }
             }
             strip[2 * SCRAWL_GRID_U - 1].flags = PVR_CMD_VERTEX_EOL;
-            if (!gfx_tr_native(j == 0 ? &sScrawlHeader[pass] : NULL, strip, 2 * SCRAWL_GRID_U)) {
+            if (!gfx_native(j == 0 ? &sScrawlHeader[pass] : NULL, strip, 2 * SCRAWL_GRID_U)) {
                 return;
             }
         }

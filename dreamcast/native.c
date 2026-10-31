@@ -19,6 +19,10 @@
 #include "../src/textures_sprites.h"
 #include "native.h"
 
+#ifndef DKR_PROF_SKIP
+#define DKR_PROF_SKIP 0
+#endif
+
 #define NAT_MAX_POSITIONS 64
 #define NAT_MAX_CORNERS 64 // sixteen triangles at most in a batch
 #define NAT_CHUNK_WATER 1
@@ -96,6 +100,7 @@ typedef struct {
 
 static DKR_HOT NatPlane sPlanes[5];
 static DKR_HOT const f32 *sPlanesFor; // the matrix they are of; NULL when a frame starts
+static DKR_HOT s32 sListRoute;        // the list that is open, as the pack has it
 
 // A position as a frame leaves it, and for an object model its colour.
 typedef struct {
@@ -284,11 +289,23 @@ static __attribute__((noinline, cold)) void nat_level_resolve(void) {
     }
 }
 
+static void nat_level_record(s32 segment, s32 waterHidden, s32 first, s32 end, s32 route) {
+    NatRec *rec = pc_nat_record(NAT_REC_LEVEL);
+
+    if (rec != NULL) {
+        rec->a = segment | (waterHidden ? 0x10000 : 0);
+        rec->b = first;
+        rec->c = end;
+        pc_nat_depth_drawn();
+        pc_nat_bin(route, rec);
+    }
+}
+
 s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden) {
     const NatSegment *seg;
     const u16 *table;
     s32 next;
-    s32 first = -1, last = -1;
+    s32 first = -1, last = -1, listRoute = NAT_LIST_OP;
 
     if (sLevel == NULL) {
         return 0;
@@ -308,32 +325,39 @@ s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden) {
             break;
         }
         if (chunk != NAT_BATCH_NONE) {
+            s32 route;
+
             if (!sMatGood[sChunks[chunk].matOne]) {
                 if (next == batch) {
                     return 0;
                 }
                 break;
             }
+            // A stretch of one list is a record; the batches keep their order in it.
+            route = sInfos[sChunks[chunk].matOne].route;
+            if (first >= 0 && route != listRoute) {
+                nat_level_record(segment, waterHidden, first, last + 1, listRoute);
+                first = -1;
+            }
             if (first < 0) {
                 first = chunk;
+                listRoute = route;
             }
             last = chunk;
         }
     }
     if (first >= 0) {
-        NatRec *rec = pc_nat_record(NAT_REC_LEVEL);
-
-        if (rec != NULL) {
-            rec->a = segment | (waterHidden ? 0x10000 : 0);
-            rec->b = first;
-            rec->c = last + 1;
-        }
+        nat_level_record(segment, waterHidden, first, last + 1, listRoute);
     }
     return next - batch;
 }
 
-static __attribute__((noinline)) void nat_planes(const NatView *view) {
-    const f32 (*m)[4] = (const f32 (*)[4]) view->matrix;
+void pc_nat_planes_forget(void) {
+    sPlanesFor = NULL;
+}
+
+static __attribute__((noinline)) void nat_planes(const f32 *matrix) {
+    const f32 (*m)[4] = (const f32 (*)[4]) matrix;
     static const s8 sSide[5][2] = { { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 }, { 3, 0 } };
     s32 p, a;
 
@@ -352,7 +376,7 @@ static __attribute__((noinline)) void nat_planes(const NatView *view) {
             }
         }
     }
-    sPlanesFor = view->matrix;
+    sPlanesFor = matrix;
 }
 
 /** Whether the chunk's box lies wholly behind one of the view's planes. */
@@ -418,54 +442,32 @@ static inline void nat_write_sq(const NatCorner *c, s32 count, u32 offset, s32 l
 
         sq ^= 32;
         vt = (pvr_vertex_t *) sq;
-        nat_vertex_put(vt, FALSE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, lit ? p->argb : c->argb, offset);
+        nat_vertex_put(vt, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, lit ? p->argb : c->argb, offset);
         nat_sq_flush(vt);
     }
     pvr_dr_addr = sq;
 }
 
-/** Writes strips to a recording: a line is written whole, so it need not be read first. */
-static inline pvr_vertex_t *nat_write_record(pvr_vertex_t *vt, const NatCorner *c, s32 count, u32 offset, s32 lit) {
-    const NatCorner *end = c + count;
-
-    for (; c < end; c++, vt++) {
-        const NatPoint *p = &sPoints[c->word & 0xFFFF];
-
-        nat_vertex_put(vt, TRUE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, lit ? p->argb : c->argb, offset);
-    }
-    return vt;
-}
-
 /** The same, with a fade drawn into the frame on the colours (dreamcast/cover.h). */
-static __attribute__((noinline, cold)) pvr_vertex_t *nat_write_faded(pvr_vertex_t *record, const NatCorner *c, s32 count,
-                                                                     u32 offset, s32 textured) {
+static __attribute__((noinline, cold)) void nat_write_faded(const NatCorner *c, s32 count, u32 offset, s32 textured) {
     u32 sq = pvr_dr_addr;
     s32 i;
 
     for (i = 0; i < count; i++, c++) {
         const NatPoint *p = &sPoints[c->word & 0xFFFF];
-        u32 argb = gfx_frame_argb(c->argb, textured);
+        pvr_vertex_t *vt;
 
-        if (record != NULL) {
-            nat_vertex_put(record, TRUE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, argb, offset);
-            record++;
-        } else {
-            pvr_vertex_t *vt;
-
-            sq ^= 32;
-            vt = (pvr_vertex_t *) sq;
-            nat_vertex_put(vt, FALSE, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, argb, offset);
-            nat_sq_flush(vt);
-        }
+        sq ^= 32;
+        vt = (pvr_vertex_t *) sq;
+        nat_vertex_put(vt, c->word & 0xF0000000u, p->x, p->y, p->z, c->u, c->v, gfx_frame_argb(c->argb, textured), offset);
+        nat_sq_flush(vt);
     }
     pvr_dr_addr = sq;
-    return record;
 }
 
 /** Strips with a position behind the near plane, whose positions are compiled: their matrix is in XMTRX. */
-static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_level(const NatChunk *chunk, const NatCorner *corners, s32 count,
-                                                                    s32 cull, pvr_vertex_t *record, f32 scaleX, f32 scaleY,
-                                                                    f32 zMul, u32 offset, s32 textured) {
+static __attribute__((noinline, cold)) void nat_clip_level(const NatChunk *chunk, const NatCorner *corners, s32 count, s32 cull,
+                                                           f32 scaleX, f32 scaleY, f32 zMul, u32 offset, s32 textured) {
     shz_vec4_t clip[NAT_MAX_POSITIONS];
     s32 i;
 
@@ -474,21 +476,20 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_level(const NatChu
 
         clip[i] = shz_xmtrx_transform_vec4(shz_vec4_init(p[0], p[1], p[2], 1.0f));
     }
-    return pc_nat_clip(corners, count, clip, NULL, cull, record, scaleX, scaleY, zMul, offset, textured);
+    pc_nat_clip(corners, count, clip, NULL, cull, scaleX, scaleY, zMul, offset, textured);
 }
 
 /**
  * Strips under a scissor that is not on the PVR's tiles, which it would overdraw
  * by up to a tile: split-screen-like views and menus. Triangle by triangle
- * through the scissor. Returns where a recording stands.
+ * through the scissor.
  */
-static __attribute__((noinline, cold)) pvr_vertex_t *nat_write_exact(pvr_vertex_t *rec, const NatCorner *corners, s32 count, u32 offset,
-                                                                     s32 lit, s32 textured, f32 zMul, f32 scaleX, f32 scaleY) {
+static __attribute__((noinline, cold)) void nat_write_exact(const NatCorner *corners, s32 count, u32 offset, s32 lit,
+                                                            s32 textured, f32 zMul, f32 scaleX, f32 scaleY) {
     GfxTriVert t[3];
     s32 step = 0;
     s32 i;
 
-    gfx_nat_end(rec);
     for (i = 0; i < count; i++) {
         const NatCorner *c = &corners[i];
         const NatPoint *p = &sPoints[c->word & 0xFFFF];
@@ -525,7 +526,6 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_write_exact(pvr_vertex_
             step = 0;
         }
     }
-    return gfx_nat_position();
 }
 
 /** An animated texture: the mat with this frame's image, as the batch stands now. */
@@ -559,10 +559,9 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
     f32 scaleX, scaleY;
     f32 sx, sy, tx, ty;
     s32 lastMat = -1;
-    pvr_vertex_t *rec = NULL;
 
     if (sPlanesFor != view->matrix) {
-        nat_planes(view);
+        nat_planes(view->matrix);
     }
     gfx_nat_scale(&scaleX, &scaleY);
     sx = view->vpScaleX * scaleX;
@@ -587,8 +586,6 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
             for (part = 0; part < 2; part++) {
                 s32 count = part ? chunk->twoSided : chunk->oneSided;
                 s32 mat = part ? chunk->matTwo : chunk->matOne;
-                // Near-clipped a triangle can become two; through a scissor, five.
-                s32 words = (behind || view->exact) ? (15 * count) + 6 : count;
 
                 if (count == 0) {
                     continue;
@@ -596,33 +593,19 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
                 if (mat != lastMat || (chunk->flags & NAT_CHUNK_TEX_ANIM)) {
                     pvr_poly_hdr_t animated __attribute__((aligned(32)));
                     const pvr_poly_hdr_t *hdr = &sMats[mat];
-                    int ok;
 
                     if (chunk->flags & NAT_CHUNK_TEX_ANIM) {
                         hdr = nat_anim_header(chunk, segment, mat, &animated);
                     }
-                    gfx_nat_end(rec);
-                    rec = gfx_nat_header(hdr, info->route, words, &ok);
-                    if (!ok) {
-                        rec = NULL;
-                        lastMat = -1;
-                        corners += count;
-                        continue;
-                    }
+                    gfx_nat_header(hdr);
                     lastMat = mat;
-                } else if (rec != NULL && !gfx_nat_room(rec, words)) {
-                    corners += count;
-                    continue;
                 }
                 if (behind) {
-                    rec = nat_clip_level(chunk, corners, count, !part, rec, scaleX, scaleY, zMul, offset,
-                                         info->texture >= 0);
+                    nat_clip_level(chunk, corners, count, !part, scaleX, scaleY, zMul, offset, info->texture >= 0);
                 } else if (view->exact) {
-                    rec = nat_write_exact(rec, corners, count, offset, FALSE, info->texture >= 0, zMul, scaleX, scaleY);
+                    nat_write_exact(corners, count, offset, FALSE, info->texture >= 0, zMul, scaleX, scaleY);
                 } else if (fade) {
-                    rec = nat_write_faded(rec, corners, count, offset, info->texture >= 0);
-                } else if (rec != NULL) {
-                    rec = nat_write_record(rec, corners, count, offset, FALSE);
+                    nat_write_faded(corners, count, offset, info->texture >= 0);
                 } else {
                     nat_write_sq(corners, count, offset, FALSE);
                 }
@@ -630,7 +613,6 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
             }
         }
     }
-    gfx_nat_end(rec);
 }
 
 // An object model's block (dreamcast/build_native_meshes.py), and what the
@@ -660,6 +642,7 @@ typedef struct {
     NatModelChunk *chunks;
     s32 generation; // the video memory its mats are good for
     s32 variants;   // bit per variant: every batch has its mat
+    u8 lists[4];    // per variant: a bit for each list its batches go to
 } NatModel;
 
 #define NAT_MODEL(model) (*(NatModel **) (model)->pad34)
@@ -717,6 +700,7 @@ static __attribute__((noinline, cold)) void nat_model_resolve(const ObjectModel 
 
     nat->generation = sVramGeneration;
     nat->variants = 15;
+    nat->lists[0] = nat->lists[1] = nat->lists[2] = nat->lists[3] = 0;
     for (i = 0; i < nat->block->numMats; i++) {
         const NatMatInfo *info = &nat->infos[i];
         u32 mode2, mode3;
@@ -733,11 +717,31 @@ static __attribute__((noinline, cold)) void nat_model_resolve(const ObjectModel 
     }
     for (c = 0; c < model->numberOfBatches; c++) {
         for (v = 0; v < 4; v++) {
-            if (nat->chunks[c].mat[v] == 0xFFFF && !(model->batches[c].flags & RENDER_HIDDEN)) {
+            if (model->batches[c].flags & RENDER_HIDDEN) {
+                continue;
+            }
+            if (nat->chunks[c].mat[v] == 0xFFFF) {
                 nat->variants &= ~(1 << v);
+            } else {
+                nat->lists[v] |= 1 << nat->infos[nat->chunks[c].mat[v]].route;
             }
         }
     }
+}
+
+/** The whole model, at rest, against the view: animation moves its vertices, so the box is taken at twice the size. */
+static s32 nat_model_outside(const NatModel *nat, const f32 *matrix) {
+    const NatModelHeader *block = nat->block;
+    NatChunk box;
+
+    box.centre[0] = block->centre[0];
+    box.centre[1] = block->centre[1];
+    box.centre[2] = block->centre[2];
+    box.half[0] = box.half[1] = box.half[2] = block->half * 2.0f;
+    if (sPlanesFor != matrix) {
+        nat_planes(matrix);
+    }
+    return nat_outside(&box);
 }
 
 s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts) {
@@ -758,11 +762,17 @@ s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 fl
     if (!(nat->variants & (1 << variant))) {
         return -2;
     }
-    rec = pc_nat_record(NAT_REC_MODEL);
-    if (rec != NULL) {
+    if (!nat_model_outside(nat, gNat.matrix[gNat.cur]) && (rec = pc_nat_record(NAT_REC_MODEL)) != NULL) {
         rec->a = start | (variant << 8) | (overrideVerts ? 0x400 : 0);
         rec->p0 = verts;
         rec->p1 = model;
+        pc_nat_depth_drawn();
+        // Each list draws the batches that are its own.
+        for (i = NAT_LIST_OP; i <= NAT_LIST_TR; i++) {
+            if (nat->lists[variant] & (1 << i)) {
+                pc_nat_bin(i, rec);
+            }
+        }
     }
     // As render_mesh's walk over the batches would stop.
     for (i = start; i < model->numberOfBatches; i++) {
@@ -809,10 +819,9 @@ static inline s32 nat_transform_vertices(NatPoint *out, const Vertex *v, s32 cou
 }
 
 /** A model's strips when a position lies behind the near plane: the clip space positions again, for the clipper. */
-static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_model(const NatView *view, const Vertex *v, s32 count, s32 split,
-                                                                    const NatCorner *corners, s32 numCorners, s32 cull,
-                                                                    pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul,
-                                                                    u32 offset, s32 textured) {
+static __attribute__((noinline, cold)) void nat_clip_model(const NatView *view, const Vertex *v, s32 count, s32 split,
+                                                           const NatCorner *corners, s32 numCorners, s32 cull, f32 scaleX,
+                                                           f32 scaleY, f32 zMul, u32 offset, s32 textured) {
     shz_vec4_t clip[NAT_MAX_POSITIONS];
     u32 argb[NAT_MAX_POSITIONS];
     s32 i;
@@ -825,14 +834,13 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_model(const NatVie
         clip[i] = shz_xmtrx_transform_vec4(shz_vec4_init(v[i].x, v[i].y, v[i].z, 1.0f));
         argb[i] = sPoints[i].argb;
     }
-    return pc_nat_clip(corners, numCorners, clip, argb, cull, record, scaleX, scaleY, zMul, offset, textured);
+    pc_nat_clip(corners, numCorners, clip, argb, cull, scaleX, scaleY, zMul, offset, textured);
 }
 
 /** A made-up batch's triangles past the near plane, one by one through the clipper. */
-static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_tris(const NatView *view, const Vertex *v, s32 count, s32 split,
-                                                                   const Triangle *tris,
-                                                                   s32 numTris, const NatMaterial *mat, pvr_vertex_t *record, f32 scaleX,
-                                                                   f32 scaleY, f32 zMul, u32 offset) {
+static __attribute__((noinline, cold)) void nat_clip_tris(const NatView *view, const Vertex *v, s32 count, s32 split,
+                                                          const Triangle *tris, s32 numTris, const NatMaterial *mat, f32 scaleX,
+                                                          f32 scaleY, f32 zMul, u32 offset) {
     shz_vec4_t clip[NAT_MAX_POSITIONS];
     u32 argb[NAT_MAX_POSITIONS];
     s32 i;
@@ -855,10 +863,8 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_tris(const NatView
         corners[0] = (NatCorner) { t->uv0.u * mat->uMul, t->uv0.v * mat->vMul, 0, PVR_CMD_VERTEX | t->vi0 };
         corners[1] = (NatCorner) { t->uv1.u * mat->uMul, t->uv1.v * mat->vMul, 0, PVR_CMD_VERTEX | t->vi1 };
         corners[2] = (NatCorner) { t->uv2.u * mat->uMul, t->uv2.v * mat->vMul, 0, PVR_CMD_VERTEX_EOL | t->vi2 };
-        record = pc_nat_clip(corners, 3, clip, argb, !(t->flags & BACKFACE_DRAW), record, scaleX, scaleY, zMul, offset,
-                             mat->textured);
+        pc_nat_clip(corners, 3, clip, argb, !(t->flags & BACKFACE_DRAW), scaleX, scaleY, zMul, offset, mat->textured);
     }
-    return record;
 }
 
 /** Environment-mapped corners: their coordinates as the object's lighting left them in the model. */
@@ -934,25 +940,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
     u32 keep = 0, konst = 0;
     f32 scaleX, scaleY;
     f32 sx, sy, tx, ty;
-    pvr_vertex_t *rec = NULL;
 
-    // The whole model, at rest, against the view: animation moves its vertices,
-    // so the box is taken at twice the size.
-    {
-        const NatModelHeader *block = nat->block;
-        NatChunk box;
-
-        box.centre[0] = block->centre[0];
-        box.centre[1] = block->centre[1];
-        box.centre[2] = block->centre[2];
-        box.half[0] = box.half[1] = box.half[2] = block->half * 2.0f;
-        if (sPlanesFor != view->matrix) {
-            nat_planes(view);
-        }
-        if (nat_outside(&box)) {
-            return;
-        }
-    }
     gfx_nat_scale(&scaleX, &scaleY);
     sx = view->vpScaleX * scaleX;
     sy = view->vpScaleY * scaleY;
@@ -978,6 +966,9 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
             continue;
         }
         info = &nat->infos[chunk->mat[variant]];
+        if (info->route != sListRoute) {
+            continue;
+        }
         count = chunk->numVertices;
         v = &verts[chunk->firstVertex];
         zMul = info->decal ? 1.003f : 1.0f;
@@ -1008,7 +999,6 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
         for (part = 0; part < 2; part++) {
             s32 numCorners = part ? chunk->twoSided : chunk->oneSided;
             s32 mat = chunk->mat[variant] + part;
-            s32 words = (behind || view->exact) ? (15 * numCorners) + 6 : numCorners;
             s32 frame = 0;
 
             if (numCorners == 0) {
@@ -1025,35 +1015,22 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
             if (mat != lastMat || frame != 0) {
                 pvr_poly_hdr_t framed __attribute__((aligned(32)));
                 const pvr_poly_hdr_t *hdr = &nat->mats[mat];
-                int ok;
 
                 if (frame != 0) {
                     hdr = nat_frame_header(hdr, model->textures[info->texture].texture, frame, &framed);
                 }
-                gfx_nat_end(rec);
-                rec = gfx_nat_header(hdr, info->route, words, &ok);
-                if (!ok) {
-                    rec = NULL;
-                    lastMat = -1;
-                    corners += numCorners;
-                    continue;
-                }
+                gfx_nat_header(hdr);
                 lastMat = frame != 0 ? -1 : mat;
-            } else if (rec != NULL && !gfx_nat_room(rec, words)) {
-                corners += numCorners;
-                continue;
             }
             {
                 const NatCorner *c = (chunk->flags & NAT_CHUNK_ENVMAP) ? nat_envmap_corners(model, corners, numCorners, env)
                                                                        : corners;
 
                 if (behind) {
-                    rec = nat_clip_model(view, v, count, split, c, numCorners, !part, rec, scaleX, scaleY, zMul, offset,
-                                         info->texture >= 0);
+                    nat_clip_model(view, v, count, split, c, numCorners, !part, scaleX, scaleY, zMul, offset,
+                                   info->texture >= 0);
                 } else if (view->exact) {
-                    rec = nat_write_exact(rec, c, numCorners, offset, TRUE, info->texture >= 0, zMul, scaleX, scaleY);
-                } else if (rec != NULL) {
-                    rec = nat_write_record(rec, c, numCorners, offset, TRUE);
+                    nat_write_exact(c, numCorners, offset, TRUE, info->texture >= 0, zMul, scaleX, scaleY);
                 } else {
                     nat_write_sq(c, numCorners, offset, TRUE);
                 }
@@ -1061,7 +1038,6 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
             corners += numCorners;
         }
     }
-    gfx_nat_end(rec);
 }
 
 // Materials that are not known offline: a particle's, a shadow's, the water's.
@@ -1079,6 +1055,18 @@ void pc_nat_materials_forget(void) {
     }
 }
 
+/** The list these modes draw to. */
+static s32 nat_route(u32 omh, u32 oml, u32 geometry) {
+    s32 twoCycle = (omh & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
+    u32 p = (oml >> (twoCycle ? 28 : 30)) & 3;
+    u32 q = (oml >> (twoCycle ? 20 : 22)) & 3;
+
+    if ((oml & CVG_X_ALPHA) || ((oml & 3) == G_AC_THRESHOLD && ((geometry >> 2) & 1))) {
+        return NAT_LIST_PT;
+    }
+    return (oml & FORCE_BL) && (p == G_BL_CLR_MEM || q == G_BL_CLR_MEM) ? NAT_LIST_TR : NAT_LIST_OP;
+}
+
 /** As the walk's render-mode code and gfx.c's header compile would come out for these modes. */
 static __attribute__((noinline, cold)) const NatMaterial *nat_material_compile(NatMaterial *m, u32 w0, u32 w1, u32 omh, u32 oml,
                                                                                const NatTexture *tex, u32 geometry) {
@@ -1093,7 +1081,7 @@ static __attribute__((noinline, cold)) const NatMaterial *nat_material_compile(N
     s32 blend = (oml & FORCE_BL) && (p == G_BL_CLR_MEM || q == G_BL_CLR_MEM);
     s32 alphaTest = (oml & CVG_X_ALPHA) || ((oml & 3) == G_AC_THRESHOLD && thresholdOk);
     s32 textured = tex != NULL && tex->handle != 0;
-    s32 route = alphaTest ? 1 : (blend ? 2 : 0);
+    s32 route = nat_route(omh, oml, geometry);
 
     m->depth = depthTest;
     m->depthWrite = depthWrite;
@@ -1295,8 +1283,6 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
     f32 sx, sy, tx, ty;
     u32 keep, konst;
     s32 fast, behind, i;
-    int ok;
-    pvr_vertex_t *rec;
     u32 sq;
 
     if (numVerts > NAT_MAX_POSITIONS || numVerts == 0) {
@@ -1335,13 +1321,9 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
         nat_tris_layered(mat, tris, numTris, numVerts, scaleX, scaleY);
         return;
     }
-    rec = gfx_nat_header(&mat->hdr, mat->route, numTris * 15, &ok);
-    if (!ok) {
-        return;
-    }
+    gfx_nat_header(&mat->hdr);
     if (behind) {
-        rec = nat_clip_tris(view, v, numVerts, numLoad, tris, numTris, mat, rec, scaleX, scaleY, zMul, offset);
-        gfx_nat_end(rec);
+        nat_clip_tris(view, v, numVerts, numLoad, tris, numTris, mat, scaleX, scaleY, zMul, offset);
         return;
     }
     if (view->exact) {
@@ -1362,15 +1344,15 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
             c[0] = (NatCorner) { t->uv0.u * uMul, t->uv0.v * vMul, 0, PVR_CMD_VERTEX | t->vi0 };
             c[1] = (NatCorner) { t->uv1.u * uMul, t->uv1.v * vMul, 0, PVR_CMD_VERTEX | t->vi1 };
             c[2] = (NatCorner) { t->uv2.u * uMul, t->uv2.v * vMul, 0, PVR_CMD_VERTEX_EOL | t->vi2 };
-            rec = nat_write_exact(rec, c, 3, offset, TRUE, mat->textured, zMul, scaleX, scaleY);
+            nat_write_exact(c, 3, offset, TRUE, mat->textured, zMul, scaleX, scaleY);
         }
-        gfx_nat_end(rec);
         return;
     }
     sq = pvr_dr_addr;
     for (i = 0; i < numTris; i++) {
         const Triangle *t = &tris[i];
         const NatPoint *p0, *p1, *p2;
+        pvr_vertex_t *o;
 
         if (t->vi0 >= numVerts || t->vi1 >= numVerts || t->vi2 >= numVerts) {
             continue;
@@ -1385,27 +1367,93 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
                 continue;
             }
         }
-        if (rec != NULL) {
-            nat_vertex_put(rec, TRUE, PVR_CMD_VERTEX, p0->x, p0->y, p0->z, t->uv0.u * uMul, t->uv0.v * vMul, p0->argb, offset);
-            nat_vertex_put(rec + 1, TRUE, PVR_CMD_VERTEX, p1->x, p1->y, p1->z, t->uv1.u * uMul, t->uv1.v * vMul, p1->argb, offset);
-            nat_vertex_put(rec + 2, TRUE, PVR_CMD_VERTEX_EOL, p2->x, p2->y, p2->z, t->uv2.u * uMul, t->uv2.v * vMul, p2->argb, offset);
-            rec += 3;
-        } else {
-            pvr_vertex_t *o = (pvr_vertex_t *) (sq ^ 32);
-
-            nat_vertex_put(o, FALSE, PVR_CMD_VERTEX, p0->x, p0->y, p0->z, t->uv0.u * uMul, t->uv0.v * vMul, p0->argb, offset);
-            nat_sq_flush(o);
-            o = (pvr_vertex_t *) sq;
-            nat_vertex_put(o, FALSE, PVR_CMD_VERTEX, p1->x, p1->y, p1->z, t->uv1.u * uMul, t->uv1.v * vMul, p1->argb, offset);
-            nat_sq_flush(o);
-            o = (pvr_vertex_t *) (sq ^ 32);
-            nat_vertex_put(o, FALSE, PVR_CMD_VERTEX_EOL, p2->x, p2->y, p2->z, t->uv2.u * uMul, t->uv2.v * vMul, p2->argb, offset);
-            nat_sq_flush(o);
-            sq ^= 32;
-        }
+        o = (pvr_vertex_t *) (sq ^ 32);
+        nat_vertex_put(o, PVR_CMD_VERTEX, p0->x, p0->y, p0->z, t->uv0.u * uMul, t->uv0.v * vMul, p0->argb, offset);
+        nat_sq_flush(o);
+        o = (pvr_vertex_t *) sq;
+        nat_vertex_put(o, PVR_CMD_VERTEX, p1->x, p1->y, p1->z, t->uv1.u * uMul, t->uv1.v * vMul, p1->argb, offset);
+        nat_sq_flush(o);
+        o = (pvr_vertex_t *) (sq ^ 32);
+        nat_vertex_put(o, PVR_CMD_VERTEX_EOL, p2->x, p2->y, p2->z, t->uv2.u * uMul, t->uv2.v * vMul, p2->argb, offset);
+        nat_sq_flush(o);
+        sq ^= 32;
     }
     pvr_dr_addr = sq;
-    gfx_nat_end(rec);
+}
+
+/** What a batch without a depth test emits: the first vertex's alpha, as the frame will work it out. */
+static s32 nat_tris_alpha(const NatRec *rec) {
+    const NatMaterial *mat = rec->mat;
+    const Vertex *v = (const Vertex *) rec->p0;
+    const Vertex *v2 = (const Vertex *) rec->p1;
+    const Triangle *tris = (const Triangle *) rec->p2;
+    s32 at = tris[0].vi0;
+    u32 keep, konst, argb;
+
+    if (at >= (s32) rec->a) {
+        v = v2;
+        at -= rec->a;
+    }
+    if (pc_nat_classify(mat->combine0, mat->combine1, mat->cycle, rec->prim, rec->env, &keep, &konst)) {
+        return (((u32) v[at].a << 24 & keep) | konst) >> 24;
+    }
+    pc_nat_colours_mux(&argb, &v[at], 1);
+    return argb >> 24;
+}
+
+void pc_nat_bin_tris(NatRec *rec) {
+    const NatMaterial *mat = rec->mat;
+
+    if (mat->depth) {
+        pc_nat_depth_drawn();
+        pc_nat_bin(mat->route, rec);
+    } else {
+        pc_nat_bin_2d(rec, mat->alphaTest, pc_nat_may_open() ? nat_tris_alpha(rec) : 0, mat->handle);
+    }
+}
+
+/** A sprite's material for one of its tiles. */
+static const NatMaterial *nat_sprite_material(const Gfx *entry, u32 geometry, const TextureHeader *tex) {
+    NatTexture t;
+
+    pc_nat_texture_of(tex, &t);
+    return nat_material(entry[0].words.w0, entry[0].words.w1, entry[1].words.w0 & 0x00FFFFFF, entry[1].words.w1, &t, geometry);
+}
+
+/**
+ * A 2D sprite that may open the frame. It goes as one: to the opaque list only if
+ * every tile of it has no transparent texel; its alpha is its first tile's.
+ */
+static __attribute__((noinline, cold)) void nat_sprite_bin_open(NatRec *rec, const Sprite *sprite, s32 frame, const Gfx *entry,
+                                                                u32 geometry) {
+    const u16 *tiles = (const u16 *) &sprite->textures[sprite->numberOfTextures];
+    const NatMaterial *mat = NULL;
+    u32 handle = 0, keep, konst, argb;
+    s32 i;
+
+    for (i = tiles[frame]; i < tiles[frame + 1]; i++) {
+        const NatMaterial *tile = nat_sprite_material(entry, geometry, sprite->textures[i]);
+
+        if (tile != NULL) {
+            mat = mat != NULL ? mat : tile;
+            if (handle == 0 || !gfx_texture_opaque(tile->handle)) {
+                handle = tile->handle;
+            }
+            if (!gfx_texture_opaque(handle)) {
+                break;
+            }
+        }
+    }
+    if (mat == NULL) {
+        pc_nat_bin_2d(rec, FALSE, 0, handle);
+        return;
+    }
+    if (pc_nat_classify(mat->combine0, mat->combine1, mat->cycle, rec->prim, rec->env, &keep, &konst)) {
+        argb = keep | konst;
+    } else {
+        pc_nat_colours_mux(&argb, (const Vertex *) sprite->textures - (sprite->numberOfTextures * 4) + (tiles[frame] * 4), 1);
+    }
+    pc_nat_bin_2d(rec, FALSE, argb >> 24, handle);
 }
 
 s32 pc_nat_sprite(const Sprite *sprite, s32 frame, s32 flags, const Mtx *billboard) {
@@ -1420,28 +1468,33 @@ s32 pc_nat_sprite(const Sprite *sprite, s32 frame, s32 flags, const Mtx *billboa
     entry = material_simple_lookup(flags, &zBuffer);
     rec = pc_nat_record(NAT_REC_SPRITE);
     if (rec != NULL) {
-        rec->a = frame | (zBuffer ? 0x10000 : 0) | 0x20000 | ((gNat.blend & 0xFF) ? 0x40000 : 0);
+        u32 geometry = (zBuffer ? 1 : 0) | 2 | ((gNat.blend & 0xFF) ? 4 : 0);
+        u32 omh = entry[1].words.w0 & 0x00FFFFFF, oml = entry[1].words.w1;
+        s32 route = nat_route(omh, oml, geometry);
+
+        rec->a = frame | (geometry << 16);
         rec->p0 = sprite;
         rec->p1 = gNat.billboard ? gNat.verts : NULL;
         rec->p2 = entry;
         rec->matrix = gNat.billboard ? gNat.matrixV : NULL;
         rec->matrix2 = (const f32 *) billboard;
+        if (zBuffer && (oml & Z_CMP)) {
+            pc_nat_depth_drawn();
+            pc_nat_bin(route, rec);
+        } else if (route == NAT_LIST_PT || !pc_nat_may_open()) {
+            pc_nat_bin_2d(rec, route == NAT_LIST_PT, 0, 0);
+        } else {
+            nat_sprite_bin_open(rec, sprite, frame, entry, geometry);
+        }
     }
     return TRUE;
 }
 
-/** A sprite's material for one of its tiles. */
-static const NatMaterial *nat_sprite_material(const Gfx *entry, u32 geometry, const TextureHeader *tex) {
-    NatTexture t;
-
-    pc_nat_texture_of(tex, &t);
-    return nat_material(entry[0].words.w0, entry[0].words.w1, entry[1].words.w0 & 0x00FFFFFF, entry[1].words.w1, &t, geometry);
-}
 
 /** A sprite's corner past the near plane: through the clipper, the quad as two triangles. */
-static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_quad(const shz_vec4_t *clip, const u32 *argb, const NatCorner *c,
-                                                                   pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul, u32 offset) {
-    return pc_nat_clip(c, 4, clip, argb, FALSE, record, scaleX, scaleY, zMul, offset, TRUE);
+static __attribute__((noinline, cold)) void nat_clip_quad(const shz_vec4_t *clip, const u32 *argb, const NatCorner *c, f32 scaleX,
+                                                           f32 scaleY, f32 zMul, u32 offset) {
+    pc_nat_clip(c, 4, clip, argb, FALSE, scaleX, scaleY, zMul, offset, TRUE);
 }
 
 /**
@@ -1484,9 +1537,7 @@ __attribute__((noinline)) void pc_nat_sprite_run(const NatView *view, const NatR
         u32 argb[4];
         const u32 offset = gDcGlareAdd;
         f32 zMul;
-        pvr_vertex_t *rec;
         s32 behind = 0, k;
-        int ok;
         f32 uMax, vMax, uMin;
 
         if (mat == NULL) {
@@ -1555,12 +1606,9 @@ __attribute__((noinline)) void pc_nat_sprite_run(const NatView *view, const NatR
         c[1] = (NatCorner) { uMax, vMax, 0, PVR_CMD_VERTEX | 2 };
         c[2] = (NatCorner) { uMin, 0.0f, 0, PVR_CMD_VERTEX | 0 };
         c[3] = (NatCorner) { uMin, vMax, 0, PVR_CMD_VERTEX_EOL | 3 };
-        rec = gfx_nat_header(&mat->hdr, mat->route, (behind || view->exact) ? 36 : 4, &ok);
-        if (!ok) {
-            continue;
-        }
+        gfx_nat_header(&mat->hdr);
         if (behind) {
-            rec = nat_clip_quad(clip, argb, c, rec, scaleX, scaleY, zMul, offset);
+            nat_clip_quad(clip, argb, c, scaleX, scaleY, zMul, offset);
         } else if (view->exact) {
             for (k = 0; k < 4; k++) {
                 f32 inv = shz_invf_fsrra(clip[k].w);
@@ -1569,94 +1617,92 @@ __attribute__((noinline)) void pc_nat_sprite_run(const NatView *view, const NatR
                 sPoints[k].y = ty - (clip[k].y * inv * sy);
                 sPoints[k].z = inv * zMul;
             }
-            rec = nat_write_exact(rec, c, 4, offset, TRUE, TRUE, zMul, scaleX, scaleY);
+            nat_write_exact(c, 4, offset, TRUE, TRUE, zMul, scaleX, scaleY);
         } else {
             u32 sq = pvr_dr_addr;
 
             for (k = 0; k < 4; k++) {
                 const shz_vec4_t *p = &clip[c[k].word & 3];
                 f32 inv = shz_invf_fsrra(p->w);
-                f32 x = (p->x * inv * sx) + tx;
-                f32 y = ty - (p->y * inv * sy);
-                u32 cmd = c[k].word & 0xF0000000u;
-                u32 colour = argb[c[k].word & 3];
+                pvr_vertex_t *vt;
 
-                if (rec != NULL) {
-                    nat_vertex_put(rec, TRUE, cmd, x, y, inv * zMul, c[k].u, c[k].v, colour, offset);
-                    rec++;
-                } else {
-                    pvr_vertex_t *vt;
-
-                    sq ^= 32;
-                    vt = (pvr_vertex_t *) sq;
-                    nat_vertex_put(vt, FALSE, cmd, x, y, inv * zMul, c[k].u, c[k].v, colour, offset);
-                    nat_sq_flush(vt);
-                }
+                sq ^= 32;
+                vt = (pvr_vertex_t *) sq;
+                nat_vertex_put(vt, c[k].word & 0xF0000000u, (p->x * inv * sx) + tx, ty - (p->y * inv * sy), inv * zMul, c[k].u,
+                               c[k].v, argb[c[k].word & 3], offset);
+                nat_sq_flush(vt);
             }
             pvr_dr_addr = sq;
         }
-        gfx_nat_end(rec);
     }
 }
 
-/** The frame: its draws in the game's order, each with what it needs. */
-void pc_nat_frame_run(s32 task) {
-    static NatView sView;
-    const NatRec *rec = gNatRecs[task];
-    const NatRec *end = rec + gNatRecCount[task];
+// A list's pass: what the viewport and the scissor have come to, as far as it got.
+static NatView sView;
 
-    sPlanesFor = NULL;
+void pc_nat_list_begin(pvr_list_t list) {
+    sListRoute = list == PVR_LIST_OP_POLY ? NAT_LIST_OP : list == PVR_LIST_PT_POLY ? NAT_LIST_PT : NAT_LIST_TR;
     pc_nat_run_viewport(NULL, &sView);
-    while (rec < end) {
-        sView.matrix = rec->matrix;
-        sView.matrix2 = rec->matrix2;
-        sView.prim = rec->prim;
-        sView.env = rec->env;
-        switch (rec->kind) {
-            case NAT_REC_LEVEL:
-                gfx_nat_set_fog(rec->fog);
-                sView.exact = gfx_nat_exact();
-                pc_nat_level_run(&sView, rec);
-                break;
-            case NAT_REC_MODEL:
-                gfx_nat_set_fog(rec->fog);
-                sView.exact = gfx_nat_exact();
-                pc_nat_model_run(&sView, rec);
-                break;
-            case NAT_REC_SPRITE:
-                gfx_nat_set_fog(rec->fog);
-                sView.exact = gfx_nat_exact();
-                pc_nat_sprite_run(&sView, rec);
-                break;
-            case NAT_REC_TRIS:
-                gfx_nat_set_fog(TRUE);
-                sView.exact = gfx_nat_exact();
-                pc_nat_tris_run(&sView, rec);
-                break;
-            case NAT_REC_RECT:
-                rec += pc_nat_run_rects(rec, (s32) (end - rec)) - 1;
-                break;
-            case NAT_REC_FILL:
-                pc_nat_run_fill(rec);
-                break;
-            case NAT_REC_VIEWPORT:
-                pc_nat_run_viewport(rec->p0, &sView);
-                break;
-            case NAT_REC_SCISSOR:
-                pc_nat_run_scissor(rec->f);
-                break;
-            case NAT_REC_FOG_COLOUR:
-                pc_nat_run_fog_colour(rec->b);
-                break;
-            case NAT_REC_FOG_DEPTH:
-                pc_nat_run_fog_depth(rec->b);
-                break;
-            case NAT_REC_TAG:
-                pc_nat_run_tag(rec->b, rec->matrix);
-                break;
-        }
-        rec++;
-    }
 }
 
+/** One record of a list, enDjinn calling, with what it needs. */
+void pc_nat_item(void *data) {
+    const NatRec *rec = data;
 
+#if DKR_PROF_SKIP
+    if (gfx_prof_list_skipped()) {
+        return;
+    }
+#endif
+    sView.matrix = rec->matrix;
+    sView.matrix2 = rec->matrix2;
+    sView.prim = rec->prim;
+    sView.env = rec->env;
+    switch (rec->kind) {
+        case NAT_REC_LEVEL:
+            gfx_nat_set_fog(rec->fog);
+            sView.exact = gfx_nat_exact();
+            pc_nat_level_run(&sView, rec);
+            break;
+        case NAT_REC_MODEL:
+            gfx_nat_set_fog(rec->fog);
+            sView.exact = gfx_nat_exact();
+            pc_nat_model_run(&sView, rec);
+            break;
+        case NAT_REC_SPRITE:
+            gfx_nat_set_fog(rec->fog);
+            sView.exact = gfx_nat_exact();
+            gfx_set_place(rec->place, rec->layer);
+            pc_nat_sprite_run(&sView, rec);
+            break;
+        case NAT_REC_TRIS:
+            gfx_nat_set_fog(TRUE);
+            sView.exact = gfx_nat_exact();
+            gfx_set_place(rec->place, rec->layer);
+            pc_nat_tris_run(&sView, rec);
+            break;
+        case NAT_REC_RECT:
+            gfx_set_place(rec->place, rec->layer);
+            pc_nat_run_rects(rec);
+            break;
+        case NAT_REC_FILL:
+            gfx_set_place(rec->place, rec->layer);
+            pc_nat_run_fill(rec);
+            break;
+        case NAT_REC_VIEWPORT:
+            pc_nat_run_viewport(rec->p0, &sView);
+            break;
+        case NAT_REC_SCISSOR:
+            pc_nat_run_scissor(rec->f);
+            break;
+        case NAT_REC_FOG_COLOUR:
+            pc_nat_run_fog_colour(rec->b);
+            break;
+        case NAT_REC_FOG_DEPTH:
+            pc_nat_run_fog_depth(rec->b);
+            break;
+        case NAT_REC_TAG:
+            pc_nat_run_tag(rec->b, rec->matrix);
+            break;
+    }
+}

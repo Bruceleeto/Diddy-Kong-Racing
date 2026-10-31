@@ -48,8 +48,8 @@
 #include <PR/os_time.h>
 #include "../dreamcast/prof.h"
 #ifdef NAT_DIRECT
-extern void pc_nat_frame_reset(s32 task);
-#define NAT_FRAME_RESET() pc_nat_frame_reset(gSPTaskNum)
+extern void pc_nat_frame_reset(void);
+#define NAT_FRAME_RESET() pc_nat_frame_reset()
 #else
 #define NAT_FRAME_RESET() ((void) 0)
 #endif

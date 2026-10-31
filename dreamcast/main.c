@@ -104,8 +104,6 @@ static struct {
     u64 last, wait, waitFrame, begin, dl, end;
     u32 frames, blast, fallback, verts, tris, culled, clipped, sent, slowTris, rects, sentFrame, maxSent;
     u32 slowBatches;
-    u32 trStats[10]; // see gfx_tr_stats
-    u32 noDepth[4];  // see gfx_nodepth_stats
     u64 part[PC_PROF_COUNT]; // the game's own frame, see prof.h
     u32 workMax; // the longest frame, start to start, less the pacer's sleep
     u32 missed;  // frames that took more video fields than the target
@@ -113,7 +111,7 @@ static struct {
     u32 whyCombiner, whyBillboard, whyState, whyFull, whyAppend, whyShared, whyLoose;
     u32 whyStateKind[6]; // no scene, texenv blend, alpha test, no depth test, depth offset, scissor
     u64 pvrRender, pvrRegister;
-    u32 pvrBytes, ptWords, trWords;
+    u32 pvrBytes;
     u64 tBlast, tFallback, tVtx, tPoly, tRect, tMtx;
     u64 tState, tXform, tEmit, tPolyState, tPolyEmit, tPolyDraw;
 } sProf DKR_HOT; // touched by every batch in a profile build, so with the hot state
@@ -464,16 +462,13 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
         u32 end = (u32) (sProf.end / 1000u / n);
         pc_prof_log("GFX PROF: frame=%lu us wait=%lu game=%lu dl=%lu begin=%lu end=%lu | batches=%lu+%lu verts=%lu "
                "tris=%lu culled=%lu clipped=%lu sent=%lu max=%lu slow=%lu rects=%lu | "
-               "pvr render=%lu register=%lu us vtxbytes=%lu ptwords=%lu trwords=%lu | "
+               "pvr render=%lu register=%lu us vtxbytes=%lu | "
                "us blast=%lu fallback=%lu vtx=%lu poly=%lu rect=%lu mtx=%lu | "
                "us state=%lu xform=%lu emit=%lu pstate=%lu pemit=%lu pdraw=%lu slowbatches=%lu | "
                "slowtris combiner=%lu billboard=%lu state=%lu full=%lu append=%lu shared=%lu loose=%lu | "
                "workmax=%lu missed=%lu vramfree=%lu texdecodes=%lu texprebuilt=%lu | "
                "us logic=%lu scene=%lu waves=%lu shadows=%lu viewport=%lu hud=%lu | "
-               "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu | "
-               "nodepth toop=%lu afterdepth=%lu afterrecorded=%lu notopaque=%lu | "
-               "trbatches 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu "
-               "trroom 2d=%lu opaquez=%lu opaquenoz=%lu cutout=%lu xlu=%lu\n",
+               "statetris noscene=%lu texenv=%lu alphatest=%lu nodepth=%lu decal=%lu scissor=%lu\n",
                (unsigned long) period, (unsigned long) wait,
                (unsigned long) (period - wait - begin - dl - end), (unsigned long) dl,
                (unsigned long) begin, (unsigned long) end,
@@ -483,8 +478,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.sent / n), (unsigned long) sProf.maxSent,
                (unsigned long) (sProf.slowTris / n), (unsigned long) (sProf.rects / n),
                (unsigned long) (sProf.pvrRender / 1000u / n), (unsigned long) (sProf.pvrRegister / 1000u / n),
-               (unsigned long) sProf.pvrBytes, (unsigned long) sProf.ptWords,
-               (unsigned long) sProf.trWords,
+               (unsigned long) sProf.pvrBytes,
                (unsigned long) (sProf.tBlast / 1000u / n), (unsigned long) (sProf.tFallback / 1000u / n),
                (unsigned long) (sProf.tVtx / 1000u / n), (unsigned long) (sProf.tPoly / 1000u / n),
                (unsigned long) (sProf.tRect / 1000u / n), (unsigned long) (sProf.tMtx / 1000u / n),
@@ -507,14 +501,7 @@ static void prof_frame(u64 t0, u64 t1, u64 t2, u64 t3) {
                (unsigned long) (sProf.part[PC_PROF_HUD] / 1000u / n),
                (unsigned long) (sProf.whyStateKind[0] / n), (unsigned long) (sProf.whyStateKind[1] / n),
                (unsigned long) (sProf.whyStateKind[2] / n), (unsigned long) (sProf.whyStateKind[3] / n),
-               (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n),
-               (unsigned long) (sProf.noDepth[0] / n), (unsigned long) (sProf.noDepth[1] / n),
-               (unsigned long) (sProf.noDepth[2] / n), (unsigned long) (sProf.noDepth[3] / n),
-               (unsigned long) (sProf.trStats[0] / n), (unsigned long) (sProf.trStats[1] / n),
-               (unsigned long) (sProf.trStats[2] / n), (unsigned long) (sProf.trStats[3] / n),
-               (unsigned long) (sProf.trStats[4] / n), (unsigned long) (sProf.trStats[5] / n),
-               (unsigned long) (sProf.trStats[6] / n), (unsigned long) (sProf.trStats[7] / n),
-               (unsigned long) (sProf.trStats[8] / n), (unsigned long) (sProf.trStats[9] / n));
+               (unsigned long) (sProf.whyStateKind[4] / n), (unsigned long) (sProf.whyStateKind[5] / n));
     }
     prof_blend_print(sProf.frames);
     sTexDecodes = sTexPrebuiltHits = 0;
@@ -813,7 +800,8 @@ static u32 rgb_scale(u32 c, u32 a) {
 // list was built: colour as 0x00RRGGBB and alpha, or alpha -1.
 static s32 sGlareAnnounced = -1;
 static u32 sGlareAnnouncedRgb;
-static s32 sGlareOn;       // the frame's walk draws the glare into what comes before its rect
+static s32 sGlareFrame;    // the frame has a glare
+static s32 sGlareOn;       // this list is drawing it into what comes before its rect
 static s32 sGlareSkipRect; // between the glare's tags: its rect is not drawn
 
 void pc_glare_announce(int r, int g, int b, int alpha) {
@@ -1987,7 +1975,6 @@ static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled);
 static DKR_HOT f32 sBlastSX = 1.0f, sBlastSY = 1.0f;
 
 // Where a blended batch's vertices are recorded; NULL streams to the open list.
-static DKR_HOT pvr_vertex_t *sBlastRecord;
 // The batch's offset colour: the frame's glare for a textured batch, else 0 (gfx_frame_oargb).
 static DKR_HOT u32 sBlastOffset;
 // Depth = 1/w * mul + add: 1 and 0, but decals and far backdrops differ (gfx_blast_begin).
@@ -2007,25 +1994,16 @@ static DKR_HOT f32 sBlastZMul = 1.0f, sBlastZAdd = 0.0f;
  * global around each vertex.
  */
 
-/** One PVR vertex to the store queue or the recording — inline, no cross-file call. */
+/** One PVR vertex to the store queue — inline, no cross-file call. */
 static inline void blast_emit(f32 x, f32 y, f32 invw, f32 u, f32 v, u32 color, u32 flags) {
-    pvr_vertex_t *rec = sBlastRecord;
+    pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
 
 #if DKR_FILL_PROF
     gfx_prof_fill_vert(x * sBlastSX, y * sBlastSY, flags == PVR_CMD_VERTEX_EOL);
 #endif
     // color is final: the callers have faded it (and added an untextured batch's glare).
-    if (rec) {
-        nat_vertex_put(rec, TRUE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
-                  sBlastOffset);
-        sBlastRecord = rec + 1;
-    } else {
-        pvr_vertex_t *vt = (pvr_vertex_t *) pvr_dr_target();
-
-        nat_vertex_put(vt, FALSE, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color,
-                  sBlastOffset);
-        nat_sq_flush(vt);
-    }
+    nat_vertex_put(vt, flags, x * sBlastSX, y * sBlastSY, (invw * sBlastZMul) + sBlastZAdd, u, v, color, sBlastOffset);
+    nat_sq_flush(vt);
 }
 
 // A corner in clip space on its way through the blast near-clipper: position,
@@ -2138,26 +2116,20 @@ static __attribute__((noinline)) void blast_clip_tri(const BlastClipVert *in, s3
 
 /**
  * A compiled run of strips with a position behind the near plane: triangle by
- * triangle through the near-clipper, out of the native writers' way. Returns
- * where a recording stands, or NULL for the opaque list.
+ * triangle through the near-clipper, out of the native writers' way.
  */
-__attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip,
-                                                          const u32 *argb, s32 cull, pvr_vertex_t *record, f32 scaleX,
-                                                          f32 scaleY, f32 zMul, u32 offset, s32 textured) {
+__attribute__((noinline, cold)) void pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip, const u32 *argb,
+                                                 s32 cull, f32 scaleX, f32 scaleY, f32 zMul, u32 offset, s32 textured) {
     BlastClipVert cv[3];
     s32 step = 0;
     s32 i;
 
-    sBlastRecord = record;
     sBlastSX = scaleX;
     sBlastSY = scaleY;
     sBlastZMul = zMul;
     sBlastZAdd = 0.0f;
     sBlastOffset = offset;
     sBlastScissor = gfx_nat_exact();
-    if (sBlastScissor) {
-        gfx_nat_end(record);
-    }
     for (i = 0; i < count; i++) {
         const NatCorner *c = &corners[i];
         s32 at = c->word & 0xFFFF;
@@ -2190,10 +2162,7 @@ __attribute__((noinline, cold)) pvr_vertex_t *pc_nat_clip(const NatCorner *corne
             step = 0;
         }
     }
-    record = sBlastScissor ? gfx_nat_position() : sBlastRecord;
     sBlastScissor = FALSE;
-    sBlastRecord = NULL;
-    return record;
 }
 
 #if DKR_GFX_PROFILE
@@ -2837,29 +2806,24 @@ static void draw_2d_quad(f32 x0, f32 y0, f32 x1, f32 y1, f32 u0, f32 v0, f32 u1,
     draw_2d_quads(q, 6, lit, texture);
 }
 
-#define NAT_RECT_RUN 32
-
 /**
  * A run of texture rectangles under one material and colour, with nothing between
  * them: text, mostly. One header and its triangles, where each glyph would be one
- * of its own. Returns how many records it took.
+ * of its own. The record has how many of the next records are in it.
  */
-s32 pc_nat_run_rects(const NatRec *rec, s32 count) {
+void pc_nat_run_rects(const NatRec *rec) {
     static GfxTriVert sRun[NAT_RECT_RUN * 6] __attribute__((aligned(32)));
     const NatMaterial *mat = rec->mat;
     u32 texture = pc_nat_material_handle(mat);
     u8 lit[4], unlit[3];
     s32 w, h, cms, cmt;
-    s32 n = 0;
+    s32 n;
 
-    if (texture == 0) {
-        return 1;
-    }
     pc_nat_material_size(mat, &w, &h, &cms, &cmt);
     pc_nat_load_state(mat, rec->prim, rec->env);
     gfx_texture_set_wrap(texture, cms, cmt);
     combiner_color(lit, unlit);
-    while (n < NAT_RECT_RUN && n < count) {
+    for (n = 0; n < rec->run; n++) {
         const NatRec *r = &rec[n];
         f32 x0 = r->f[0], y0 = r->f[1], x1 = r->f[2], y1 = r->f[3];
         f32 s0 = (f32) (s16) (r->a >> 16) / 32.0f;
@@ -2869,14 +2833,21 @@ s32 pc_nat_run_rects(const NatRec *rec, s32 count) {
         f32 s1 = s0 + ((x1 - x0) * dsdx);
         f32 t1 = t0 + ((y1 - y0) * dtdy);
 
-        if (r->kind != NAT_REC_RECT || r->mat != mat || r->prim != rec->prim || r->env != rec->env) {
-            break;
-        }
         quad_fill(&sRun[n * 6], x0, y0, x1, y1, s0 / w, t0 / h, s1 / w, t1 / h, lit, unlit, texture);
-        n++;
     }
     draw_2d_quads(sRun, n * 6, lit, texture);
-    return n;
+}
+
+/** What a rectangle would emit, as it is binned; pc_nat_run_rects and pc_nat_run_fill do it again. */
+s32 pc_nat_rect_alpha(const NatRec *rec) {
+    u8 lit[4], unlit[3];
+
+    pc_nat_load_state(rec->mat, rec->prim, rec->env);
+    if (rec->kind == NAT_REC_FILL && (sOtherModeH & (3 << G_MDSFT_CYCLETYPE)) == G_CYC_FILL) {
+        return 0xFF;
+    }
+    combiner_color(lit, unlit);
+    return lit[3];
 }
 
 /** The port's own tags, which ride in G_NOOP: a few a frame, so out of the hot code. */
@@ -2884,9 +2855,7 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
     if (w1 == PC_SCRAWL_TAG) {
         pc_scrawl_draw();
     } else if (w1 == PC_SWIRL_TAG) {
-        pc_swirl_draw();
-    } else if (w1 == PC_COVER_BEGIN_TAG || w1 == PC_COVER_END_TAG) {
-        gfx_set_cover(w1 == PC_COVER_BEGIN_TAG);
+        pc_swirl_draw(gfx_list_translucent());
     } else if (w1 == PC_FADE_BEGIN_TAG) {
         // Everything before it is drawn darkened already; what comes after it
         // is drawn over the fade, as it is.
@@ -2903,8 +2872,6 @@ static __attribute__((noinline)) void handle_tag(u32 w1) {
         }
     } else if (w1 == PC_GLARE_END_TAG) {
         sGlareSkipRect = FALSE;
-    } else if (w1 == PC_VIEW_BEGIN_TAG) {
-        gfx_view_begin();
     }
 #if DKR_GFX_PROFILE
     if ((w1 & 0xFFFFFF00u) == PC_PROF_CAT_TAG) {
@@ -3021,7 +2988,6 @@ void pc_nat_draw_tris(const NatMaterial *mat, const GfxTriVert *verts, s32 count
     gfx_set_depth_test(depth);
     gfx_set_depth_write(write);
     gfx_set_depth_offset(decal);
-    gfx_set_blend(blend);
     gfx_set_alpha_test(alpha ? 0.5f : 0.0f);
     gfx_set_fog(fog, sFogColor);
     gfx_bind_texture(pc_nat_material_handle(mat));
@@ -3189,18 +3155,20 @@ static void debug_view_draw(void) {
 }
 #endif
 
-typedef struct {
-    void *begin, *end;
-} FrameDl;
 #if DKR_GFX_PROFILE
 static u64 sProfT1, sProfT2; // the walk's start and end, for prof_frame
 static s32 sProfStallKind;   // which stall the counter counts this frame: 0 data, 1 code
 #endif
 
-/** One frame's display-list walk, inside the opaque list. */
-static void frame_walk(void *data) {
-    const FrameDl *frame = data;
+#if DKR_SHP
+static void shp_frame_begin(void);
+static void shp_frame_end(void);
+#endif
+static s32 sGlareKeep; // what the frame's glare leaves of a colour, if it has one
+static u32 sGlareAdd;  // and adds
 
+/** The frame's setup: enDjinn opened the scene, and the game's draws are all in the lists. */
+void pc_frame_begin(void) {
 #if DKR_GFX_PROFILE
     sProfT1 = pc_uptime_ns();
     {
@@ -3264,6 +3232,34 @@ static void frame_walk(void *data) {
     }
 #endif
 
+    // The fade the game's frame ends with, drawn into the frame (dreamcast/cover.h).
+    sFadeAlpha = sFadeAnnounced;
+    sFadeAnnounced = -1;
+    sFadeKeep = (sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255;
+    sFadeAdd = sFadeKeep < 255 ? rgb_scale(sFadeAnnouncedRgb, (u32) sFadeAlpha) : 0;
+    // The sun glare, drawn into everything before its rect: each colour times
+    // 1 - a, plus its colour times a, and that faded by the fade drawn after it.
+    if (sGlareAnnounced > 0) {
+        u32 a = (u32) sGlareAnnounced, k = (u32) sFadeKeep;
+
+        sGlareKeep = (s32) ((k * (255u - a) + 127u) / 255u);
+        sGlareAdd = gfx_add_rgb(rgb_scale(rgb_scale(sGlareAnnouncedRgb, a), k), sFadeAdd);
+    }
+    sGlareFrame = sGlareAnnounced > 0;
+    sGlareAnnounced = -1;
+#if DKR_GFX_PROFILE
+    sScene.fadeFrames += sFadeKeep < 255 || sGlareFrame;
+#endif
+#if DKR_SHP
+    shp_frame_begin();
+#endif
+}
+
+/**
+ * A list opens. It is one pass over the frame: what the game set as it drew comes
+ * again in the list's own records, from the frame's start.
+ */
+void pc_frame_list_begin(pvr_list_t list) {
     sCurMatrix = 0;
     sBillboard = FALSE;
     sVertexBase = 0;
@@ -3279,78 +3275,35 @@ static void frame_walk(void *data) {
     sTileUlt = 0;
     sOtherModeL = 0;
     sGeometryMode = GFX_GEOMETRY_MODE_INIT;
-    // The fade the display list ends with, drawn into the frame (dreamcast/cover.h).
-    sFadeAlpha = sFadeAnnounced;
-    sFadeAnnounced = -1;
     sFadeSkipRect = FALSE;
-    sFadeKeep = (sFadeAlpha > 0 && sFadeAlpha < 255) ? 255 - sFadeAlpha : 255;
-    sFadeAdd = sFadeKeep < 255 ? rgb_scale(sFadeAnnouncedRgb, (u32) sFadeAlpha) : 0;
-    // The sun glare, drawn into everything before its rect: each colour times
-    // 1 - a, plus its colour times a, and that faded by the fade drawn after it.
-    sGlareOn = sGlareAnnounced > 0;
     sGlareSkipRect = FALSE;
+    sGlareOn = sGlareFrame;
     if (sGlareOn) {
-        u32 a = (u32) sGlareAnnounced, k = (u32) sFadeKeep;
-
-        gfx_set_glare((s32) ((k * (255u - a) + 127u) / 255u),
-                      gfx_add_rgb(rgb_scale(rgb_scale(sGlareAnnouncedRgb, a), k), sFadeAdd));
+        gfx_set_glare(sGlareKeep, sGlareAdd);
     } else {
         gfx_set_glare(sFadeKeep, sFadeAdd);
     }
-    sGlareAnnounced = -1;
-#if DKR_GFX_PROFILE
-    sScene.fadeFrames += gDcFadeOn != 0;
-#endif
 
-    // The list sets its own scissor and viewport before it draws anything
-    // (src/rcp_dkr.c), but don't inherit last frame's rects until it does.
+    // The game sets its own scissor and viewport before it draws anything
+    // (src/rcp_dkr.c), but don't inherit the last list's rects until it does.
     sScisX0 = sVpClipX0 = 0.0f;
     sScisY0 = sVpClipY0 = 0.0f;
     sScisX1 = sVpClipX1 = (f32) N64_SCREEN_W;
     sScisY1 = sVpClipY1 = (f32) N64_SCREEN_H;
     gfx_disable_scissor();
+    pc_nat_list_begin(list);
+}
 
-    {
-        extern Gfx *gDisplayLists[2];
-
-        pc_nat_frame_run(frame->begin == gDisplayLists[1]);
-    }
+/** The last list closed. */
+void pc_frame_lists_done(void) {
 #if DKR_GFX_PROFILE
     scene_category(PC_PROF_CAT_OTHER);
-#endif
-#if DKR_DEBUG_VIEW
-    debug_view_draw();
-#endif
-#if DKR_GFX_PROFILE
     sProfT2 = pc_uptime_ns();
     sScene.walkStall[sProfStallKind] += perf_cntr_count(PRFC1);
-    {
-        int pt, tr;
-        gfx_recorded_words(&pt, &tr);
-        {
-            extern void gfx_tr_stats(unsigned int out[10]);
-            unsigned int tr8[10];
-            s32 j;
-
-            gfx_tr_stats(tr8);
-            {
-                extern void gfx_nodepth_stats(unsigned int out[4]);
-                unsigned int nd[4];
-
-                gfx_nodepth_stats(nd);
-                for (j = 0; j < 4; j++) {
-                    sProf.noDepth[j] += nd[j];
-                }
-            }
-            for (j = 0; j < 10; j++) {
-                sProf.trStats[j] += tr8[j];
-            }
-        }
-        if ((u32) pt > sProf.ptWords) sProf.ptWords = (u32) pt;
-        if ((u32) tr > sProf.trWords) sProf.trWords = (u32) tr;
-    }
 #endif
-
+#if DKR_SHP
+    shp_frame_end();
+#endif
 }
 
 #if DKR_SHP
@@ -3377,6 +3330,26 @@ static unsigned shp_map_phase(s32 map) {
     return 15;
 }
 
+static s32 sShpWindow;
+
+static void shp_frame_begin(void) {
+    extern s32 gMapId;
+
+    sShpWindow = pc_scene_is_ready();
+    shp_phase(shp_map_phase(gMapId));
+    shp_section(SHP_SEC_WALK);
+    if (sShpWindow) {
+        sShpWindow = shp_pmu_open((u32) gMapId < SHP_PMU_BUCKETS ? (u32) gMapId : SHP_PMU_BUCKETS - 1);
+    }
+}
+
+static void shp_frame_end(void) {
+    if (sShpWindow) {
+        shp_pmu_close();
+    }
+    shp_section(SHP_SEC_OTHER);
+}
+
 /** Saves the samples and prints the PMU buckets and the phase names. */
 static void shp_finish(void) {
     s32 i;
@@ -3395,28 +3368,38 @@ static void shp_finish(void) {
 #include <enDjinn/enj_render.h>
 #include <enDjinn/enj_state.h>
 // enDjinn's enj_state_run is the game loop. Each frame it calls the game's
-// iteration (thread3_frame), which queues the display list it built through
-// pc_gfx_task_submit; enDjinn then submits the scene, and its post-render
-// callback finishes the frame.
-static FrameDl sQueuedFrame;
-#if DKR_DEBUG_VIEW
-static FrameDl sHeldFrame;
-#endif
+// iteration (thread3_frame), whose draws go into enDjinn's render lists as they
+// are made, and which says the frame is complete through pc_gfx_task_submit;
+// enDjinn then submits the scene, and its post-render callback finishes the frame.
+static s32 sFrameQueued;
 #if DKR_GFX_PROFILE
 static u64 sQueuedT0;
 #endif
 
-void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
-    sQueuedFrame.begin = dlBegin;
-    sQueuedFrame.end = dlEnd;
 #if DKR_DEBUG_VIEW
-    sHeldFrame = sQueuedFrame;
+static void debug_view_item(void *data) {
+    (void) data;
+    gfx_set_place(GFX_PLACE_OVERLAY, 0);
+    debug_view_draw();
+}
 #endif
+
+static void frame_queued(void) {
+    sFrameQueued = TRUE;
 #if DKR_GFX_PROFILE
     sQueuedT0 = pc_uptime_ns();
 #endif
     sGfxFrameCount++;
-    gfx_frame_queue(frame_walk, &sQueuedFrame);
+#if DKR_DEBUG_VIEW
+    enj_render_list_add(PVR_LIST_TR_POLY, debug_view_item, NULL);
+#endif
+    gfx_frame_queue();
+}
+
+void pc_gfx_task_submit(void *dlBegin, void *dlEnd) {
+    (void) dlBegin;
+    (void) dlEnd;
+    frame_queued();
 }
 
 /** The game drew no frame this iteration: what is on screen stays. */
@@ -3426,10 +3409,10 @@ void pc_gfx_task_hold(void) {
 
 static void enj_frame_submitted(void *data) {
     (void) data;
-    if (sQueuedFrame.begin == NULL) {
+    if (!sFrameQueued) {
         return; // nothing was drawn this frame
     }
-    sQueuedFrame.begin = NULL;
+    sFrameQueued = FALSE;
     gfx_frame_submitted();
     pc_scene_frame_shown();
 #if DKR_GFX_PROFILE
@@ -3467,7 +3450,8 @@ static void (*sGameFrame)(void *);
 static void debug_view_frame(void *data) {
     debug_view_poll();
     if (sDebugHold) {
-        pc_gfx_task_submit(sHeldFrame.begin, sHeldFrame.end);
+        pc_nat_frame_requeue();
+        frame_queued();
     } else {
         sGameFrame(data);
     }

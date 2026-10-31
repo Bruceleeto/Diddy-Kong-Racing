@@ -22,7 +22,7 @@
 // vertex is lit from its model-space position and normal as they are.
 //
 // It leaves a marker in the display list, after the swirl's matrix, and the
-// walk draws it there (pc_swirl_draw): each distinct vertex through the
+// frame draws it there (pc_swirl_draw): each distinct vertex through the
 // matrix once, then the strips streamed into the opaque list (translucent
 // while the logo fades). The boot screen's camera never brings it to the
 // near plane, so it isn't clipped. The game's model is only a stand-in.
@@ -459,7 +459,7 @@ static void light(Object *obj, Camera *cam) {
 
 /**
  * In render_3d_model, for each model it draws: 1 if it is the swirl, lit and
- * left to the display-list walk; 0 to have the game draw the model.
+ * left to the frame's lists; 0 to have the game draw the model.
  */
 int pc_swirl_render(Object *obj, ObjectModel *model, Gfx **dl, s32 opacity) {
     Camera *cam = cam_get_active_camera();
@@ -557,7 +557,7 @@ static void halo_square(const pvr_poly_hdr_t *hdr, float corner[4][3], u32 level
         v->argb = colour;
         v->oargb = 0;
     }
-    gfx_tr_native(hdr, quad, 4);
+    gfx_native(hdr, quad, 4);
 }
 
 /**
@@ -607,7 +607,11 @@ static void halo_draw(shz_vec3_t eye) {
     halo_square(&sHaloHeader[1], corner, (u32) (level * side));
 }
 
-void pc_swirl_draw(void) {
+/**
+ * Once in each list the swirl has a part in: the halo is always blended, the body
+ * only as it fades.
+ */
+void pc_swirl_draw(int translucentList) {
     const SwirlCounts *n = counts();
     const SwirlPoint *pts = points();
     const u16 *lengths = strip_lengths();
@@ -619,9 +623,17 @@ void pc_swirl_draw(void) {
 
     shz_vec3_t eye = model_eye();
 
+    if (translucent != translucentList) {
+        if (translucentList) {
+            halo_draw(eye); // the body went out with the opaque list
+        }
+        return;
+    }
     sDraws++;
     glint_update(eye);
-    halo_draw(eye);
+    if (translucentList) {
+        halo_draw(eye);
+    }
     hdr = &sHeader[translucent][sGlintArgb != 0];
     pc_project_points(&pts->px, sizeof(SwirlPoint) / sizeof(float), n->points, sScreen);
     {
@@ -668,7 +680,7 @@ void pc_swirl_draw(void) {
             }
         }
         index += len;
-        ok = translucent ? gfx_tr_native(hdr, sStrip, len) : gfx_op_native(hdr, sStrip, len);
+        ok = gfx_native(hdr, sStrip, len);
         if (!ok) {
             return;
         }

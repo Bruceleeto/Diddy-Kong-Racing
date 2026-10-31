@@ -116,38 +116,24 @@ void gfx_delete_texture(unsigned int handle);
 // shaded from the vertex colours and modulated by the bound texture.
 void gfx_draw_tris(const GfxTriVert *verts, int count);
 
-void gfx_blast_end(void *recordEnd);
-
-// TA words recorded so far this frame for the punch-through and translucent
-// lists (32 bytes each; a triangle is three). For the frame profile.
-void gfx_recorded_words(int *pt, int *tr);
-
-// The native renderer (dreamcast/native.c). Opens a run of vertices under a
-// compiled header in the list `route` (0 opaque, 1 punch-through, 2 translucent).
-// Returns the recording to write up to `words` vertices to, or NULL for the store
-// queues, the opaque list being streamed; *ok is 0 when the list has no room.
-void *gfx_nat_header(const void *hdr, int route, int words, int *ok);
-void gfx_nat_end(void *recordEnd);
+// The native renderer (dreamcast/native.c). A run of vertices under a compiled
+// header in the list that is open; they go on by the store queues.
+void gfx_nat_header(const void *hdr);
 void gfx_nat_set_fog(int enable); // off: headers go without, whatever they were compiled with
-int gfx_nat_room(void *record, int words); // room for `words` more in the open recording
 void gfx_nat_scale(float *x, float *y);
 // A scissor not on the tiles: a run's triangles then go through this one by one,
-// in N64 pixels with texture coordinates as written, after gfx_nat_end; the run goes
-// on from gfx_nat_position.
+// in N64 pixels with texture coordinates as written.
 int gfx_nat_exact(void);
-void gfx_view_begin(void); // a split-screen view starts: what comes next is its backdrop
 void gfx_nat_tri_exact(const GfxTriVert *tri, float zMul, unsigned int offset);
-void *gfx_nat_position(void);
 // The bits of a polygon header that come from a texture.
 int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3);
 void gfx_texture_scale(unsigned int handle, float *u, float *v);
+int gfx_texture_opaque(unsigned int handle);
 
-// A native polygon in the translucent list, at this point of the display list
-// (dreamcast/scrawl.c). Vertex x/y are N64 pixels. 0 if the recording is full.
+// A native polygon in the list that is open, at this point of the frame
+// (dreamcast/scrawl.c, dreamcast/swirl.c). Vertex x/y are N64 pixels.
 #include <dc/pvr.h>
-int gfx_tr_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
-// The same in the opaque list, streamed as it comes (dreamcast/swirl.c).
-int gfx_op_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
+int gfx_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count);
 
 // Every colour drawn from here on scaled by keep / 255 (red, green, blue; not
 // alpha), for a fade to black drawn into the frame (dreamcast/cover.h). 255
@@ -197,9 +183,10 @@ static inline unsigned int gfx_frame_oargb(unsigned int o) {
     return gDcGlareAdd ? gfx_add_rgb(o, gDcGlareAdd) : o;
 }
 
-// While set, opaque untextured 2D batches are a cover over the whole scene,
-// drawn in the opaque list; see gfx.c. The display list sets it (PC_COVER_*).
-void gfx_set_cover(int enable);
+// How a batch without a depth test goes, and how many covers come before it.
+// See gfx.c.
+enum { GFX_PLACE_NONE, GFX_PLACE_BACKDROP, GFX_PLACE_OVERLAY, GFX_PLACE_COVER };
+void gfx_set_place(int place, int layer);
 
 // Fill profile (FILL_PROF=1, see gfx.c): the display list's category, one
 // vertex as it goes out in framebuffer pixels, the start of each frame's
@@ -210,10 +197,6 @@ void gfx_fill_frame(int counted);
 void gfx_fill_frame_done(unsigned int renderUs);
 void gfx_fill_report(void);
 void gfx_prof_set_skip(int code);
-
-// Whether the surface blends with what is behind it (RDP FORCE_BL). One that
-// does not is opaque whatever its alpha says, and goes to the opaque list.
-void gfx_set_blend(int enable);
 
 // Depth test on/off (RDP Z_CMP). The 2D overlay (text, HUD, fades) draws with
 // the z-buffer disabled and relies on display-list order, as the game does: it
@@ -241,9 +224,17 @@ void gfx_set_scissor(float x0, float y0, float x1, float y1);
 // Drops back to drawing over the whole framebuffer.
 void gfx_disable_scissor(void);
 
-// Queue a frame for enDjinn's loop to submit, `walk` running inside the opaque
-// list, and finish it once it has (enDjinn's post-render callback).
-void gfx_frame_queue(void (*walk)(void *), void *data);
+// The frame is enDjinn's: the game's draws go into its render lists as they are
+// made, and gfx_window_init sets the hooks around them. gfx_frame_queue closes the
+// frame, and gfx_frame_submitted (enDjinn's post-render callback) finishes it.
+void gfx_list_begin(pvr_list_t list);
+int gfx_list_translucent(void);
+int gfx_prof_list_skipped(void); // PROF_SKIP: leave the list that is open out
+void gfx_frame_queue(void);
 void gfx_frame_submitted(void);
+// dreamcast/main.c: the frame's setup, a list's start, and the end of the last.
+void pc_frame_begin(void);
+void pc_frame_list_begin(pvr_list_t list);
+void pc_frame_lists_done(void);
 
 #endif

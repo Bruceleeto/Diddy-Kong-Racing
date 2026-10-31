@@ -51,8 +51,12 @@ enum {
 
 // One thing to draw, with all it needs from the game's state.
 typedef struct {
-    u8 kind, fog;
-    u16 unused;
+    u8 kind;
+    union {
+        u8 fog;
+        u8 run; // NAT_REC_RECT: the rectangles in this one's run, the next records
+    };
+    u8 place, layer; // a draw without a depth test: GFX_PLACE_*, covers before it
     u32 prim, env;
     const f32 *matrix, *matrix2;
     const NatMaterial *mat;
@@ -68,13 +72,28 @@ typedef struct {
     };
 } NatRec;
 
+// The lists, in the pack's numbering.
+enum { NAT_LIST_OP, NAT_LIST_PT, NAT_LIST_TR };
+
 #define NAT_RECORDS 4096
-extern NatRec gNatRecs[2][NAT_RECORDS];
-extern s32 gNatRecCount[2];
+#define NAT_RECT_RUN 32
 NatRec *pc_nat_record(s32 kind);
-void pc_nat_frame_reset(s32 task);
-void pc_nat_frame_run(s32 task);
+void pc_nat_frame_reset(void);
 void nat_ignore(s32 ignore);
+// Into the bin of a list. A draw under a depth test says so with pc_nat_depth_drawn;
+// one without takes pc_nat_bin_2d, which needs its alpha and its texture only if
+// pc_nat_may_open.
+void pc_nat_bin(s32 list, NatRec *rec);
+void pc_nat_depth_drawn(void);
+s32 pc_nat_may_open(void);
+void pc_nat_bin_2d(NatRec *rec, s32 alphaTest, s32 alpha, u32 handle);
+void pc_nat_bin_tris(NatRec *rec);
+s32 pc_nat_rect_alpha(const NatRec *rec);
+void pc_nat_frame_requeue(void); // DEBUG_VIEW: the last frame's bins again
+void pc_nat_planes_forget(void);
+// enDjinn's renderer of a record, and what a list starts from.
+void pc_nat_item(void *data);
+void pc_nat_list_begin(pvr_list_t list);
 
 // What a record draws through, as the frame goes out.
 typedef struct {
@@ -106,14 +125,10 @@ static inline shz_vec4_t nat_transform_fv4(f32 x, f32 y, f32 z) {
     return shz_vec4_init(rx, ry, rz, rw);
 }
 
-/** One PVR vertex, whole: to a store queue or, with alloc, to a cache line it does not read first. */
-static inline void nat_vertex_put(pvr_vertex_t *vt, s32 alloc, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v, u32 argb,
-                                  u32 oargb) {
+/** One PVR vertex, whole, to a store queue. */
+static inline void nat_vertex_put(pvr_vertex_t *vt, u32 flags, f32 x, f32 y, f32 z, f32 u, f32 v, u32 argb, u32 oargb) {
     u8 *top = (u8 *) vt + 32;
 
-    if (alloc) {
-        __asm__ __volatile__("movca.l r0, @%1" : "=m"(*vt) : "r"(vt), "z"(flags));
-    }
     __asm__ __volatile__("mov.l %[oargb], @-%[p]\n\t"
                          "mov.l %[argb], @-%[p]\n\t"
                          "fmov.s %[v], @-%[p]\n\t"
@@ -147,7 +162,7 @@ void pc_nat_model_load(ObjectModel *model, s32 modelId);
 void pc_nat_model_free(ObjectModel *model);
 s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
 
-// The walk's side (dreamcast/main.c).
+// The frame's side (dreamcast/main.c).
 void pc_nat_level_run(const NatView *view, const NatRec *rec);
 const NatMaterial *pc_nat_material_now(s32 textured);
 void pc_nat_texture_of(const void *textureHeader, NatTexture *out);
@@ -159,7 +174,7 @@ void pc_nat_run_scissor(const f32 *f);
 void pc_nat_run_fog_colour(u32 rgba);
 void pc_nat_run_fog_depth(u32 data);
 void pc_nat_run_tag(u32 tag, const f32 *matrix);
-s32 pc_nat_run_rects(const NatRec *rec, s32 count);
+void pc_nat_run_rects(const NatRec *rec);
 void pc_nat_run_fill(const NatRec *rec);
 void pc_nat_draw_tris(const NatMaterial *mat, const GfxTriVert *verts, s32 count);
 u32 pc_nat_material_handle(const NatMaterial *mat);
@@ -181,7 +196,7 @@ s32 pc_nat_texture_words(const void *textureHeader, u32 *mode2, u32 *mode3);
 void pc_nat_texture_scale(const void *textureHeader, f32 *u, f32 *v);
 u32 pc_nat_texture_handle(const void *textureHeader);
 // `clip`: the clip space positions; `argb`: their colours, or NULL for the corners' own.
-pvr_vertex_t *pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip, const u32 *argb, s32 cull,
-                          pvr_vertex_t *record, f32 scaleX, f32 scaleY, f32 zMul, u32 offset, s32 textured);
+void pc_nat_clip(const NatCorner *corners, s32 count, const shz_vec4_t *clip, const u32 *argb, s32 cull, f32 scaleX,
+                 f32 scaleY, f32 zMul, u32 offset, s32 textured);
 
 #endif
