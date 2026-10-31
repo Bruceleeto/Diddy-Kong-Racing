@@ -87,6 +87,8 @@ NATIVE ?= 1
 # 1 with NATIVE=1: the walk draws everything, and each compiled batch is checked
 # against what it did (NATCHK lines). Measurement only.
 NATIVE_CHECK ?= 0
+# Measurement only, with LEVEL_TOUR and DEMO_LEVEL: start that demo with this many players, for split screen.
+TOUR_PLAYERS ?= 1
 # Measurement only: leave these to the walk, a bit each: 1 level, 2 models, 4 meshes,
 # 8 sprites, 16 rectangles.
 NATIVE_SKIP ?= 0

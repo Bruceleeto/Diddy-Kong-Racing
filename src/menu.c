@@ -3520,6 +3520,9 @@ void menu_title_screen_init(void) {
         numberOfPlayers = 0;
         gTitleDemoTimer = 600;
     }
+#if defined(DKR_TOUR_PLAYERS) && DKR_TOUR_PLAYERS > 1
+    numberOfPlayers = DKR_TOUR_PLAYERS - 1; // measurement only: split screen, which no demo shows
+#endif
     load_level_for_menu(sTitleScreenDemoIds[gTitleDemoIndex + DEMO_LEVEL_ID], numberOfPlayers,
                         sTitleScreenDemoIds[gTitleDemoIndex + DEMO_CUTSCENE_ID]);
     menu_prefetch_next_title_demo_music();
