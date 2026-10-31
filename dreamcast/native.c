@@ -1279,7 +1279,7 @@ static __attribute__((noinline, cold)) void nat_tris_layered(const NatMaterial *
  * coordinates differ and the batch is short), and are culled on the CPU, so no
  * strip to break.
  */
-DKR_NAT_CODE void pc_nat_tris_run(const NatView *view, const NatRec *rec_) {
+__attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec *rec_) {
     const NatMaterial *mat = rec_->mat;
     const Vertex *v = (const Vertex *) rec_->p0;
     const Vertex *v2 = (const Vertex *) rec_->p1;
@@ -1449,7 +1449,7 @@ static __attribute__((noinline, cold)) pvr_vertex_t *nat_clip_quad(const shz_vec
  * it in clip space through the billboard's own matrix. A vehicle part has no
  * anchor, its corners going through that matrix alone.
  */
-DKR_NAT_CODE void pc_nat_sprite_run(const NatView *view, const NatRec *rec_) {
+__attribute__((noinline)) void pc_nat_sprite_run(const NatView *view, const NatRec *rec_) {
     const Sprite *sprite = (const Sprite *) rec_->p0;
     const Vertex *anchor = (const Vertex *) rec_->p1;
     const f32 *billboard = view->matrix2;

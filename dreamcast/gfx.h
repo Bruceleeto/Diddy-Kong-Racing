@@ -1,10 +1,10 @@
 #ifndef LINUX_GFX_H
 #define LINUX_GFX_H
 
-// The native renderer's hot code (dreamcast/native.c): together, away from the
-// walk's, so that what the walk still does and what it no longer does can be
-// told apart.
-#define DKR_NAT_CODE __attribute__((section(".text.dkr_native")))
+// The native renderer's hot code (dreamcast/native.c): at a fixed place in the
+// instruction cache, as DKR_HOT_CODE below explains, and each a function of its own
+// so that LTO does not inline it back out of there.
+#define DKR_NAT_CODE __attribute__((noinline, section(".sub0.dkr_native")))
 
 // The state every batch reads, in the display-list walk (main.c) and here, is
 // some sixty small variables. Left to the linker they land in as many cache
