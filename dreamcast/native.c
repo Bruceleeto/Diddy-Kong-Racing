@@ -1381,7 +1381,11 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
     pvr_dr_addr = sq;
 }
 
-/** What a batch without a depth test emits: the first vertex's alpha, as the frame will work it out. */
+/**
+ * What a batch without a depth test emits: the first vertex's alpha, as the frame
+ * will work it out. If the game fills the vertices in after the draw this reads
+ * last time's; all that hangs on it is whether an opaque batch may open the frame.
+ */
 static s32 nat_tris_alpha(const NatRec *rec) {
     const NatMaterial *mat = rec->mat;
     const Vertex *v = (const Vertex *) rec->p0;
@@ -1403,10 +1407,13 @@ static s32 nat_tris_alpha(const NatRec *rec) {
 
 void pc_nat_bin_tris(NatRec *rec) {
     const NatMaterial *mat = rec->mat;
+    const s32 backdrop = pc_nat_view_backdrop();
 
     if (mat->depth) {
         pc_nat_depth_drawn();
         pc_nat_bin(mat->route, rec);
+    } else if (backdrop) {
+        pc_nat_bin_2d(rec, mat->alphaTest, 0xFF, mat->handle);
     } else {
         pc_nat_bin_2d(rec, mat->alphaTest, pc_nat_may_open() ? nat_tris_alpha(rec) : 0, mat->handle);
     }

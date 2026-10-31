@@ -86,6 +86,7 @@ void nat_ignore(s32 ignore);
 void pc_nat_bin(s32 list, NatRec *rec);
 void pc_nat_depth_drawn(void);
 s32 pc_nat_may_open(void);
+s32 pc_nat_view_backdrop(void);
 void pc_nat_bin_2d(NatRec *rec, s32 alphaTest, s32 alpha, u32 handle);
 void pc_nat_bin_tris(NatRec *rec);
 s32 pc_nat_rect_alpha(const NatRec *rec);

@@ -46,6 +46,7 @@ static s32 sBlendQueued; // something is in the punch-through or translucent lis
 static s32 sCover;      // the game is drawing a cover (PC_COVER_*)
 static s32 sCoverDrawn; // and a batch of it went to the opaque list
 static s32 sCoverLayer; // covers finished this frame
+static s32 sViewBackdrop; // the next polygon is a view's gradient
 static NatRec *sRectRun; // the run of rectangles the next may join
 
 #if DKR_DEBUG_VIEW
@@ -67,6 +68,7 @@ void pc_nat_frame_reset(void) {
     sSeenDepth = FALSE;
     sBlendQueued = FALSE;
     sCover = sCoverDrawn = sCoverLayer = 0;
+    sViewBackdrop = FALSE;
     sRectRun = NULL;
 #if DKR_DEBUG_VIEW
     sReplayCount = 0;
@@ -141,6 +143,18 @@ static void nat_bin_all(NatRec *rec) {
 
 void pc_nat_depth_drawn(void) {
     sSeenDepth = TRUE;
+}
+
+/**
+ * Whether this polygon is the gradient a view opens with, which is opaque. It has to
+ * be said: the game writes those vertices only after the draw, as the N64 reads
+ * them later.
+ */
+s32 pc_nat_view_backdrop(void) {
+    s32 backdrop = sViewBackdrop;
+
+    sViewBackdrop = FALSE;
+    return backdrop;
 }
 
 s32 pc_nat_may_open(void) {
@@ -305,6 +319,7 @@ void nat_tag(u32 tag) {
         // backdrop comes after the first view's scene, and taken for 2D it went over
         // its own view.
         sSeenDepth = FALSE;
+        sViewBackdrop = TRUE;
         return;
     }
     rec = pc_nat_record(NAT_REC_TAG);
