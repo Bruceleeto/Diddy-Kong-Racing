@@ -29,6 +29,7 @@
 #define NAT_CHUNK_TEX_ANIM 2
 #define NAT_BATCH_WALK 0xFFFF
 #define NAT_BATCH_NONE 0xFFFE
+#define NAT_SCROLL_TURNS 8.0f
 
 
 struct NatMaterial {
@@ -350,6 +351,45 @@ s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden) {
         nat_level_record(segment, waterHidden, first, last + 1, listRoute);
     }
     return next - batch;
+}
+
+/**
+ * A batch's texture moves under its surface: a waterfall, a fountain. The game has
+ * added this to the batch's triangles (obj_loop_texscroll, obj_loop_animator), and it
+ * goes on the chunk's corners the same way, in the block, so a frame draws them as
+ * they stand and no draw pays for it. A new level is a new block, so it starts unmoved.
+ * The game leaves out triangles with TRI_FLAG_80, but no scrolled batch has any. A
+ * scrolled texture repeats, so its size is a power of two and these are exact, and
+ * eight turns off is, as in the game, the same picture.
+ */
+__attribute__((noinline, cold)) void pc_nat_batch_scroll(s32 segment, s32 batch, s32 du, s32 dv) {
+    const u16 *table;
+    const NatChunk *chunk;
+    const TextureHeader *tex;
+    NatCorner *c, *end;
+    f32 u, v, wrapU, wrapV;
+
+    if (sLevel == NULL || (du | dv) == 0) {
+        return;
+    }
+    table = (const u16 *) ((const u8 *) sLevel + sSegs[segment].tableAt);
+    if (table[batch] >= NAT_BATCH_NONE) {
+        return; // the walk draws what the game moved
+    }
+    chunk = &sChunks[table[batch]];
+    c = (NatCorner *) chunk->corners;
+    end = c + chunk->oneSided + chunk->twoSided;
+    tex = gCurrentLevelModel->textures[sInfos[chunk->matOne].texture].texture;
+    u = du / (32.0f * tex->width);
+    v = dv / (32.0f * tex->height);
+    wrapU = c->u > NAT_SCROLL_TURNS ? -NAT_SCROLL_TURNS : c->u < -NAT_SCROLL_TURNS ? NAT_SCROLL_TURNS : 0.0f;
+    wrapV = c->v > NAT_SCROLL_TURNS ? -NAT_SCROLL_TURNS : c->v < -NAT_SCROLL_TURNS ? NAT_SCROLL_TURNS : 0.0f;
+    u += wrapU;
+    v += wrapV;
+    for (; c < end; c++) {
+        c->u += u;
+        c->v += v;
+    }
 }
 
 void pc_nat_planes_forget(void) {
