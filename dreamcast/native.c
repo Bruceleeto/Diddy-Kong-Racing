@@ -26,12 +26,6 @@
 #define NAT_BATCH_WALK 0xFFFF
 #define NAT_BATCH_NONE 0xFFFE
 
-#ifndef DKR_NATIVE_CHECK
-#define DKR_NATIVE_CHECK 0
-#endif
-#ifndef DKR_NATIVE_SKIP
-#define DKR_NATIVE_SKIP 0
-#endif
 
 struct NatMaterial {
     pvr_poly_hdr_t hdr; // no culling: these go out as triangles, culled here
@@ -113,35 +107,8 @@ static DKR_HOT NatPoint sPoints[NAT_MAX_POSITIONS] __attribute__((aligned(32)));
 
 extern LevelModel *gCurrentLevelModel;
 
-#if DKR_NATIVE_CHECK
-#define NAT_FOG_BITS PVR_TA_PM2_FOG_MASK // follows the game's G_FOG each frame (gfx_nat_set_fog)
-static u32 sChecked, sCheckBad;
-
-/** One line per kind of difference, or a batch repeated every frame would use them all up. */
-static s32 nat_check_report(u32 walk2, u32 ours2, s32 route) {
-    static u32 sSeen[64];
-    static s32 sSeenCount;
-    u32 key = (walk2 * 33) ^ ours2 ^ ((u32) route << 28);
-    s32 i;
-
-    sCheckBad++;
-    for (i = 0; i < sSeenCount; i++) {
-        if (sSeen[i] == key) {
-            return FALSE;
-        }
-    }
-    if (sSeenCount == 64) {
-        return FALSE;
-    }
-    sSeen[sSeenCount++] = key;
-    return TRUE;
-}
-#endif
 
 void pc_nat_level_free(void) {
-#if DKR_NATIVE_CHECK
-    printf("NATCHK level done: %lu batches compared, %lu differ\n", (unsigned long) sChecked, (unsigned long) sCheckBad);
-#endif
     if (sFrameWords != NULL && sLevel != NULL) {
         s32 i;
 
@@ -323,7 +290,7 @@ s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden) {
     s32 next;
     s32 first = -1, last = -1;
 
-    if (sLevel == NULL || (DKR_NATIVE_SKIP & 1)) {
+    if (sLevel == NULL) {
         return 0;
     }
     if (!sResolved) {
@@ -780,7 +747,7 @@ s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 fl
     NatRec *rec;
     s32 variant, i;
 
-    if (nat == NULL || gBlockedRenderFlags != 0 || (DKR_NATIVE_SKIP & 2)) {
+    if (nat == NULL || gBlockedRenderFlags != 0) {
         return -2;
     }
     if (nat->generation != sVramGeneration) {
@@ -1447,7 +1414,7 @@ s32 pc_nat_sprite(const Sprite *sprite, s32 frame, s32 flags, const Mtx *billboa
     NatRec *rec;
     s32 zBuffer;
 
-    if (frame < 0 || frame >= sprite->numberOfFrames || (DKR_NATIVE_SKIP & 8)) {
+    if (frame < 0 || frame >= sprite->numberOfFrames) {
         return FALSE;
     }
     entry = material_simple_lookup(flags, &zBuffer);
@@ -1692,118 +1659,4 @@ void pc_nat_frame_run(s32 task) {
     }
 }
 
-#if DKR_NATIVE_CHECK
-#define gDkrNative(pkt, kind, a, b)                                                                     \
-    do {                                                                                                \
-        Gfx *_g = (Gfx *) (pkt);                                                                        \
-        _g->words.w0 = ((u32) G_NATIVE << 24) | ((u32) (kind) << 20) | (u32) (a);                       \
-        _g->words.w1 = (u32) (b);                                                                       \
-    } while (0)
 
-void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags) {
-    extern s16 gUseDirectionalLighting;
-    NatModel *nat = NAT_MODEL(model);
-
-    if (nat != NULL) {
-        if (nat->generation != sVramGeneration) {
-            nat_model_resolve(model, nat);
-        }
-        gDkrNative((*dl)++, NATIVE_CHECK_MODEL,
-                   batch | ((flags & RENDER_SEMI_TRANSPARENT) ? 0x100 : 0) | (gUseDirectionalLighting ? 0x200 : 0), model);
-    }
-}
-
-void pc_nat_check_model_run(u32 w0, u32 w1) {
-    const ObjectModel *model = (const ObjectModel *) w1;
-    const NatModel *nat = NAT_MODEL(model);
-    s32 mat = nat->chunks[w0 & 0xFF].mat[(w0 >> 8) & 3];
-    const pvr_poly_hdr_t *hdr;
-    u32 got[4];
-    s32 route;
-
-    if (mat == 0xFFFF || !(nat->variants & (1 << ((w0 >> 8) & 3)))) {
-        return;
-    }
-    hdr = &nat->mats[mat];
-    if (!gfx_nat_last((unsigned int *) got, (int *) &route)) {
-        return; // the walk dropped this batch
-    }
-    if ((got[0] & 8) != (hdr->cmd & 8)) {
-        return; // what it holds is an earlier 2D batch's: this one drew nothing
-    }
-    sChecked++;
-    if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
-        (got[2] | NAT_FOG_BITS) != (hdr->mode2 | NAT_FOG_BITS) || (model->batches[w0 & 0xFF].texOffset == 0 && got[3] != hdr->mode3) ||
-        route != nat->infos[mat].route) {
-        if (nat_check_report(got[2], hdr->mode2, route)) {
-            printf("NATCHK model %08lx batch %lu variant %lu header %08lx %08lx %08lx %08lx route %ld, compiled "
-                   "%08lx %08lx %08lx %08lx route %d\n",
-                   (unsigned long) w1, (unsigned long) (w0 & 0xFF), (unsigned long) ((w0 >> 8) & 3), (unsigned long) got[0],
-                   (unsigned long) got[1], (unsigned long) got[2], (unsigned long) got[3], (long) route,
-                   (unsigned long) hdr->cmd, (unsigned long) hdr->mode1, (unsigned long) hdr->mode2,
-                   (unsigned long) hdr->mode3, nat->infos[mat].route);
-        }
-    }
-}
-#endif
-
-#if DKR_NATIVE_CHECK
-void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch) {
-    if (sLevel != NULL) {
-        if (!sResolved) {
-            nat_level_resolve();
-        }
-        gDkrNative((*dl)++, NATIVE_CHECK_LEVEL, segment, batch);
-    }
-}
-
-/**
- * NATIVE_CHECK=1: the walk has just drawn this batch. Does the compiled form say
- * the same? The culling differs by design: the walk culled on the CPU.
- */
-void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count) {
-    const NatSegment *seg = &sSegs[w0 & 0xFFFF];
-    const u16 *table = (const u16 *) ((const u8 *) sLevel + seg->tableAt);
-    u16 at = table[w1];
-    const NatChunk *chunk;
-    const pvr_poly_hdr_t *hdr;
-    u32 got[4];
-    s32 route, i, j, n;
-
-    if (at >= NAT_BATCH_NONE) {
-        return;
-    }
-    chunk = &sChunks[at];
-    hdr = &sMats[chunk->matOne];
-    if (!gfx_nat_last((unsigned int *) got, (int *) &route)) {
-        return; // the walk dropped this batch
-    }
-    if ((got[0] & 8) != (hdr->cmd & 8)) {
-        return; // what it holds is an earlier 2D batch's: this one drew nothing
-    }
-    sChecked++;
-    if ((got[0] & ~(3u << 16)) != (hdr->cmd & ~(3u << 16)) || (got[1] & ~(3u << 27)) != (hdr->mode1 & ~(3u << 27)) ||
-        (got[2] | NAT_FOG_BITS) != (hdr->mode2 | NAT_FOG_BITS) || (!(chunk->flags & NAT_CHUNK_TEX_ANIM) && got[3] != hdr->mode3) ||
-        route != sInfos[chunk->matOne].route) {
-        if (nat_check_report(got[2], hdr->mode2, route)) {
-            printf("NATCHK seg %lu batch %lu header %08lx %08lx %08lx %08lx route %ld, compiled %08lx %08lx %08lx %08lx "
-                   "route %d\n",
-                   (unsigned long) (w0 & 0xFFFF), (unsigned long) w1, (unsigned long) got[0], (unsigned long) got[1],
-                   (unsigned long) got[2], (unsigned long) got[3], (long) route, (unsigned long) hdr->cmd,
-                   (unsigned long) hdr->mode1, (unsigned long) hdr->mode2, (unsigned long) hdr->mode3,
-                   sInfos[chunk->matOne].route);
-        }
-    }
-    n = gDcFadeOn ? 0 : chunk->oneSided + chunk->twoSided; // a fade is on the walk's colours
-    for (i = 0; i < n; i++) {
-        for (j = 0; j < count && colours[j] != chunk->corners[i].argb; j++) {}
-        if (j == count) {
-            if (nat_check_report(chunk->corners[i].argb, 0, route)) {
-                printf("NATCHK seg %lu batch %lu colour %08lx not among the walk's %ld\n", (unsigned long) (w0 & 0xFFFF),
-                       (unsigned long) w1, (unsigned long) chunk->corners[i].argb, (long) count);
-            }
-            break;
-        }
-    }
-}
-#endif

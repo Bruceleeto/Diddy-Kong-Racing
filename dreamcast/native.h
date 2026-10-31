@@ -140,17 +140,12 @@ void pc_nat_materials_forget(void);
 // Batch `batch` of a segment on: 0 if the game has to draw it; otherwise how many
 // batches, from it, the record this adds draws.
 s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);
-void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch);
-#define NATIVE_CHECK_LEVEL 1
-#define NATIVE_CHECK_MODEL 3
-#define G_NATIVE 0x0A
 
 // Object models (src/object_models.c, src/objects.c). render_mesh's return, or -2
 // if the batch has to go the way of any other mesh.
 void pc_nat_model_load(ObjectModel *model, s32 modelId);
 void pc_nat_model_free(ObjectModel *model);
 s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
-void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags);
 
 // The walk's side (dreamcast/main.c).
 void pc_nat_level_run(const NatView *view, const NatRec *rec);
@@ -168,9 +163,7 @@ s32 pc_nat_run_rects(const NatRec *rec, s32 count);
 void pc_nat_run_fill(const NatRec *rec);
 void pc_nat_draw_tris(const NatMaterial *mat, const GfxTriVert *verts, s32 count);
 u32 pc_nat_material_handle(const NatMaterial *mat);
-void pc_nat_check_level_run(u32 w0, u32 w1, const u32 *colours, s32 count);
 void pc_nat_model_run(const NatView *view, const NatRec *rec);
-void pc_nat_check_model_run(u32 w0, u32 w1);
 void pc_nat_sprite_run(const NatView *view, const NatRec *rec);
 void pc_nat_tris_run(const NatView *view, const NatRec *rec);
 // How a combiner treats the shade under these colours. TRUE: a colour is

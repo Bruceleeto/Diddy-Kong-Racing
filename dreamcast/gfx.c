@@ -195,14 +195,6 @@ static int sPendingFreeCount;
 static DKR_HOT int sRoute;
 static DKR_HOT int sNatNoFog; // the game has G_FOG off: native headers go without
 
-#ifndef DKR_NATIVE_CHECK
-#define DKR_NATIVE_CHECK 0
-#endif
-#if DKR_NATIVE_CHECK
-static pvr_poly_hdr_t sCheckHdr __attribute__((aligned(32))); // what the last blast batch went out under
-static int sCheckRoute;
-static int sCheckValid; // a header went out since the last gfx_nat_last
-#endif
 
 // PVR punch-through alpha threshold: a texel with alpha below this is discarded
 // before the depth stage. KOS names the register's offset (PVR_PT_ALPHA_REF) but
@@ -1734,12 +1726,6 @@ void gfx_draw_tris(const GfxTriVert *verts, int count) {
         shz_sq_memcpy32_1(pvr_ta_sq_addr, &sHdr);
     }
 
-#if DKR_NATIVE_CHECK
-    compile_header_for((sRoute == ROUTE_PT) ? PVR_LIST_PT_POLY : (sRoute == ROUTE_TR) ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY,
-                       &sCheckHdr);
-    sCheckRoute = sRoute;
-    sCheckValid = 1;
-#endif
     // GL_TRIANGLES -> one 3-vertex PVR strip per triangle (3rd vertex EOL).
     for (i = 0; i + 3 <= count; i += 3) {
         if (!exact || tri_inside_scissor(&verts[i])) {
@@ -1794,39 +1780,8 @@ void gfx_set_cover(int enable) {
  * the caller transforms anything, so a doomed batch costs a compare, not a
  * wasted transform.
  */
-/** Profile only: 0 no texture bound, 1 opaque, 2 cutout, 3 has partly transparent texels. */
-int gfx_texture_kind(void) {
-    if (sBoundTex == 0 || sTextures[sBoundTex - 1].data == NULL) {
-        return 0;
-    }
-    return sTextures[sBoundTex - 1].opaque ? 1 : sTextures[sBoundTex - 1].cutout ? 2 : 3;
-}
-
-/** Which condition keeps the current state off the fast path (profile only). */
-int gfx_blast_why(void) {
-    return !sInScene ? 0 : sTexEnvBlend ? 1 : (sAlphaRef > 0.0f) ? 2 : !sDepthTest ? 3 : sDepthOffset ? 4 : 5;
-}
-
-int gfx_blast_viable(void) {
-    return sInScene && !sTexEnvBlend && !(sAlphaRef > 0.0f && !USE_PT_LIST) && !scissor_needs_exact_clip() &&
-           !sCover;
-}
 
 static DKR_HOT int sBlastRoute; // the list the open blast batch is recorded to, or ROUTE_OP
-#if DKR_NATIVE_CHECK
-
-int gfx_nat_last(unsigned int words[4], int *route) {
-    int valid = sCheckValid;
-
-    sCheckValid = 0;
-    words[0] = sCheckHdr.cmd;
-    words[1] = sCheckHdr.mode1;
-    words[2] = sCheckHdr.mode2;
-    words[3] = sCheckHdr.mode3;
-    *route = (sCheckRoute == ROUTE_OP) ? 0 : (sCheckRoute == ROUTE_PT) ? 1 : 2;
-    return valid;
-}
-#endif
 
 // Profile only: what the fast path sends to the blended list, in batches and
 // reserved words, by whether it needed to blend. Classes: 0 no depth test (2D,
@@ -1857,138 +1812,6 @@ void gfx_tr_stats(unsigned int out[10]) {
         out[i] = sTrStats[i];
         sTrStats[i] = 0;
     }
-}
-
-DKR_HOT_CODE int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
-                    void **record, int emitAlpha, float *zMul, float *zAdd) {
-    int route;
-    int farBackdrop = 0;
-
-    if (!gfx_blast_viable()) {
-        return 0;
-    }
-
-    // The list, exactly as gfx_draw_tris picks it.
-    if (USE_PT_LIST && sAlphaRef > 0.0f) {
-        route = ROUTE_PT;
-    } else if (sDepthTest) {
-        route = sBlend ? ROUTE_TR : ROUTE_OP;
-    } else if (!sSeenDepth && sTrCount == 0 && sPtCount == 0 && emitAlpha == 0xFF &&
-               (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque)) {
-        route = ROUTE_OP;
-    } else {
-        route = ROUTE_TR;
-        farBackdrop = !sSeenDepth;
-    }
-#if DKR_GFX_PROFILE
-    if (!sDepthTest && !(USE_PT_LIST && sAlphaRef > 0.0f)) {
-        int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
-
-        sNoDepthStats[route == ROUTE_OP ? 0 : sSeenDepth ? 1 : (sTrCount || sPtCount) ? 2 : !opaque ? 3 : 0] +=
-            (unsigned int) maxWords;
-    }
-#endif
-#if DKR_FILL_PROF || DKR_PROF_SKIP
-    {
-        int kind = (route == ROUTE_TR) ? fill_tr_kind(emitAlpha, farBackdrop) : 0;
-
-        if (prof_skip(route, kind)) {
-            return 0; // gfx_draw_tris drops it
-        }
-        sFillTrKind = kind;
-        fill_route(route);
-    }
-#endif
-    if (route == ROUTE_PT && sPtCount + maxWords + 2 > PT_MAX_WORDS) {
-        return 0; // gfx_draw_tris reports the overflow
-    }
-    if (route == ROUTE_TR && sTrCount + maxWords + 2 > TR_MAX_WORDS) {
-        return 0;
-    }
-#if DKR_GFX_PROFILE
-    if (route == ROUTE_TR) {
-        int opaque = emitAlpha == 0xFF && (sBoundTex == 0 || sTextures[sBoundTex - 1].opaque);
-        int cutout = emitAlpha == 0xFF && sBoundTex != 0 && sTextures[sBoundTex - 1].cutout;
-        int kind = !sDepthTest ? 0 : opaque ? (sDepthWrite ? 1 : 2) : cutout ? 3 : 4;
-
-        sTrStats[kind]++;
-        sTrStats[5 + kind] += (unsigned int) maxWords;
-    }
-#endif
-    if (sDepthTest) {
-        sSeenDepth = 1;
-    }
-
-    // Depth as emit_vert sets it: decals sit a touch nearer, and a backdrop
-    // drawn after the scene's first depth-tested batch goes to the far plane.
-    // 2D over the scene goes at its layer among the frame's covers.
-    if (route != ROUTE_OP && !sDepthTest && !farBackdrop) {
-        *zMul = 0.0f;
-        *zAdd = overlay_z();
-    } else {
-        *zMul = farBackdrop ? 0.0f : (sDepthOffset ? 1.003f : 1.0f);
-        *zAdd = farBackdrop ? BACKDROP_Z : 0.0f;
-    }
-
-    *record = NULL;
-    sBlastRoute = route;
-    if (route != ROUTE_OP) {
-        int *dirty = (route == ROUTE_PT) ? &sScisDirtyPt : &sScisDirty;
-        pvr_poly_hdr_t *hdr;
-
-        sRoute = route;
-        if (*dirty) {
-            if (sScisEnable) {
-                submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
-                                 (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
-            } else {
-                submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
-            }
-            *dirty = 0;
-        }
-        sFarBackdrop = farBackdrop;
-        hdr = (pvr_poly_hdr_t *) ta_target();
-        compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : PVR_LIST_TR_POLY, hdr);
-        ta_commit(hdr);
-        sFarBackdrop = 0;
-        sOverlayDraw = 0;
-        *record = (route == ROUTE_PT) ? sPtBuf[sPtCount] : sTrBuf[sTrCount];
-        sRoute = ROUTE_OP;
-    } else {
-        if (sScisDirtyOp) {
-            if (sScisEnable) {
-                submit_user_clip((int) (sScisX0 * sScaleX), (int) (sScisY0 * sScaleY),
-                                 (int) (sScisX1 * sScaleX), (int) (sScisY1 * sScaleY));
-            } else {
-                submit_user_clip(0, 0, DC_RENDER_W, DC_SCREEN_H);
-            }
-            sScisDirtyOp = 0;
-        }
-        if (sHdrDirty) {
-            compile_header();
-            sHdrDirty = 0;
-        }
-        shz_sq_memcpy32_1(pvr_ta_sq_addr, &sHdr);
-    }
-
-    if (sBoundTex != 0 && sTextures[sBoundTex - 1].data != NULL) {
-        *uScale = sTextures[sBoundTex - 1].u_scale;
-        *vScale = sTextures[sBoundTex - 1].v_scale;
-    } else {
-        *uScale = 1.0f;
-        *vScale = 1.0f;
-    }
-    // N64-pixels -> framebuffer scale, so the caller emits vertices without a
-    // cross-file call per vertex.
-    *scaleX = sScaleX;
-    *scaleY = sScaleY;
-#if DKR_NATIVE_CHECK
-    compile_header_for((route == ROUTE_PT) ? PVR_LIST_PT_POLY : (route == ROUTE_TR) ? PVR_LIST_TR_POLY : PVR_LIST_OP_POLY,
-                       &sCheckHdr);
-    sCheckRoute = route;
-    sCheckValid = 1;
-#endif
-    return 1;
 }
 
 DKR_NAT_CODE void *gfx_nat_header(const void *hdr, int list, int words, int *ok) {
@@ -2103,10 +1926,6 @@ int gfx_nat_room(void *record, int words) {
 void gfx_nat_scale(float *x, float *y) {
     *x = sScaleX;
     *y = sScaleY;
-}
-
-int gfx_nat_viable(void) {
-    return sInScene && !scissor_needs_exact_clip() && !sCover;
 }
 
 int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3) {

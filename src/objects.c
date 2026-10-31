@@ -4559,7 +4559,6 @@ void obj_tick_anims(void) {
 #ifdef TARGET_DC
 // dreamcast/native.c; its header brings the console's own, which do not mix with these.
 extern s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
-extern void pc_nat_check_model(Gfx **dl, ObjectModel *model, s32 batch, s32 flags);
 #endif
 s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s32 overrideVerts) {
     s32 i;
@@ -4641,11 +4640,6 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
                     gSPSelectMatrixDKR(dList++, G_MTX_DKR_INDEX_1);
                 }
                 gSPPolygon(dList++, OS_K0_TO_PHYSICAL(tris), numTris, texEnabled);
-#if defined(TARGET_DC) && DKR_NATIVE && DKR_NATIVE_CHECK
-                if (!gObjectTexAnim) {
-                    pc_nat_check_model(&dList, objModel, i, flags);
-                }
-#endif
             }
             i++;
         } else {

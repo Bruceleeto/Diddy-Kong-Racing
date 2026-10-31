@@ -33,7 +33,6 @@
 extern void pc_nat_level_load(s32 modelId);
 extern void pc_nat_level_free(void);
 extern s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);
-extern void pc_nat_check_level(Gfx **dl, s32 segment, s32 batch);
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -2158,9 +2157,6 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
             gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(triangles), numberTriangles, batchFlags);
         }
 #ifdef TARGET_DC
-#if DKR_NATIVE_CHECK
-        pc_nat_check_level(&gTrackDL, segmentId, i);
-#endif
         pc_scrawl_after_batch(segmentId, i, &gTrackDL); // "Nintendon't" (dreamcast/scrawl.c)
 #endif
     }

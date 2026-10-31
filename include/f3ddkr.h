@@ -216,7 +216,7 @@
 }}
 
 // The Dreamcast's native renderer: no lists, these commands become calls.
-#if defined(TARGET_DC) && defined(DKR_NATIVE) && DKR_NATIVE && !DKR_NATIVE_CHECK
+#if defined(TARGET_DC)
 #include "../dreamcast/nat_gbi.h"
 #endif
 

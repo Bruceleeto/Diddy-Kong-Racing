@@ -118,17 +118,6 @@ void gfx_delete_texture(unsigned int handle);
 // shaded from the vertex colours and modulated by the bound texture.
 void gfx_draw_tris(const GfxTriVert *verts, int count);
 
-// Blast streaming (the native static-geometry path; see gfx.c). Routes and
-// submits scissor + header for the current state, and returns the bound
-// texture's NPOT UV scales plus the N64-pixels -> framebuffer scale. The caller
-// then writes at most `maxWords` PVR vertices: to the store queues
-// (pvr_dr_target/pvr_dr_commit) when *record is NULL, otherwise consecutively
-// from *record, passing where it stopped to gfx_blast_end(). Returns 0 when the
-// state needs a path this contract doesn't cover (punch-through, texenv blend,
-// exact scissor), and the caller must use gfx_draw_tris instead.
-int gfx_blast_viable(void); // begin() would accept the current state (cheap precheck)
-int gfx_blast_begin(float *uScale, float *vScale, float *scaleX, float *scaleY, int maxWords,
-                    void **record, int emitAlpha, float *zMul, float *zAdd);
 void gfx_blast_end(void *recordEnd);
 
 // TA words recorded so far this frame for the punch-through and translucent
@@ -144,8 +133,6 @@ void gfx_nat_end(void *recordEnd);
 void gfx_nat_set_fog(int enable); // off: headers go without, whatever they were compiled with
 int gfx_nat_room(void *record, int words); // room for `words` more in the open recording
 void gfx_nat_scale(float *x, float *y);
-// Whether the scissor can be left to the PVR's tiles alone, as native draws do.
-int gfx_nat_viable(void);
 // A scissor not on the tiles: a run's triangles then go through this one by one,
 // in N64 pixels with texture coordinates as written, after gfx_nat_end; the run goes
 // on from gfx_nat_position.
@@ -155,8 +142,6 @@ void *gfx_nat_position(void);
 // The bits of a polygon header that come from a texture.
 int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3);
 void gfx_texture_scale(unsigned int handle, float *u, float *v);
-// What the blast path last sent, for NATIVE_CHECK=1.
-int gfx_nat_last(unsigned int words[4], int *route); // whether one went out since the last call
 
 // A native polygon in the translucent list, at this point of the display list
 // (dreamcast/scrawl.c). Vertex x/y are N64 pixels. 0 if the recording is full.
