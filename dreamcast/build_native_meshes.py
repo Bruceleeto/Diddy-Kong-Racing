@@ -42,14 +42,16 @@ start, which is 32-byte aligned. A level:
           texture as it put it in video memory (a texture's place there is not
           known here)
   infos   20 bytes per mat: route (0 opaque, 1 punch-through, 2 translucent),
-          decal flag, level texture index or -1, texture frame, then the combiner
-          (two words and the cycle type) for what a frame's colours decide
+          decal flag, level texture index or -1, texture frame, u16 combiner rule,
+          then the combiner (two words and the cycle type) for what a frame's
+          colours decide. The rule is the combiner's number in the pack times 4 plus
+          what it comes to without running it (CC_RULE_* below)
   segs    8 bytes each: u32 offset of its u16 per batch (chunk index, 0xFFFF the
           walk draws it, 0xFFFE drawn by nobody), u16 batch count, u16 opaque batch count
   chunks  48 bytes each: f32 box centre and half size, u32 offsets of its
           positions and corners, u16 positions, corners one-sided, corners
-          two-sided, mat, flags (1 water, 2 animated texture, 4 translucent pass)
-          and batch, u32 reserved
+          two-sided, mat, flags (1 water, 2 animated texture, 16 decal, 32 textured,
+          bits 6-7 the route) and batch, u32 reserved
   xyz     f32 x, y, z per position
   corners 16 bytes each: f32 u, v, u32 ARGB, then PVR command in the top nibble
           and the position index in the low 16 bits
@@ -70,7 +72,7 @@ import sys
 import zlib
 from pathlib import Path
 
-VERSION = 2
+VERSION = 3
 
 # include/asset_enums.h, AssetSectionsEnum
 TEXTURES_3D, TEXTURES_3D_TABLE = 2, 3
@@ -114,7 +116,16 @@ CMD_VERTEX, CMD_VERTEX_EOL = 0xE0000000, 0xF0000000
 # dreamcast/main.c, the slots of a compiled combiner.
 SRC_SHADE, SRC_COMB, SRC_ZERO, SRC_ONE, SRC_TEXEL, SRC_PRIM, SRC_ENV = 0, 4, 8, 9, 10, 11, 15
 
-CHUNK_WATER, CHUNK_TEX_ANIM, CHUNK_TRANSLUCENT, CHUNK_ENVMAP = 1, 2, 4, 8
+CHUNK_WATER, CHUNK_TEX_ANIM, CHUNK_ENVMAP, CHUNK_DECAL, CHUNK_TEXTURED = 1, 2, 8, 16, 32
+CHUNK_ROUTE_SHIFT = 6
+
+# What a frame may do without running a combiner (dreamcast/native.c). The
+# combiner gets the texel as white, and whatever else it does with the shade,
+# PRIM and ENV is worked out once a frame's colours are known:
+#   CC_RULE_FRAME  ask the frame: pc_nat_classify
+#   CC_RULE_SHADE  with ENV's alpha at 0 the colour is the shade's, the alpha PRIM's
+#   CC_RULE_WHITE  the colour is white, the alpha PRIM's
+CC_RULE_FRAME, CC_RULE_SHADE, CC_RULE_WHITE = 0, 1, 2
 BATCH_WALK, BATCH_NONE = 0xFFFF, 0xFFFE
 
 
@@ -358,6 +369,32 @@ def shade_color(progs, rgba, prim=(255, 255, 255, 255), env=(255, 255, 255, 0)):
     return (result[3] << 24) | (result[0] << 16) | (result[1] << 8) | result[2]
 
 
+def combiner_rule(w0, w1, cycle):
+    """Which CC_RULE_* a combiner keeps to, tried out as pc_nat_classify tries it, on shades and colours."""
+    progs = combiner(w0, w1, cycle)
+    shades = ((13, 71, 149, 233), (200, 5, 96, 44), (0, 255, 255, 0))
+    prims = ((255, 255, 255, 255), (0, 0, 0, 0), (13, 200, 90, 37), (255, 255, 255, 128), (0, 255, 3, 254))
+
+    def out(shade, prim, env):
+        src = [0.0] * 19
+        src[SRC_ONE] = src[SRC_TEXEL] = 1.0
+        for i in range(4):
+            src[SRC_SHADE + i] = shade[i] / 255.0
+            src[SRC_PRIM + i] = prim[i] / 255.0
+            src[SRC_ENV + i] = env[i] / 255.0
+        for prog in progs:
+            src[SRC_COMB:SRC_COMB + 4] = [min(1.0, max(0.0, (src[p[0]] - src[p[1]]) * src[p[2]] + src[p[3]])) for p in prog]
+        return [int(v * 255.0 + 1e-4) for v in src[SRC_COMB:SRC_COMB + 4]]
+
+    if all(out(s, p, (r, g, 7, 0)) == [s[0], s[1], s[2], p[3]] for s in shades for p in prims
+           for r, g in ((255, 255), (0, 0), (9, 130))):
+        return CC_RULE_SHADE
+    if all(out(s, p, e) == [255, 255, 255, p[3]] for s in shades for p in prims
+           for e in ((255, 255, 255, 0), (1, 2, 3, 4), (255, 255, 0, 255))):
+        return CC_RULE_WHITE
+    return CC_RULE_FRAME
+
+
 def strips_ordered(tris):
     """Strips that keep the triangles' order: a new one wherever the next does not continue it."""
     out = []
@@ -489,8 +526,13 @@ class Level:
             yield {"verts": verts, "tris": tris, "batches": batches[:nb], "sentinel": batches[nb], "opaque": opaque}
 
 
+COMBINERS = {}  # (w0, w1, cycle): its number in the pack and its rule
+
+
 def mat_info_bytes(info):
-    return struct.pack("<BBhHHIII", *info[:4], 0, *info[4:])
+    if info[4:] not in COMBINERS:
+        COMBINERS[info[4:]] = (len(COMBINERS) << 2) | combiner_rule(*info[4:])
+    return struct.pack("<BBhHHIII", *info[:4], COMBINERS[info[4:]], *info[4:])
 
 
 def compile_level(raw, tables, data, sec, tex_offsets, stats):
@@ -631,8 +673,11 @@ def compile_level(raw, tables, data, sec, tex_offsets, stats):
                 chunk_flags |= CHUNK_WATER
             if flags & RENDER_TEX_ANIM and tex:
                 chunk_flags |= CHUNK_TEX_ANIM
-            if state["route"] == ROUTE_TR:
-                chunk_flags |= CHUNK_TRANSLUCENT
+            if state["decal"]:
+                chunk_flags |= CHUNK_DECAL
+            if tex:
+                chunk_flags |= CHUNK_TEXTURED
+            chunk_flags |= state["route"] << CHUNK_ROUTE_SHIFT
             chunks.append({"lo": box_lo, "hi": box_hi, "xyz": xyz_at, "corners": corners_at, "npos": len(order),
                            "one": counts[0], "two": counts[1], "mat_one": mat_one, "mat_two": mat_two,
                            "flags": chunk_flags, "batch": i})

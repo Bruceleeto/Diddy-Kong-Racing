@@ -27,15 +27,22 @@
 #define NAT_MAX_CORNERS 64 // sixteen triangles at most in a batch
 #define NAT_CHUNK_WATER 1
 #define NAT_CHUNK_TEX_ANIM 2
+#define NAT_CHUNK_DECAL 16
+#define NAT_CHUNK_TEXTURED 32
+#define NAT_CHUNK_ROUTE(flags) (((flags) >> 6) & 3)
 #define NAT_BATCH_WALK 0xFFFF
 #define NAT_BATCH_NONE 0xFFFE
 #define NAT_SCROLL_TURNS 8.0f
-
+// A combiner's rule (dreamcast/build_native_meshes.py, CC_RULE_*).
+#define NAT_CC_RULE 3
+#define NAT_CC_SHADE 1
+#define NAT_CC_WHITE 2
 
 struct NatMaterial {
     pvr_poly_hdr_t hdr; // no culling: these go out as triangles, culled here
     f32 uMul, vMul;
     u32 combine0, combine1, cycle;
+    u32 rule; // NAT_CC_*
     u32 handle;
     u32 otherL, otherH;
     u16 width, height;
@@ -54,8 +61,8 @@ typedef struct {
 typedef struct {
     u8 route, decal;
     s16 texture;
-    u16 frame, unused;
-    u32 combine0, combine1, cycle; // what the walk's combiner would be set to
+    u16 frame, combiner;           // combiner: its number in the pack times 4, plus its rule
+    u32 combine0, combine1, cycle; // what the game's combiner would be set to
 } NatMatInfo;
 
 typedef struct {
@@ -150,8 +157,8 @@ static s32 nat_pack_open(void) {
         printf("native: no mesh pack\n");
         return FALSE;
     }
-    if (fs_read(sPack, head, 16) != 16 || head[0] != 0x4B504E44 /* DNPK */ || head[1] != 2) {
-        printf("native: mesh pack is not version 2\n");
+    if (fs_read(sPack, head, 16) != 16 || head[0] != 0x4B504E44 /* DNPK */ || head[1] != 3) {
+        printf("native: mesh pack is not version 3\n");
         fs_close(sPack);
         sPack = FILEHND_INVALID;
         return FALSE;
@@ -335,7 +342,7 @@ s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden) {
                 break;
             }
             // A stretch of one list is a record; the batches keep their order in it.
-            route = sInfos[sChunks[chunk].matOne].route;
+            route = NAT_CHUNK_ROUTE(sChunks[chunk].flags);
             if (first >= 0 && route != listRoute) {
                 nat_level_record(segment, waterHidden, first, last + 1, listRoute);
                 first = -1;
@@ -589,6 +596,24 @@ static __attribute__((noinline, cold)) const pvr_poly_hdr_t *nat_anim_header(con
     return out;
 }
 
+/**
+ * What a combiner does with the shade under this frame's colours. A rule says it
+ * without running the combiner; pc_nat_classify is for what the rule leaves open.
+ */
+static inline s32 nat_shade_by(u32 rule, u32 w0, u32 w1, u32 cycle, const NatView *view, u32 *keep, u32 *konst) {
+    if (rule == NAT_CC_SHADE && !(view->env & 0xFF)) {
+        *keep = 0x00FFFFFFu;
+        *konst = view->prim << 24;
+        return TRUE;
+    }
+    if (rule == NAT_CC_WHITE) {
+        *keep = 0;
+        *konst = 0x00FFFFFFu | (view->prim << 24);
+        return TRUE;
+    }
+    return pc_nat_classify(w0, w1, cycle, view->prim, view->env, keep, konst);
+}
+
 DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
     const NatChunk *chunk = &sChunks[rec_->b];
     const NatChunk *end = &sChunks[rec_->c];
@@ -617,9 +642,9 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
             continue;
         }
         {
-            const NatMatInfo *info = &sInfos[chunk->matOne];
-            const f32 zMul = info->decal ? 1.003f : 1.0f;
-            const u32 offset = info->texture >= 0 ? glare : 0;
+            const s32 textured = (chunk->flags & NAT_CHUNK_TEXTURED) != 0;
+            const f32 zMul = (chunk->flags & NAT_CHUNK_DECAL) ? 1.003f : 1.0f;
+            const u32 offset = textured ? glare : 0;
             s32 behind = nat_transform(chunk->xyz, chunk->numPositions, sx, sy, tx, ty, zMul);
             const NatCorner *corners = chunk->corners;
 
@@ -641,11 +666,11 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
                     lastMat = mat;
                 }
                 if (behind) {
-                    nat_clip_level(chunk, corners, count, !part, scaleX, scaleY, zMul, offset, info->texture >= 0);
+                    nat_clip_level(chunk, corners, count, !part, scaleX, scaleY, zMul, offset, textured);
                 } else if (view->exact) {
-                    nat_write_exact(corners, count, offset, FALSE, info->texture >= 0, zMul, scaleX, scaleY);
+                    nat_write_exact(corners, count, offset, FALSE, textured, zMul, scaleX, scaleY);
                 } else if (fade) {
-                    nat_write_faded(corners, count, offset, info->texture >= 0);
+                    nat_write_faded(corners, count, offset, textured);
                 } else {
                     nat_write_sq(corners, count, offset, FALSE);
                 }
@@ -682,6 +707,7 @@ typedef struct {
     NatModelChunk *chunks;
     s32 generation; // the video memory its mats are good for
     s32 variants;   // bit per variant: every batch has its mat
+    u32 **frameWords; // a texture's frames as header words: per model texture, NULL if it has one frame
     u8 lists[4];    // per variant: a bit for each list its batches go to
 } NatModel;
 
@@ -690,10 +716,23 @@ typedef struct {
 #define NAT_VARIANT_DIRECTIONAL 2
 #define NAT_CHUNK_ENVMAP 8
 
+static void nat_model_frames_free(const ObjectModel *model, NatModel *nat) {
+    s32 i;
+
+    if (nat->frameWords != NULL) {
+        for (i = 0; i < model->numberOfTextures; i++) {
+            free(nat->frameWords[i]);
+        }
+        free(nat->frameWords);
+        nat->frameWords = NULL;
+    }
+}
+
 void pc_nat_model_free(ObjectModel *model) {
     NatModel *nat = NAT_MODEL(model);
 
     if (nat != NULL) {
+        nat_model_frames_free(model, nat);
         free(nat->block);
         free(nat);
         NAT_MODEL(model) = NULL;
@@ -727,10 +766,32 @@ void pc_nat_model_load(ObjectModel *model, s32 modelId) {
     nat->infos = (const NatMatInfo *) (block + nat->block->infosAt);
     nat->chunks = (NatModelChunk *) (block + nat->block->chunksAt);
     nat->generation = 0;
+    nat->frameWords = NULL;
     for (i = 0; i < model->numberOfBatches; i++) {
         nat->chunks[i].corners = (const NatCorner *) (block + nat->chunks[i].cornersAt);
     }
     NAT_MODEL(model) = nat;
+}
+
+/** A texture's frames, for a batch that shows one of them. `mode3` stands in for a frame that is not in video memory. */
+static void nat_model_frames(const ObjectModel *model, NatModel *nat, s32 texture, u32 mode3) {
+    const TextureHeader *tex = model->textures[texture].texture;
+    s32 frames = tex->numOfTextures >> 8;
+    s32 f;
+
+    if (nat->frameWords == NULL || nat->frameWords[texture] != NULL || frames < 2) {
+        return;
+    }
+    nat->frameWords[texture] = malloc(frames * sizeof(u32));
+    if (nat->frameWords[texture] != NULL) {
+        for (f = 0; f < frames; f++) {
+            u32 mode2;
+
+            if (!pc_nat_texture_words((const u8 *) tex + f * tex->textureSize, &mode2, &nat->frameWords[texture][f])) {
+                nat->frameWords[texture][f] = mode3;
+            }
+        }
+    }
 }
 
 /** The textures' words in the mats, and which variants can be drawn. */
@@ -741,6 +802,8 @@ static __attribute__((noinline, cold)) void nat_model_resolve(const ObjectModel 
     nat->generation = sVramGeneration;
     nat->variants = 15;
     nat->lists[0] = nat->lists[1] = nat->lists[2] = nat->lists[3] = 0;
+    nat_model_frames_free(model, nat);
+    nat->frameWords = calloc(model->numberOfTextures, sizeof(*nat->frameWords));
     for (i = 0; i < nat->block->numMats; i++) {
         const NatMatInfo *info = &nat->infos[i];
         u32 mode2, mode3;
@@ -754,6 +817,7 @@ static __attribute__((noinline, cold)) void nat_model_resolve(const ObjectModel 
         }
         nat->mats[i].mode2 = (nat->mats[i].mode2 & ~(PVR_TA_PM2_USIZE_MASK | PVR_TA_PM2_VSIZE_MASK)) | mode2;
         nat->mats[i].mode3 = mode3;
+        nat_model_frames(model, nat, info->texture, mode3);
     }
     for (c = 0; c < model->numberOfBatches; c++) {
         for (v = 0; v < 4; v++) {
@@ -925,13 +989,11 @@ static __attribute__((noinline, cold)) const NatCorner *nat_envmap_corners(const
 }
 
 /** A texture's other frame: the mat with its image. */
-static __attribute__((noinline, cold)) const pvr_poly_hdr_t *nat_frame_header(const pvr_poly_hdr_t *mat, const TextureHeader *tex,
-                                                                              s32 frame, pvr_poly_hdr_t *out) {
-    u32 mode2, mode3;
-
+static __attribute__((noinline, cold)) const pvr_poly_hdr_t *nat_frame_header(const pvr_poly_hdr_t *mat, const NatModel *nat,
+                                                                              s32 texture, s32 frame, pvr_poly_hdr_t *out) {
     shz_memcpy32(out, mat, sizeof(*out));
-    if (pc_nat_texture_words((const u8 *) tex + frame * tex->textureSize, &mode2, &mode3)) {
-        out->mode3 = mode3;
+    if (nat->frameWords != NULL && nat->frameWords[texture] != NULL) {
+        out->mode3 = nat->frameWords[texture][frame];
     }
     return out;
 }
@@ -973,7 +1035,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
     const s32 overrideVerts = (rec_->a >> 10) & 1;
     const u32 glare = gDcGlareAdd;
     const s32 fade = gDcFadeOn;
-    const NatMatInfo *lastInfo = NULL;
+    u32 lastCombiner = 0xFFFFFFFFu;
     s32 i = rec_->a & 0xFF;
     s32 lastMat = -1;
     s32 fast = TRUE;
@@ -1024,10 +1086,9 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
             shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix2);
             behind |= nat_transform_vertices(&sPoints[split], &v[split], count - split, sx, sy, tx, ty, zMul);
         }
-        if (lastInfo == NULL || info->combine0 != lastInfo->combine0 || info->combine1 != lastInfo->combine1 ||
-            info->cycle != lastInfo->cycle) {
-            fast = pc_nat_classify(info->combine0, info->combine1, info->cycle, view->prim, view->env, &keep, &konst);
-            lastInfo = info;
+        if (info->combiner != lastCombiner) {
+            lastCombiner = info->combiner;
+            fast = nat_shade_by(info->combiner & NAT_CC_RULE, info->combine0, info->combine1, info->cycle, view, &keep, &konst);
         }
         for (m = 0; m < count; m++) {
             sPoints[m].argb = ((((u32) v[m].a << 24) | ((u32) v[m].r << 16) | ((u32) v[m].g << 8) | (u32) v[m].b) & keep) |
@@ -1057,7 +1118,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
                 const pvr_poly_hdr_t *hdr = &nat->mats[mat];
 
                 if (frame != 0) {
-                    hdr = nat_frame_header(hdr, model->textures[info->texture].texture, frame, &framed);
+                    hdr = nat_frame_header(hdr, nat, info->texture, frame, &framed);
                 }
                 gfx_nat_header(hdr);
                 lastMat = frame != 0 ? -1 : mat;
@@ -1087,12 +1148,41 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
 
 static NatMaterial sMaterials[NAT_MATERIALS];
 
+// A sprite's tile comes back every frame with the same table entry and texture.
+#define NAT_TILES 256
+static struct {
+    const void *entry, *tex;
+    const NatMaterial *mat;
+    u32 geometry;
+} sTiles[NAT_TILES] __attribute__((aligned(32)));
+
 void pc_nat_materials_forget(void) {
     s32 i;
 
     for (i = 0; i < NAT_MATERIALS; i++) {
         sMaterials[i].used = FALSE;
     }
+    shz_memset8(sTiles, 0, sizeof(sTiles));
+}
+
+/**
+ * A combiner's rule, for a material made up on the console: the same trial as
+ * dreamcast/build_native_meshes.py combiner_rule, under a few colours.
+ */
+static u32 nat_material_rule(u32 w0, u32 w1, u32 cycle) {
+    static const u32 sPrims[3] = { 0xFFFFFFFFu, 0x0D5A0025u, 0x00FF03FEu };
+    u32 shade = TRUE, white = TRUE;
+    s32 i;
+
+    for (i = 0; i < 3; i++) {
+        u32 keep, konst;
+
+        shade &= pc_nat_classify(w0, w1, cycle, sPrims[i], 0x09820700u, &keep, &konst) && keep == 0x00FFFFFFu &&
+                 konst == sPrims[i] << 24;
+        white &= pc_nat_classify(w0, w1, cycle, sPrims[i], 0x01020304u, &keep, &konst) && keep == 0 &&
+                 konst == (0x00FFFFFFu | (sPrims[i] << 24));
+    }
+    return shade ? NAT_CC_SHADE : white ? NAT_CC_WHITE : 0;
 }
 
 /** The list these modes draw to. */
@@ -1182,6 +1272,7 @@ static __attribute__((noinline, cold)) const NatMaterial *nat_material_compile(N
     m->combine0 = w0;
     m->combine1 = w1;
     m->cycle = omh & (3 << G_MDSFT_CYCLETYPE);
+    m->rule = nat_material_rule(w0, w1, m->cycle);
     m->otherH = omh;
     m->otherL = oml;
     m->handle = textured ? tex->handle : 0;
@@ -1339,7 +1430,7 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
         shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix2);
         behind |= nat_transform_vertices(&sPoints[numLoad], v2, numLoad2, sx, sy, tx, ty, zMul);
     }
-    fast = pc_nat_classify(mat->combine0, mat->combine1, mat->cycle, view->prim, view->env, &keep, &konst);
+    fast = nat_shade_by(mat->rule, mat->combine0, mat->combine1, mat->cycle, view, &keep, &konst);
     for (i = 0; i < numLoad; i++) {
         sPoints[i].argb = ((((u32) v[i].a << 24) | ((u32) v[i].r << 16) | ((u32) v[i].g << 8) | (u32) v[i].b) & keep) | konst;
     }
@@ -1461,10 +1552,23 @@ void pc_nat_bin_tris(NatRec *rec) {
 
 /** A sprite's material for one of its tiles. */
 static const NatMaterial *nat_sprite_material(const Gfx *entry, u32 geometry, const TextureHeader *tex) {
+    u32 at = (((u32) tex >> 5) ^ ((u32) tex >> 13) ^ ((u32) entry >> 3) ^ geometry) & (NAT_TILES - 1);
+    const NatMaterial *mat;
     NatTexture t;
 
+    if (sTiles[at].tex == tex && sTiles[at].entry == entry && sTiles[at].geometry == geometry) {
+        return sTiles[at].mat;
+    }
     pc_nat_texture_of(tex, &t);
-    return nat_material(entry[0].words.w0, entry[0].words.w1, entry[1].words.w0 & 0x00FFFFFF, entry[1].words.w1, &t, geometry);
+    mat = nat_material(entry[0].words.w0, entry[0].words.w1, entry[1].words.w0 & 0x00FFFFFF, entry[1].words.w1, &t, geometry);
+    // Not one whose texture is yet to come.
+    if (mat != NULL && mat->handle != 0) {
+        sTiles[at].tex = tex;
+        sTiles[at].entry = entry;
+        sTiles[at].geometry = geometry;
+        sTiles[at].mat = mat;
+    }
+    return mat;
 }
 
 /**
@@ -1591,8 +1695,9 @@ __attribute__((noinline)) void pc_nat_sprite_run(const NatView *view, const NatR
             continue;
         }
         zMul = mat->decal ? 1.003f : 1.0f;
-        if (!lastCombine || mat->combine0 != combine0 || mat->combine1 != combine1 || mat->cycle != cycle) {
-            fast = pc_nat_classify(mat->combine0, mat->combine1, mat->cycle, view->prim, view->env, &keep, &konst);
+        // !fast: the mux reads what classifying this one left, and a new tile's material may have run over it.
+        if (!lastCombine || !fast || mat->combine0 != combine0 || mat->combine1 != combine1 || mat->cycle != cycle) {
+            fast = nat_shade_by(mat->rule, mat->combine0, mat->combine1, mat->cycle, view, &keep, &konst);
             combine0 = mat->combine0;
             combine1 = mat->combine1;
             cycle = mat->cycle;

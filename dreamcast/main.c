@@ -2442,7 +2442,7 @@ void pc_nat_set_modes(u32 w0, u32 w1, u32 otherH, u32 otherL, u32 prim, u32 env)
     sEnvColor[3] = env;
 }
 
-DKR_NAT_CODE s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst) {
+__attribute__((noinline)) s32 pc_nat_classify(u32 w0, u32 w1, u32 cycle, u32 prim, u32 env, u32 *keep, u32 *konst) {
     pc_nat_set_modes(w0, w1, (sOtherModeH & ~(3u << G_MDSFT_CYCLETYPE)) | cycle, sOtherModeL, prim, env);
     combiner_classify();
     *keep = (sCcPass[3] ? 0xFF000000u : 0) | (sCcPass[0] ? 0x00FF0000u : 0) | (sCcPass[1] ? 0x0000FF00u : 0) |
