@@ -47,6 +47,7 @@ static s32 sCover;      // the game is drawing a cover (PC_COVER_*)
 static s32 sCoverDrawn; // and a batch of it went to the opaque list
 static s32 sCoverLayer; // covers finished this frame
 static s32 sViewBackdrop; // the next polygon is a view's gradient
+static s32 sSky;          // pc_nat_sky
 static NatRec *sRectRun; // the run of rectangles the next may join
 
 #if DKR_DEBUG_VIEW
@@ -158,7 +159,16 @@ s32 pc_nat_view_backdrop(void) {
 }
 
 s32 pc_nat_may_open(void) {
-    return (!sSeenDepth && !sBlendQueued) || sCover;
+    return (!sSeenDepth && (!sBlendQueued || sSky)) || sCover;
+}
+
+/**
+ * The sky dome is being drawn. Its pieces paint by order and none has a depth test,
+ * and a blended sun among them must not send the opaque pieces after it to the
+ * translucent list, where they came out as the level's background fill.
+ */
+void pc_nat_sky(s32 sky) {
+    sSky = sky;
 }
 
 /**
@@ -175,7 +185,7 @@ void pc_nat_bin_2d(NatRec *rec, s32 alphaTest, s32 alpha, u32 handle) {
     if (alphaTest) {
         list = NAT_LIST_PT;
         rec->place = GFX_PLACE_OVERLAY; // alpha-tested 2D, drawn after OP like TR
-    } else if (!sSeenDepth && !sBlendQueued && alpha == 0xFF && (handle == 0 || gfx_texture_opaque(handle))) {
+    } else if (!sSeenDepth && (!sBlendQueued || sSky) && alpha == 0xFF && (handle == 0 || gfx_texture_opaque(handle))) {
         list = NAT_LIST_OP;
     } else if (sCover && alpha == 0xFF && handle == 0) {
         list = NAT_LIST_OP;

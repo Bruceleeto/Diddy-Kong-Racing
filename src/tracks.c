@@ -34,6 +34,7 @@
 extern void pc_nat_level_load(s32 modelId);
 extern void pc_nat_level_free(void);
 extern s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);
+extern void pc_nat_sky(s32 sky);
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -1679,7 +1680,13 @@ void skydome_render(void) {
 
     mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
     if (gSceneRenderSkyDome) {
+#ifdef TARGET_DC
+        pc_nat_sky(TRUE);
+#endif
         render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, gSkydomeSegment);
+#ifdef TARGET_DC
+        pc_nat_sky(FALSE);
+#endif
     }
 }
 

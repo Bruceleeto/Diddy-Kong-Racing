@@ -92,6 +92,7 @@ void pc_nat_bin_tris(NatRec *rec);
 s32 pc_nat_rect_alpha(const NatRec *rec);
 void pc_nat_frame_requeue(void); // DEBUG_VIEW: the last frame's bins again
 void pc_nat_planes_forget(void);
+void pc_nat_sky(s32 sky);
 // enDjinn's renderer of a record, and what a list starts from.
 void pc_nat_item(void *data);
 void pc_nat_list_begin(pvr_list_t list);
