@@ -941,22 +941,38 @@ static __attribute__((noinline, cold)) void nat_clip_model(const NatView *view, 
     pc_nat_clip(corners, numCorners, clip, argb, cull, scaleX, scaleY, zMul, offset, textured);
 }
 
-/** A made-up batch's triangles past the near plane, one by one through the clipper. */
-static __attribute__((noinline, cold)) void nat_clip_tris(const NatView *view, const Vertex *v, s32 count, s32 split,
-                                                          const Triangle *tris, s32 numTris, const NatMaterial *mat, f32 scaleX,
-                                                          f32 scaleY, f32 zMul, u32 offset) {
-    shz_vec4_t clip[NAT_MAX_POSITIONS];
-    u32 argb[NAT_MAX_POSITIONS];
+/**
+ * A made-up batch's vertices in clip space, with the colours the frame gave them: the
+ * first load through the matrix, a second load (`v2`, wherever it is) through matrix2.
+ */
+static void nat_clip_space(const NatView *view, const Vertex *v, s32 numLoad, const Vertex *v2, s32 numLoad2,
+                           shz_vec4_t *clip, u32 *argb) {
     s32 i;
 
     shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix);
-    for (i = 0; i < count; i++) {
-        if (i == split) {
-            shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix2);
-        }
+    for (i = 0; i < numLoad; i++) {
         clip[i] = shz_xmtrx_transform_vec4(shz_vec4_init(v[i].x, v[i].y, v[i].z, 1.0f));
         argb[i] = sPoints[i].argb;
     }
+    if (numLoad2 > 0) {
+        shz_xmtrx_load_4x4((const shz_mat4x4_t *) view->matrix2);
+        for (i = 0; i < numLoad2; i++) {
+            clip[numLoad + i] = shz_xmtrx_transform_vec4(shz_vec4_init(v2[i].x, v2[i].y, v2[i].z, 1.0f));
+            argb[numLoad + i] = sPoints[numLoad + i].argb;
+        }
+    }
+}
+
+/** A made-up batch's triangles past the near plane, one by one through the clipper. */
+static __attribute__((noinline, cold)) void nat_clip_tris(const NatView *view, const Vertex *v, s32 numLoad, const Vertex *v2,
+                                                          s32 numLoad2, const Triangle *tris, s32 numTris, const NatMaterial *mat,
+                                                          f32 scaleX, f32 scaleY, f32 zMul, u32 offset) {
+    shz_vec4_t clip[NAT_MAX_POSITIONS];
+    u32 argb[NAT_MAX_POSITIONS];
+    const s32 count = numLoad + numLoad2;
+    s32 i;
+
+    nat_clip_space(view, v, numLoad, v2, numLoad2, clip, argb);
     for (i = 0; i < numTris; i++) {
         const Triangle *t = &tris[i];
         NatCorner corners[3];
@@ -1394,6 +1410,100 @@ static __attribute__((noinline, cold)) void nat_tris_layered(const NatMaterial *
 }
 
 /**
+ * The same with a corner behind the near plane: each triangle cut at the plane in clip
+ * space first, as the display-list walk cut it. Projected as they were, corners behind
+ * the eye came out mirrored, and a triangle across the plane was culled or drawn inside
+ * out: on Star City the sky dome's lower part left a wedge of background near the camera.
+ */
+static __attribute__((noinline, cold)) void nat_tris_layered_clip(const NatView *view, const NatMaterial *mat, const Vertex *v,
+                                                                   s32 numLoad, const Vertex *v2, s32 numLoad2,
+                                                                   const Triangle *tris, s32 numTris) {
+    static GfxTriVert sVerts[3 * 64] __attribute__((aligned(32)));
+    const f32 invU = mat->uMul * mat->width > 0.0f ? 1.0f / (32.0f * mat->width) : 0.0f;
+    const f32 invV = mat->vMul * mat->height > 0.0f ? 1.0f / (32.0f * mat->height) : 0.0f;
+    const s32 numVerts = numLoad + numLoad2;
+    shz_vec4_t clip[NAT_MAX_POSITIONS];
+    u32 argb[NAT_MAX_POSITIONS];
+    s32 count = 0, i, j, k;
+
+    nat_clip_space(view, v, numLoad, v2, numLoad2, clip, argb);
+    for (i = 0; i < numTris; i++) {
+        const Triangle *t = &tris[i];
+        const s32 at[3] = { t->vi0, t->vi1, t->vi2 };
+        const f32 u[3] = { t->uv0.u * invU, t->uv1.u * invU, t->uv2.u * invU };
+        const f32 vv[3] = { t->uv0.v * invV, t->uv1.v * invV, t->uv2.v * invV };
+        shz_vec4_t pc[4];
+        f32 pu[4], pv[4], px[4], py[4];
+        u32 pa[4];
+        s32 n = 0;
+
+        if (at[0] >= numVerts || at[1] >= numVerts || at[2] >= numVerts) {
+            continue;
+        }
+        for (j = 0; j < 3; j++) {
+            s32 a = at[j], b = at[(j + 1) % 3];
+            s32 ina = clip[a].w >= 1.0f, inb = clip[b].w >= 1.0f;
+
+            if (ina) {
+                pc[n] = clip[a];
+                pu[n] = u[j];
+                pv[n] = vv[j];
+                pa[n++] = argb[a];
+            }
+            if (ina != inb) {
+                f32 f = shz_divf(1.0f - clip[a].w, clip[b].w - clip[a].w);
+                s32 c;
+
+                pc[n] = shz_vec4_init(clip[a].x + ((clip[b].x - clip[a].x) * f), clip[a].y + ((clip[b].y - clip[a].y) * f),
+                                      clip[a].z + ((clip[b].z - clip[a].z) * f), clip[a].w + ((clip[b].w - clip[a].w) * f));
+                pu[n] = u[j] + ((u[(j + 1) % 3] - u[j]) * f);
+                pv[n] = vv[j] + ((vv[(j + 1) % 3] - vv[j]) * f);
+                pa[n] = 0;
+                for (c = 0; c < 32; c += 8) {
+                    f32 ca = (f32) ((argb[a] >> c) & 0xFF), cb = (f32) ((argb[b] >> c) & 0xFF);
+
+                    pa[n] |= (u32) (u8) (ca + ((cb - ca) * f)) << c;
+                }
+                n++;
+            }
+        }
+        if (n < 3) {
+            continue;
+        }
+        for (j = 0; j < n; j++) {
+            f32 inv = 1.0f / pc[j].w;
+
+            px[j] = (pc[j].x * inv * view->vpScaleX) + view->vpTransX;
+            py[j] = view->vpTransY - (pc[j].y * inv * view->vpScaleY);
+        }
+        if (!(t->flags & BACKFACE_DRAW) && ((px[1] - px[0]) * (py[2] - py[0])) - ((px[2] - px[0]) * (py[1] - py[0])) >= 0.0f) {
+            continue;
+        }
+        for (j = 1; j + 1 < n && count + 3 <= 3 * 64; j++) {
+            const s32 fan[3] = { 0, j, j + 1 };
+
+            for (k = 0; k < 3; k++) {
+                GfxTriVert *o = &sVerts[count++];
+                s32 q = fan[k];
+
+                o->x = px[q];
+                o->y = py[q];
+                o->z = 0.0f;
+                o->w = pc[q].w;
+                o->u = pu[q];
+                o->v = pv[q];
+                o->fog = 0.0f;
+                o->a = pa[q] >> 24;
+                o->r = pa[q] >> 16;
+                o->g = pa[q] >> 8;
+                o->b = pa[q];
+            }
+        }
+    }
+    pc_nat_draw_tris(mat, sVerts, count);
+}
+
+/**
  * One batch of what a frame makes up. Triangles do not share corners here (their
  * coordinates differ and the batch is short), and are culled on the CPU, so no
  * strip to break.
@@ -1449,12 +1559,16 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
         nat_colours_slow(v, numVerts, TRUE, mat->textured, TRUE);
     }
     if (!mat->depth) {
-        nat_tris_layered(mat, tris, numTris, numVerts, scaleX, scaleY);
+        if (behind) {
+            nat_tris_layered_clip(view, mat, v, numLoad, v2, numLoad2, tris, numTris);
+        } else {
+            nat_tris_layered(mat, tris, numTris, numVerts, scaleX, scaleY);
+        }
         return;
     }
     gfx_nat_header(&mat->hdr);
     if (behind) {
-        nat_clip_tris(view, v, numVerts, numLoad, tris, numTris, mat, scaleX, scaleY, zMul, offset);
+        nat_clip_tris(view, v, numLoad, v2, numLoad2, tris, numTris, mat, scaleX, scaleY, zMul, offset);
         return;
     }
     if (view->exact) {
