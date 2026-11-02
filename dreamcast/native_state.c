@@ -37,6 +37,9 @@ static struct {
     s32 list;
 } sDeferred[NAT_DEFERRED];
 static s32 sDeferredCount, sDeferring;
+// What the game had set as a deferred stretch began. On the N64 the stretch is jumped
+// over and run later, so what it sets does not hold for what the list does next.
+static NatState sDeferState;
 static s32 sIgnore;
 static s32 sOverflow;
 
@@ -477,11 +480,13 @@ void nat_fillrect(s32 ulx, s32 uly, s32 lrx, s32 lry) {
 void nat_defer_begin(void) {
     sDeferring = TRUE;
     sRectRun = NULL;
+    sDeferState = gNat;
 }
 
 void nat_defer_end(void) {
     sDeferring = FALSE;
     sRectRun = NULL;
+    gNat = sDeferState;
 }
 
 void nat_defer_flush(void) {
