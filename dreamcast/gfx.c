@@ -123,9 +123,9 @@ static DKR_HOT int sScisDirty = 1;
 // these (gfx_set_place).
 //   GFX_PLACE_NONE      as it is
 //   GFX_PLACE_BACKDROP  a blended backdrop: TR comes after the opaque scene, so
-//                       it is drawn at BACKDROP_Z with a depth compare, just in
-//                       front of the background plane (FLT_EPSILON in KOS) and
-//                       behind any real surface
+//                       it is drawn at BACKDROP_Z with a depth compare, at the
+//                       depth the frame starts from and so behind any real
+//                       surface: only where the scene has written no depth
 //   GFX_PLACE_OVERLAY   2D after the scene, in TR or PT
 //   GFX_PLACE_COVER     an opaque 2D surface over the whole scene, the screen
 //                       transitions' solid black, drawn in OP rather than TR,
@@ -138,7 +138,10 @@ static DKR_HOT int sScisDirty = 1;
 // drawn at a depth above the whole scene, with a depth test: under a frame's k-th
 // cover (k from 0), COVER_Z + 2k; the cover itself at COVER_Z + 2k + 1. The
 // scene's depth (1/w, w at least 1) is at most 1.
-#define BACKDROP_Z 1.0e-6f
+// KOS starts each tile's depth at its zclip, 0.0001 (pvr_buffers.c, the background
+// plane's distance), not at its background polygon's FLT_EPSILON: under GEQUAL a
+// backdrop any further back than that passed nowhere, and the sky's sun was never drawn.
+#define BACKDROP_Z 1.0e-4f
 #define COVER_Z 16.0f
 static DKR_HOT int sFarBackdrop;
 static DKR_HOT int sCoverDraw;   // the batch being emitted is a cover
