@@ -138,10 +138,15 @@ static DKR_HOT int sScisDirty = 1;
 // drawn at a depth above the whole scene, with a depth test: under a frame's k-th
 // cover (k from 0), COVER_Z + 2k; the cover itself at COVER_Z + 2k + 1. The
 // scene's depth (1/w, w at least 1) is at most 1.
-// KOS starts each tile's depth at its zclip, 0.0001 (pvr_buffers.c, the background
-// plane's distance), not at its background polygon's FLT_EPSILON: under GEQUAL a
-// backdrop any further back than that passed nowhere, and the sky's sun was never drawn.
-#define BACKDROP_Z 1.0e-4f
+// Each tile's depth starts at the background plane's distance (KOS's zclip), not at
+// its background polygon's FLT_EPSILON, and under GEQUAL nothing further back than
+// that is drawn: it is the far plane. KOS sets 0.0001, which cut the scene away from
+// w 10000 on, along a straight line across whatever crossed it: Frosty Village's moon
+// and the suns at about that distance. The game's far plane is CAMERA_FAR
+// (src/camera.h), and the start depth is put there (gfx_far_plane_set). A backdrop
+// goes at the start depth itself, so it shows only where the scene left the background.
+#define GFX_FAR_W 15000.0f
+#define BACKDROP_Z (1.0f / GFX_FAR_W)
 #define COVER_Z 16.0f
 static DKR_HOT int sFarBackdrop;
 static DKR_HOT int sCoverDraw;   // the batch being emitted is a cover
@@ -193,6 +198,12 @@ static DKR_HOT int sNatNoFog; // the game has G_FOG off: native headers go witho
 static DKR_HOT void* pvr_ta_sq_addr;
 
 static void gfx_frame_hooks_set(void);
+
+/** The background plane's distance, after every start of the PVR, which resets it. */
+static void gfx_far_plane_set(void) {
+    pvr_set_zclip(BACKDROP_Z);
+}
+
 static int sWindowW = 320; // the width gfx_window_init was given, for sScaleX
 
 static void header_cache_clear(void);
@@ -213,6 +224,7 @@ static void gfx_vram_lost(void *data) {
     sPendingFreeCount = 0;
     sBoundTex = 0;
     header_cache_clear();
+    gfx_far_plane_set();
     sRenderW = DC_SCREEN_W * enj_video_xscale();
     sScaleX = (float) DC_RENDER_W / (float) sWindowW;
     *((volatile unsigned int *) DKR_PT_ALPHA_REF_ADDR) = PT_ALPHA_REF_VALUE;
@@ -281,6 +293,7 @@ void gfx_window_init(int width, int height, int scale) {
         }
         enj_video_set_reset_callback(gfx_vram_lost, NULL);
         gfx_frame_hooks_set();
+        gfx_far_plane_set();
     }
     printf("gfx: 24-bit framebuffer, %d bytes of video memory free\n", (int) pvr_mem_available());
 
