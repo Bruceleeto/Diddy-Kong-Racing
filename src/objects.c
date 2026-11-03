@@ -816,6 +816,14 @@ void allocate_object_pools(void) {
                 PC_SWAP32_AT(&shield[n], scale, 8);      // scale, turnSpeed
             }
         }
+
+        // ASSET_MISC_RUMBLE_DATA: sRumbleTable in save_data.c, a strength and a
+        // duration (s16 each) per rumble type. Left big-endian a strength of 100
+        // read as 25600, whose square overflowed the s16 initialStrength to 0,
+        // so rumble_update stopped the motor on every hit.
+        pc_swap16_buf(&gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_RUMBLE_DATA]],
+                      (gAssetsMiscTable[ASSET_MISC_RUMBLE_DATA + 1] - gAssetsMiscTable[ASSET_MISC_RUMBLE_DATA]) *
+                          sizeof(s32));
     }
 #endif
     gAssetsMiscTableLength = 0;
