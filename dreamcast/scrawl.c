@@ -25,6 +25,7 @@
 #include "../build/dc/scrawl_grid.h"
 
 #include <ultra64.h>
+#include <f3ddkr.h> // gDPNoOpTag as the native renderer takes it (dreamcast/nat_gbi.h)
 
 alignas(32) static const unsigned char sScrawlTexture[] = {
 #embed "../build/dc/scrawl.dt"
@@ -88,10 +89,8 @@ static int scrawl_load(void) {
 }
 
 void pc_scrawl_after_batch(int segment, int batch, void *dl) {
-    Gfx **gfx = dl;
-
     if (segment == SCRAWL_SEGMENT && batch == SCRAWL_BATCH && pc_scene_level() == SCRAWL_LEVEL) {
-        gDPNoOpTag((*gfx)++, PC_SCRAWL_TAG);
+        gDPNoOpTag((*(Gfx **) dl)++, PC_SCRAWL_TAG);
     }
 }
 
