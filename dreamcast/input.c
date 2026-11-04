@@ -2,6 +2,7 @@
 
 #include <kos.h>
 #include <dc/maple/purupuru.h>
+#include <enDjinn/enj_ctrl.h>
 #include <enDjinn/enj_rumble.h>
 #include <enDjinn/enj_state.h>
 
@@ -31,12 +32,8 @@
 // take over that axis. Covers centering drift without eating real input.
 #define STICK_IDLE 8
 
-#if DKR_ENJ_INPUT
-#include <enDjinn/enj_ctrl.h>
-#include <enDjinn/enj_state.h>
-
-// enDjinn's controller layer (ENJ_INPUT=1): one snapshot of every port a
-// frame, taken by enDjinn's loop.
+// enDjinn's controller layer: one snapshot of every port a frame, taken by
+// enDjinn's loop, with pads found as they are plugged in and pulled out.
 extern void enj_ctrl_init_local_devices(void);
 static int sEnjInputReady;
 
@@ -53,98 +50,47 @@ void input_host_poll(void) {
 }
 
 #define HELD(s, b) (((s)->button.b) & ENJ_BUTTON_DOWN)
-#else
-void input_host_poll(void) {
-}
-#endif
 
 int input_host_read(int port, unsigned short *button, signed char *stickX, signed char *stickY) {
+    const enj_ctrlr_state_t *st;
     unsigned short buttons = 0;
     int x, y;
-    int a, b, start, ltrig, rtrig, bx, by, up, down, left, right, joyx, joyy;
 
     *button = 0;
     *stickX = 0;
     *stickY = 0;
-
-#if DKR_ENJ_INPUT
-    {
-        const enj_ctrlr_state_t *st;
-
-        if (port < 0 || port >= (int) enj_ctrl_states_length() || !sEnjInputReady) {
-            return 0;
-        }
-        st = enj_ctrl_get_states()[port];
-        if (st == NULL) {
-            return 0; // no pad plugged in - report neutral
-        }
-        a = HELD(st, A);
-        b = HELD(st, B);
-        start = HELD(st, START);
-        bx = HELD(st, X);
-        by = HELD(st, Y);
-        up = HELD(st, UP);
-        down = HELD(st, DOWN);
-        left = HELD(st, LEFT);
-        right = HELD(st, RIGHT);
-        ltrig = st->ltrigger;
-        rtrig = st->rtrigger;
-        joyx = st->joyx;
-        joyy = st->joyy;
+    if (port < 0 || port >= (int) enj_ctrl_states_length() || !sEnjInputReady) {
+        return 0;
     }
-#else
-    {
-        maple_device_t *cont;
-        cont_state_t *st;
-
-        cont = maple_enum_type(port, MAPLE_FUNC_CONTROLLER);
-        if (cont == NULL) {
-            return 0; // no pad plugged in - report neutral
-        }
-        st = (cont_state_t *) maple_dev_status(cont);
-        if (st == NULL) {
-            return 0;
-        }
-        a = (st->buttons & CONT_A) != 0;
-        b = (st->buttons & CONT_B) != 0;
-        start = (st->buttons & CONT_START) != 0;
-        bx = (st->buttons & CONT_X) != 0;
-        by = (st->buttons & CONT_Y) != 0;
-        up = (st->buttons & CONT_DPAD_UP) != 0;
-        down = (st->buttons & CONT_DPAD_DOWN) != 0;
-        left = (st->buttons & CONT_DPAD_LEFT) != 0;
-        right = (st->buttons & CONT_DPAD_RIGHT) != 0;
-        ltrig = st->ltrig;
-        rtrig = st->rtrig;
-        joyx = st->joyx;
-        joyy = st->joyy;
+    st = enj_ctrl_get_states()[port];
+    if (st == NULL) {
+        return 0; // no pad plugged in - report neutral
     }
-#endif
 
     // Face buttons and start.
-    if (a) buttons |= BTN_A;         // accelerate
-    if (b) buttons |= BTN_B;         // brake / reverse
-    if (start) buttons |= BTN_START;
+    if (HELD(st, A)) buttons |= BTN_A;         // accelerate
+    if (HELD(st, B)) buttons |= BTN_B;         // brake / reverse
+    if (HELD(st, START)) buttons |= BTN_START;
 
     // Triggers: N64 Z (fire) on the left, N64 R (hop / powerslide) on the right.
-    if (ltrig > TRIG_THRESHOLD) buttons |= BTN_Z;
-    if (rtrig > TRIG_THRESHOLD) buttons |= BTN_R;
+    if (st->ltrigger > TRIG_THRESHOLD) buttons |= BTN_Z;
+    if (st->rtrigger > TRIG_THRESHOLD) buttons |= BTN_R;
 
     // The DC pad has no C-cluster; put camera on the X/Y face buttons, and let
     // X double as the N64 L (only used in a couple of debug spots).
-    if (by) buttons |= BTN_CUP;
-    if (bx) buttons |= BTN_CDOWN | BTN_L;
+    if (HELD(st, Y)) buttons |= BTN_CUP;
+    if (HELD(st, X)) buttons |= BTN_CDOWN | BTN_L;
 
     // D-pad drives the N64 D-pad (menu navigation).
-    if (up) buttons |= BTN_UP;
-    if (down) buttons |= BTN_DOWN;
-    if (left) buttons |= BTN_LEFT;
-    if (right) buttons |= BTN_RIGHT;
+    if (HELD(st, UP)) buttons |= BTN_UP;
+    if (HELD(st, DOWN)) buttons |= BTN_DOWN;
+    if (HELD(st, LEFT)) buttons |= BTN_LEFT;
+    if (HELD(st, RIGHT)) buttons |= BTN_RIGHT;
 
-    // Analog stick: DC joyx/joyy are -128..127. Scale to the N64's -80..80, and
+    // Analog stick: enDjinn's joyx/joyy are -128..127. Scale to the N64's -80..80, and
     // flip Y — the DC reports up as negative, the N64 as positive.
-    x = (joyx * STICK_MAX) / 128;
-    y = (-joyy * STICK_MAX) / 128;
+    x = (st->joyx * STICK_MAX) / 128;
+    y = (-st->joyy * STICK_MAX) / 128;
 
     if (x < -STICK_MAX) x = -STICK_MAX;
     if (x > STICK_MAX) x = STICK_MAX;
@@ -154,12 +100,12 @@ int input_host_read(int port, unsigned short *button, signed char *stickX, signe
     // The game only reads the stick for steering/pitch, so the D-pad also
     // synthesizes full stick deflection on any axis the stick leaves idle.
     if (x > -STICK_IDLE && x < STICK_IDLE) {
-        if (left) x = -STICK_MAX;
-        if (right) x = STICK_MAX;
+        if (HELD(st, LEFT)) x = -STICK_MAX;
+        if (HELD(st, RIGHT)) x = STICK_MAX;
     }
     if (y > -STICK_IDLE && y < STICK_IDLE) {
-        if (up) y = STICK_MAX;
-        if (down) y = -STICK_MAX;
+        if (HELD(st, UP)) y = STICK_MAX;
+        if (HELD(st, DOWN)) y = -STICK_MAX;
     }
 
     *button = buttons;
@@ -188,21 +134,10 @@ static unsigned char sRumbleOn[4];      // the motor as the game last set it
 static unsigned char sRumbleHistory[4]; // one bit per frame, the newest lowest
 static unsigned char sRumbleSent[4];    // the strength sent last, 0 for stopped
 
-// The maple port that the game reads as `channel`, or -1.
+// The maple port that the game reads as `channel`, or -1: enDjinn's controller
+// states are by port, as the game's channels are.
 static int rumble_port(int channel) {
-    if (channel < 0 || channel >= 4) {
-        return -1;
-    }
-#if DKR_ENJ_INPUT
-    return channel; // enDjinn's controller states are by port
-#else
-    {
-        // The plain path reads the channel's controller by enumeration order.
-        maple_device_t *cont = maple_enum_type(channel, MAPLE_FUNC_CONTROLLER);
-
-        return cont != NULL ? cont->port : -1;
-    }
-#endif
+    return channel >= 0 && channel < 4 ? channel : -1;
 }
 
 static void rumble_init(void) {

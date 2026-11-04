@@ -326,10 +326,10 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   scene plays are counted per scene (`ASSET PLAY` with `GFX_PROFILE=1`).
   `ASSET_RESIDENT=1` loads the whole image as before; `ASSET_TRACE=1` prints
   which parts of it a run read.
-- `ENJ_INPUT=1` reads all four controller ports through enDjinn's controller
-  layer (`enj_ctrl`) instead of port 0 through KOS maple calls, and reports
-  every connected pad to the game, so two to four players can join. Off by
-  default until it has been played with.
+- The controllers are read through enDjinn's controller layer (`enj_ctrl`)
+  on all four ports, instead of port 0 through KOS maple calls, and every
+  connected pad is reported to the game, so two to four players can join.
+  This was `ENJ_INPUT=1`; the switch and the KOS path are gone.
 - `dreamcast/build.sh` builds the port from a clean clone and your ROM, after
   checking the toolchain, `pvrtex`, sh4zam and Python. A fresh clone built with
   it produces the same textures, scene bundles and AICAflow files, byte for

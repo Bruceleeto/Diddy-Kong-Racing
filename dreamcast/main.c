@@ -3108,6 +3108,8 @@ static void prof_sample_write(void) {
 #define DKR_DEBUG_VIEW 0
 #endif
 #if DKR_DEBUG_VIEW
+#include <enDjinn/enj_ctrl.h>
+
 extern void gfx_set_cutout_mode(int use1555, int bleed);
 static s32 sDebugHold;
 static s32 sDebugMode = 3;
@@ -3131,17 +3133,17 @@ static void debug_view_apply(void) {
 
 static void debug_view_poll(void) {
     static u32 sLast;
-    maple_device_t *pad = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-    cont_state_t *state = pad ? (cont_state_t *) maple_dev_status(pad) : NULL;
-    u32 buttons = (state && state->ltrig > 128 && state->rtrig > 128) ? state->buttons : 0;
+    const enj_ctrlr_state_t *pad = enj_ctrl_get_states()[0];
+    u32 buttons = (pad && pad->ltrigger > 128 && pad->rtrigger > 128) ? pad->button.raw : 0;
     u32 pressed = buttons & ~sLast;
 
+    // Two bits a button in enDjinn's raw state; the low one is held.
     sLast = buttons;
-    if (pressed & CONT_X) {
+    if (pressed & (ENJ_BUTTON_DOWN << 4)) { // X
         sDebugHold = !sDebugHold;
         printf("DEBUG VIEW: frame %s\n", sDebugHold ? "held" : "released");
     }
-    if (pressed & CONT_Y) {
+    if (pressed & (ENJ_BUTTON_DOWN << 6)) { // Y
         sDebugMode = (sDebugMode % 3) + 1;
         debug_view_apply();
     }
@@ -3535,13 +3537,6 @@ void pc_enj_loop_run(void (*frame)(void *)) {
     enj_render_post_callback_set(enj_frame_submitted, NULL);
     enj_mode_push(&sGameMode);
 #if DKR_DEBUG_MENU
-    // The port reads the controllers itself unless ENJ_INPUT=1, and the menu
-    // needs enDjinn's layer for its combination.
-    if (enj_state_get()->flags.no_input_init) {
-        extern void enj_ctrl_init_local_devices(void);
-
-        enj_ctrl_init_local_devices();
-    }
     enj_debug_menu_set(&sDebugMenu);
 #endif
     enj_state_run();

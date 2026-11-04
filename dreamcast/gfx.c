@@ -275,8 +275,8 @@ void gfx_window_init(int width, int height, int scale) {
     // fog and fades. The packed format costs 307 KB more video memory for each
     // of the two buffers than 16-bit does; RGB0888 would cost twice that.
     // enDjinn sets the video mode and starts the PVR, and can restart it to
-    // switch FSAA (pc_fsaa_set); AICAflow keeps the AICA, and the port reads the
-    // controllers itself unless ENJ_INPUT=1.
+    // switch FSAA (pc_fsaa_set) and reads the controllers; AICAflow keeps the
+    // AICA.
     {
         enj_state_t *state;
 
@@ -287,7 +287,6 @@ void gfx_window_init(int width, int height, int scale) {
         state->video.pvr_params = params;
         state->flags.soft_reset_enabled = 0;
         state->flags.no_snd_init = 1;
-        state->flags.no_input_init = !DKR_ENJ_INPUT; // ENJ_INPUT=1: enDjinn reads the pads
         if (enj_state_startup() != 0) {
             return;
         }
