@@ -171,11 +171,14 @@ int input_host_read(int port, unsigned short *button, signed char *stickX, signe
 // ---------------------------------------------------------------------------
 // Rumble. The N64 Rumble Pak has one motor, on or off; the game sets a
 // strength by switching it on for a share of the frames (src/save_data.c,
-// rumble_update). Each channel keeps which of its last eight frames had the
+// rumble_update). Each channel keeps which of its last four frames had the
 // motor on, and that share becomes the Puru Puru's strength, sent only when it
 // moves by two steps or the motor starts or stops, so maple sees changes only.
+// A start goes out at full strength at once: built up from the share, a hit
+// reached full strength only after four to eight game frames and felt late.
 // ---------------------------------------------------------------------------
 #define RUMBLE_FREQ 26 // the Puru Puru's vibration frequency setting
+#define RUMBLE_MAX 4   // the strongest fpow sent; 7 shook too hard for the game's hits
 
 extern void enj_rumble_init_local_devices(void);
 extern void enj_rumble_update(void);
@@ -237,10 +240,13 @@ void input_rumble_flush(void) {
     for (i = 0; i < 4; i++) {
         int frames, strength, port;
 
-        sRumbleHistory[i] = (unsigned char) ((sRumbleHistory[i] << 1) | sRumbleOn[i]);
+        sRumbleHistory[i] = (unsigned char) (((sRumbleHistory[i] << 1) | sRumbleOn[i]) & 0xF);
         frames = __builtin_popcount(sRumbleHistory[i]);
-        // 1..8 frames on of 8 -> fpow 1..7, none -> stopped.
-        strength = frames == 0 ? 0 : 1 + ((frames - 1) * 6 + 3) / 7;
+        // 1..4 frames on of 4 -> fpow up to RUMBLE_MAX, none -> stopped.
+        strength = (frames * RUMBLE_MAX + 2) / 4;
+        if (sRumbleOn[i] && sRumbleSent[i] == 0) {
+            strength = RUMBLE_MAX;
+        }
         if (strength == sRumbleSent[i] ||
             (strength != 0 && sRumbleSent[i] != 0 && strength - sRumbleSent[i] < 2 &&
              sRumbleSent[i] - strength < 2)) {
