@@ -233,6 +233,11 @@ void frame_interp_draw_end(void) {
     sStepped = FALSE;
 }
 
+/** The display rate changed: the next step starts from the state on screen. */
+void frame_interp_realign(void) {
+    sAhead = 0;
+}
+
 /** A scene change: nothing carries over. */
 void frame_interp_reset(void) {
     sCutsceneCamera = FALSE;

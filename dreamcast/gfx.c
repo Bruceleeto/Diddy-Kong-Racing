@@ -1708,6 +1708,7 @@ int gfx_native(const pvr_poly_hdr_t *hdr, const pvr_vertex_t *verts, int count) 
 // ---------------------------------------------------------------------------
 // FPS measurement and its on-screen readout
 // ---------------------------------------------------------------------------
+int gShowFps = DKR_SHOW_FPS;
 static float sFps = 0.0f;
 static uint64_t sLastFrameUs = 0;
 
@@ -1804,7 +1805,7 @@ void gfx_frame_queue(void) {
         return;
     }
     fps_tick();
-    if (DKR_SHOW_FPS && sFpsFont) {
+    if (gShowFps && sFpsFont) {
         enj_render_list_add(PVR_LIST_PT_POLY, fps_item, NULL);
     }
 }

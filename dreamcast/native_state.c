@@ -53,7 +53,7 @@ static s32 sViewBackdrop; // the next polygon is a view's gradient
 static s32 sSky;          // pc_nat_sky
 static NatRec *sRectRun; // the run of rectangles the next may join
 
-#if DKR_DEBUG_VIEW
+#if NAT_FRAME_REPLAY
 // The frame's bins as they were filled, to queue them again while a frame is held.
 #define NAT_REPLAY (NAT_RECORDS * 2)
 static struct {
@@ -74,7 +74,7 @@ void pc_nat_frame_reset(void) {
     sCover = sCoverDrawn = sCoverLayer = 0;
     sViewBackdrop = FALSE;
     sRectRun = NULL;
-#if DKR_DEBUG_VIEW
+#if NAT_FRAME_REPLAY
     sReplayCount = 0;
 #endif
     gNat.cur = 0;
@@ -114,7 +114,7 @@ static void nat_queue(s32 list, NatRec *rec) {
     static const pvr_list_t sLists[3] = { PVR_LIST_OP_POLY, PVR_LIST_PT_POLY, PVR_LIST_TR_POLY };
 
     enj_render_list_add(sLists[list], pc_nat_item, rec);
-#if DKR_DEBUG_VIEW
+#if NAT_FRAME_REPLAY
     if (sReplayCount < NAT_REPLAY) {
         sReplay[sReplayCount].rec = rec;
         sReplay[sReplayCount++].list = list;
@@ -200,7 +200,7 @@ void pc_nat_bin_2d(NatRec *rec, s32 alphaTest, s32 alpha, u32 handle) {
     pc_nat_bin(list, rec);
 }
 
-#if DKR_DEBUG_VIEW
+#if NAT_FRAME_REPLAY
 void pc_nat_frame_requeue(void) {
     s32 i, count = sReplayCount;
 

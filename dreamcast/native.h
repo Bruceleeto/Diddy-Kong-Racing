@@ -77,6 +77,8 @@ enum { NAT_LIST_OP, NAT_LIST_PT, NAT_LIST_TR };
 
 #define NAT_RECORDS 4096
 #define NAT_RECT_RUN 32
+// The builds that show the last frame again while the game stands still.
+#define NAT_FRAME_REPLAY (DKR_DEBUG_VIEW || DKR_DEBUG_MENU)
 NatRec *pc_nat_record(s32 kind);
 void pc_nat_frame_reset(void);
 void nat_ignore(s32 ignore);
@@ -90,7 +92,7 @@ s32 pc_nat_view_backdrop(void);
 void pc_nat_bin_2d(NatRec *rec, s32 alphaTest, s32 alpha, u32 handle);
 void pc_nat_bin_tris(NatRec *rec);
 s32 pc_nat_rect_alpha(const NatRec *rec);
-void pc_nat_frame_requeue(void); // DEBUG_VIEW: the last frame's bins again
+void pc_nat_frame_requeue(void); // NAT_FRAME_REPLAY: the last frame's bins again
 void pc_nat_planes_forget(void);
 void pc_nat_sky(s32 sky);
 // enDjinn's renderer of a record, and what a list starts from.

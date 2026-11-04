@@ -232,6 +232,7 @@ int gfx_list_translucent(void);
 int gfx_prof_list_skipped(void); // PROF_SKIP: leave the list that is open out
 void gfx_frame_queue(void);
 void gfx_frame_submitted(void);
+extern int gShowFps; // the frame rate in the corner: starts as SHOW_FPS
 // dreamcast/main.c: the frame's setup, a list's start, and the end of the last.
 void pc_frame_begin(void);
 void pc_frame_list_begin(pvr_list_t list);

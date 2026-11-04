@@ -40,6 +40,8 @@ static OSThread sHostThread;
 #define PC_LOGIC_UPDATE_RATE 2 // LOGIC_30FPS — what gVideoDeltaTime commits to
 #endif
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
+// Video fields per game frame: FRAME_FIELDS, or the debug menu's Framerate.
+static s32 sFrameFields = PC_LOGIC_UPDATE_RATE;
 
 // ---------------------------------------------------------------------------
 // Frame profile (GFX_PROFILE=1): where a frame's time goes and how much
@@ -552,12 +554,12 @@ s32 pc_retrace_wait(void) {
         vblank_handler_add(&pacer_vblank, NULL);
         sLastVbl = sPacerVbl;
         sRetraceReset = FALSE;
-        return PC_LOGIC_UPDATE_RATE;
+        return sFrameFields;
     }
     if (sRetraceReset) {
         sRetraceReset = FALSE;
         sLastVbl = sPacerVbl;
-        return PC_LOGIC_UPDATE_RATE;
+        return sFrameFields;
     }
 #if DKR_GFX_PROFILE
     {
@@ -565,7 +567,7 @@ s32 pc_retrace_wait(void) {
 #endif
         // Every vblank signals the semaphore, so none is lost between the test
         // and the wait; signals left over from busy frames just drain here.
-        while ((u32) (sPacerVbl - sLastVbl) < (u32) PC_LOGIC_UPDATE_RATE) {
+        while ((u32) (sPacerVbl - sLastVbl) < (u32) sFrameFields) {
             sem_wait(&sPacerSem);
         }
 #if DKR_GFX_PROFILE
@@ -578,10 +580,10 @@ s32 pc_retrace_wait(void) {
     if (periods > PC_MAX_UPDATE_RATE) {
         // A disc read in a menu or a paused debugger: not the game's time.
         sLastVbl = sPacerVbl;
-        return PC_LOGIC_UPDATE_RATE;
+        return sFrameFields;
     }
 #if DKR_GFX_PROFILE
-    if (periods > PC_LOGIC_UPDATE_RATE) {
+    if (periods > sFrameFields) {
         sProf.missed++;
     }
 #endif
@@ -600,12 +602,12 @@ s32 pc_retrace_wait(void) {
     if (sLastNs == 0 || sRetraceReset) {
         sRetraceReset = FALSE;
         sLastNs = nowNs;
-        return PC_LOGIC_UPDATE_RATE;
+        return sFrameFields;
     }
 
     // Sleep until this frame has covered its full committed cadence. This is
     // the stand-in for retail's blocking osRecvMesg on the vblank queue.
-    targetNs = sLastNs + (PC_LOGIC_UPDATE_RATE * PC_RETRACE_NSEC);
+    targetNs = sLastNs + (sFrameFields * PC_RETRACE_NSEC);
     if (nowNs < targetNs) {
         struct timespec req;
         req.tv_sec = (targetNs - nowNs) / 1000000000ll;
@@ -627,8 +629,8 @@ s32 pc_retrace_wait(void) {
     }
 
     periods = (s32) ((nowNs - sLastNs) / PC_RETRACE_NSEC);
-    if (periods < PC_LOGIC_UPDATE_RATE) {
-        periods = PC_LOGIC_UPDATE_RATE;
+    if (periods < sFrameFields) {
+        periods = sFrameFields;
     }
     if (periods > PC_MAX_UPDATE_RATE) {
         // Far more time went by than a frame can account for, outside a scene
@@ -637,13 +639,13 @@ s32 pc_retrace_wait(void) {
         // alone would leave the rest owed, and every following frame would run
         // at the cap until it was repaid.
         sLastNs = nowNs;
-        return PC_LOGIC_UPDATE_RATE;
+        return sFrameFields;
     }
 
 #if DKR_GFX_PROFILE
     // Counted here because only the pacer knows: a frame's own time includes
     // waiting for the PVR, so comparing it with 16.7 ms says nothing.
-    if (periods > PC_LOGIC_UPDATE_RATE) {
+    if (periods > sFrameFields) {
         sProf.missed++;
     }
 #endif
@@ -3178,19 +3180,19 @@ void pc_frame_begin(void) {
         u32 vbl = (u32) pvr_get_vbl_count();
         if (sSceneVbl != 0 && pc_scene_is_ready()) {
             u32 fields = vbl - sSceneVbl;
-            prof_sample_frame_end(fields > (u32) PC_LOGIC_UPDATE_RATE);
+            prof_sample_frame_end(fields > (u32) sFrameFields);
             sScene.frames++;
             {
                 extern s32 gMapId;
                 sScene.map = gMapId;
             }
-            if (fields > (u32) PC_LOGIC_UPDATE_RATE) {
+            if (fields > (u32) sFrameFields) {
                 u32 pvr = sLastPvrUs[0];
 
                 if (sLastPvrUs[1] > pvr) pvr = sLastPvrUs[1];
                 if (sLastPvrUs[2] > pvr) pvr = sLastPvrUs[2];
                 sScene.lateFrames++;
-                sScene.lateFields += fields - (u32) PC_LOGIC_UPDATE_RATE;
+                sScene.lateFields += fields - (u32) sFrameFields;
                 // Where a frame was lost, to find it again in a capture: time
                 // since boot, the scene, its frame, and what the frame cost.
                 pc_prof_log("LATE t=%lu ms map %ld frame %lu fields %lu cpu %lu us dl %lu us pvr %lu us fade %d\n",
@@ -3364,6 +3366,9 @@ static void shp_finish(void) {
 }
 #endif
 
+#if DKR_DEBUG_MENU
+#include <enDjinn/enj_debug_menu.h>
+#endif
 #include <enDjinn/enj_mode.h>
 #include <enDjinn/enj_render.h>
 #include <enDjinn/enj_state.h>
@@ -3458,6 +3463,65 @@ static void debug_view_frame(void *data) {
 }
 #endif
 
+#if DKR_DEBUG_MENU
+// The game does not run while the menu is open: its last draws are queued again
+// each field, under the menu.
+static const char *const sDebugOffOn[] = { "Off", "On" };
+static const char *const sDebugFrameRates[] = { "30 fps", "60 fps" };
+static int sDebugFrameRate = PC_LOGIC_UPDATE_RATE == 1;
+#if DKR_FSAA
+// In the order of dreamcast/scene_gate.c gFsaaMode.
+static const char *const sDebugFsaaModes[] = { "Off", "Always", "Curated" };
+extern int gFsaaMode;
+#endif
+
+static void debug_frame_rate_changed(enj_menu_row_t *row, void *data) {
+    extern void frame_interp_realign(void);
+
+    (void) row;
+    (void) data;
+    sFrameFields = sDebugFrameRate ? 1 : 2;
+    frame_interp_realign();
+}
+
+static enj_menu_row_t sDebugRows[] = {
+    { .name = "Framerate",
+      .help = "60 fps draws between the game's 30 Hz steps and drops to 30 on a slow frame.",
+      .type = ENJ_MENU_CHOICE,
+      .choice = { .value = &sDebugFrameRate, .labels = sDebugFrameRates, .count = 2 },
+      .on_change = debug_frame_rate_changed },
+#if DKR_FSAA
+    { .name = "FSAA",
+      .help = "From the next race or scene. Curated leaves it off on the maps too heavy for it.",
+      .type = ENJ_MENU_CHOICE,
+      .choice = { .value = &gFsaaMode, .labels = sDebugFsaaModes, .count = 3 } },
+#endif
+    { .name = "Show FPS",
+      .help = "The frame rate in the top right corner.",
+      .type = ENJ_MENU_CHOICE,
+      .choice = { .value = &gShowFps, .labels = sDebugOffOn, .count = 2 } },
+};
+
+static void debug_menu_behind(void *data) {
+    (void) data;
+    pc_nat_frame_requeue();
+    frame_queued();
+}
+
+static void debug_menu_closed(void *data) {
+    (void) data;
+    pc_retrace_reset(); // the time it was open is not game time
+}
+
+static enj_debug_menu_t sDebugMenu = {
+    .title = "Diddy Kong Racing",
+    .rows = sDebugRows,
+    .row_count = sizeof(sDebugRows) / sizeof(sDebugRows[0]),
+    .draw_behind = debug_menu_behind,
+    .on_close = debug_menu_closed,
+};
+#endif
+
 void pc_enj_loop_run(void (*frame)(void *)) {
     static enj_mode_t sGameMode;
 
@@ -3470,6 +3534,16 @@ void pc_enj_loop_run(void (*frame)(void *)) {
     strncpy(sGameMode.name, "dkr", sizeof(sGameMode.name) - 1);
     enj_render_post_callback_set(enj_frame_submitted, NULL);
     enj_mode_push(&sGameMode);
+#if DKR_DEBUG_MENU
+    // The port reads the controllers itself unless ENJ_INPUT=1, and the menu
+    // needs enDjinn's layer for its combination.
+    if (enj_state_get()->flags.no_input_init) {
+        extern void enj_ctrl_init_local_devices(void);
+
+        enj_ctrl_init_local_devices();
+    }
+    enj_debug_menu_set(&sDebugMenu);
+#endif
     enj_state_run();
 }
 
