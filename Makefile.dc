@@ -60,9 +60,9 @@ FILL_PROF ?= 0
 # it costs the PVR (codes in dreamcast/gfx.c).
 PROF_SKIP ?= 0
 # Video fields per game frame: 2 locks to 30 fps, 1 aims for 60 and drops to 30 on a slow frame.
-FRAME_FIELDS ?= 2
+FRAME_FIELDS ?= 1
 # 1 renders twice as wide and filters down (horizontal anti-aliasing).
-FSAA ?= 0
+FSAA ?= 1
 # With FSAA=1: the maps drawn without it (comma-separated level ids), switched
 # at their scene load. Measured: Whale Bay 8, Boulder Canyon 19 and Frosty
 # Village 28 had most of the late frames with FSAA, and Walrus Cove 6 had 27
@@ -82,7 +82,7 @@ FSAA_PARTICLE_NEAR_FADE ?= 50
 FSAA_PARTICLE_NEAR_CULL ?= 100
 DEBUG_VIEW ?= 0
 # 1 builds in enDjinn's debug menu: hold both triggers and press Up+X+Y.
-DEBUG_MENU ?= 0
+DEBUG_MENU ?= 1
 # Measurement only, with LEVEL_TOUR and DEMO_LEVEL: start that demo with this many players, for split screen.
 TOUR_PLAYERS ?= 1
 # 1 skips level batches whose bounding box is wholly outside the view (src/tracks.c).
