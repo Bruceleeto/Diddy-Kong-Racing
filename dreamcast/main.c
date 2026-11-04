@@ -3492,7 +3492,7 @@ static enj_menu_row_t sDebugRows[] = {
       .on_change = debug_frame_rate_changed },
 #if DKR_FSAA
     { .name = "FSAA",
-      .help = "From the next race or scene. Curated leaves it off on the maps too heavy for it.",
+      .help = "Switches at the next scene change. Curated leaves it off on the maps too heavy for it.",
       .type = ENJ_MENU_CHOICE,
       .choice = { .value = &gFsaaMode, .labels = sDebugFsaaModes, .count = 3 } },
 #endif
