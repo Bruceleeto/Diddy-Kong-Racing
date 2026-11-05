@@ -103,6 +103,13 @@ void gfx_set_fog_depth(float c0, float c1, float maxW);
 // Its headers ask for PVR_FOG_TABLE themselves; the game's own fog is off meanwhile.
 void gfx_fog_linear(unsigned int rgb, float nearW, float farW);
 
+// The fade and glare this frame's fogged scene is drawn with (dreamcast/cover.h):
+// the fog colour is scaled by keep / 255 and gets add, as the vertices do. The
+// PVR blends towards the fog colour after the vertex colour, and
+// k * lerp(c, f) + add is lerp(k * c + add, k * f + add). Set once a frame: the
+// lists turn the fade off where its rect comes, before the fog is set.
+void gfx_set_fog_fade(int keep, unsigned int add);
+
 // Texel/vertex-colour combine. `modulate` is texel * colour (3D geometry).
 // `blend` lerps from vertex colour to `color` by the texel: a combiner blending
 // a texture towards a constant, e.g. the menu's flashing text highlight.

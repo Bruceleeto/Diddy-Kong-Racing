@@ -3251,6 +3251,13 @@ void pc_frame_begin(void) {
     }
     sGlareFrame = sGlareAnnounced > 0;
     sGlareAnnounced = -1;
+    // The fogged scene lies before both rects, so its fog colour takes what its
+    // vertices take.
+    if (sGlareFrame) {
+        gfx_set_fog_fade(sGlareKeep, sGlareAdd);
+    } else {
+        gfx_set_fog_fade(sFadeKeep, sFadeAdd);
+    }
 #if DKR_GFX_PROFILE
     sScene.fadeFrames += sFadeKeep < 255 || sGlareFrame;
 #endif

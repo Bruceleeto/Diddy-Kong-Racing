@@ -130,7 +130,8 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   those frames was late. Frames the PVR alone made late fell from 35 to 14 in
   race 18 and from 21 to 1 in race 28, and late frames in race 18 from 35 to
   12-14 (two runs each, 120 s attract benchmark). The logo, swirl and title
-  scenes render about 1 ms faster on average. Fades to white still blend.
+  scenes render about 1 ms faster on average. Fades of other colours are
+  drawn the same way, with the fade's colour times its alpha added.
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.
@@ -161,6 +162,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - Racers no longer accelerate and boost harder at 60 fps.
 - Memory: three oversized buffers left the profile build without room for
   its assets.
+- Fog fades with the picture. During a fade the fog colour kept its full
+  colour, so the fogged distance did not fade with the rest; it now takes the
+  fade (and the sun glare) as the vertices do.
 
 ### Tried and removed
 

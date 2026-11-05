@@ -631,6 +631,26 @@ static unsigned int sFogLinearRgb;
 static int sFogLinearHeld; // frames the game's fog stays off for it: the table is shared
 static unsigned int sFogTableRgb = 0xFFFFFFFFu; // what the registers hold
 static float sFogTableC0, sFogTableC1, sFogTableNear, sFogTableFar;
+static int sFogFadeKeep = 255;  // gfx_set_fog_fade's, this frame
+static unsigned int sFogFadeAdd;
+
+void gfx_set_fog_fade(int keep, unsigned int add) {
+    sFogFadeKeep = keep < 0 ? 0 : keep > 255 ? 255 : keep;
+    sFogFadeAdd = sFogFadeKeep < 255 ? add & 0x00FFFFFFu : 0;
+}
+
+/** The fog colour (0xRRGGBB) as the frame's fade and glare leave it. */
+static unsigned int fog_fade_rgb(unsigned int rgb) {
+    unsigned int k = (unsigned int) sFogFadeKeep;
+
+    if (k >= 255) {
+        return rgb;
+    }
+    // Rounded as gfx_set_fade's table is.
+    rgb = ((((rgb >> 16) & 0xFF) * k + 127) / 255 << 16) | ((((rgb >> 8) & 0xFF) * k + 127) / 255 << 8) |
+          (((rgb & 0xFF) * k + 127) / 255);
+    return gfx_add_rgb(rgb, sFogFadeAdd) & 0x00FFFFFFu;
+}
 
 void gfx_set_fog(int enable, const unsigned char color[4]) {
     enable = enable != 0 && sFogLinearHeld == 0;
@@ -663,7 +683,7 @@ void gfx_set_fog_depth(float c0, float c1, float maxW) {
  */
 static void fog_registers_set(void) {
     int linear = sFogLinearFar > sFogLinearNear;
-    unsigned int rgb = gfx_fade_argb(linear ? sFogLinearRgb : sFogRgb) & 0x00FFFFFFu;
+    unsigned int rgb = fog_fade_rgb(linear ? sFogLinearRgb : sFogRgb);
     float c0 = linear ? 0.0f : sFogC0, c1 = linear ? 0.0f : sFogC1;
     float near = linear ? sFogLinearNear : 0.0f;
     float far = linear ? sFogLinearFar : sFogMaxW;
