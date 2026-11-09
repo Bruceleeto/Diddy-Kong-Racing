@@ -130,7 +130,8 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   those frames was late. Frames the PVR alone made late fell from 35 to 14 in
   race 18 and from 21 to 1 in race 28, and late frames in race 18 from 35 to
   12-14 (two runs each, 120 s attract benchmark). The logo, swirl and title
-  scenes render about 1 ms faster on average. Fades to white still blend.
+  scenes render about 1 ms faster on average. Fades of other colours are
+  drawn the same way, with the fade's colour times its alpha added.
 - Per-batch render state is cached: combiner classification, compiled polygon
   headers, texture lookups and scissor checks.
 - PVR render time fell by about a third with twiddled textures.
@@ -161,6 +162,9 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - Racers no longer accelerate and boost harder at 60 fps.
 - Memory: three oversized buffers left the profile build without room for
   its assets.
+- Fog fades with the picture. During a fade the fog colour kept its full
+  colour, so the fogged distance did not fade with the rest; it now takes the
+  fade (and the sun glare) as the vertices do.
 
 ### Tried and removed
 
@@ -326,10 +330,10 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
   scene plays are counted per scene (`ASSET PLAY` with `GFX_PROFILE=1`).
   `ASSET_RESIDENT=1` loads the whole image as before; `ASSET_TRACE=1` prints
   which parts of it a run read.
-- `ENJ_INPUT=1` reads all four controller ports through enDjinn's controller
-  layer (`enj_ctrl`) instead of port 0 through KOS maple calls, and reports
-  every connected pad to the game, so two to four players can join. Off by
-  default until it has been played with.
+- The controllers are read through enDjinn's controller layer (`enj_ctrl`)
+  on all four ports, instead of port 0 through KOS maple calls, and every
+  connected pad is reported to the game, so two to four players can join.
+  This was `ENJ_INPUT=1`; the switch and the KOS path are gone.
 - `dreamcast/build.sh` builds the port from a clean clone and your ROM, after
   checking the toolchain, `pvrtex`, sh4zam and Python. A fresh clone built with
   it produces the same textures, scene bundles and AICAflow files, byte for

@@ -816,6 +816,14 @@ void allocate_object_pools(void) {
                 PC_SWAP32_AT(&shield[n], scale, 8);      // scale, turnSpeed
             }
         }
+
+        // ASSET_MISC_RUMBLE_DATA: sRumbleTable in save_data.c, a strength and a
+        // duration (s16 each) per rumble type. Left big-endian a strength of 100
+        // read as 25600, whose square overflowed the s16 initialStrength to 0,
+        // so rumble_update stopped the motor on every hit.
+        pc_swap16_buf(&gAssetsMiscSection[gAssetsMiscTable[ASSET_MISC_RUMBLE_DATA]],
+                      (gAssetsMiscTable[ASSET_MISC_RUMBLE_DATA + 1] - gAssetsMiscTable[ASSET_MISC_RUMBLE_DATA]) *
+                          sizeof(s32));
     }
 #endif
     gAssetsMiscTableLength = 0;
@@ -3937,6 +3945,26 @@ void func_80012C30(void) {
     D_8011ADA4 = 0;
 }
 
+#ifdef NAT_DIRECT
+// The cargo drawn after everything else: a stretch of the frame's list the game
+// jumps over and calls later, which here is a stretch of its draws set aside.
+void func_80012C3C(UNUSED Gfx **dList) {
+    nat_defer_flush();
+}
+
+void func_80012C98(UNUSED Gfx **dList) {
+    if (D_8011ADA4 < 9) {
+        nat_defer_begin();
+    }
+}
+
+void func_80012CE8(UNUSED Gfx **dList) {
+    if (D_8011ADA4 < 9) {
+        nat_defer_end();
+        D_8011ADA4++;
+    }
+}
+#else
 void func_80012C3C(Gfx **dList) {
     s32 i;
     for (i = 0; i < D_8011ADA4; i++) {
@@ -3958,6 +3986,7 @@ void func_80012CE8(Gfx **dList) {
         D_8011ADA4++;
     }
 }
+#endif
 
 /**
  * Update the object stack trace, set the draw pointers, then begin rendering the object.
@@ -4535,6 +4564,10 @@ void obj_tick_anims(void) {
  * Renders every triangle batch in an objects mesh.
  * If vertOffset is true, then draw in two passes, utilising the head matrix and vertex ID offset in the batch.
  */
+#ifdef TARGET_DC
+// dreamcast/native.c; its header brings the console's own, which do not mix with these.
+extern s32 pc_nat_model_draw(ObjectModel *model, const Vertex *verts, s32 start, s32 flags, s32 overrideVerts);
+#endif
 s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s32 overrideVerts) {
     s32 i;
     s32 textureIndex;
@@ -4552,6 +4585,15 @@ s32 render_mesh(ObjectModel *objModel, Object *obj, s32 startIndex, s32 flags, s
     s32 vertOffset;
     Gfx *dList;
 
+#ifdef NAT_DIRECT
+    if (!gObjectTexAnim) {
+        // Drawn from what build_native_meshes.py compiled (dreamcast/native.c).
+        i = pc_nat_model_draw(objModel, obj->curVertData, startIndex, flags, overrideVerts);
+        if (i != -2) {
+            return i;
+        }
+    }
+#endif
     dList = gObjectCurrDisplayList;
     i = startIndex;
     endLoop = FALSE;

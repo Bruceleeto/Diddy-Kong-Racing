@@ -33,12 +33,19 @@ extern void pc_fsaa_set(int on);
 #define DKR_FSAA_OFF_MAPS -1
 #endif
 
+// Where an FSAA build uses it, from the next scene load: 0 nowhere, 1 on every
+// map, 2 on all but FSAA_OFF_MAPS. The debug menu's FSAA row sets it.
+int gFsaaMode = DKR_FSAA ? 2 : 0;
+
 static int fsaa_for_level(int level) {
     static const short off[] = { DKR_FSAA_OFF_MAPS, -1 };
     int i;
 
-    if (!DKR_FSAA) {
+    if (!DKR_FSAA || gFsaaMode == 0) {
         return 0;
+    }
+    if (gFsaaMode == 1) {
+        return 1;
     }
     for (i = 0; off[i] >= 0; i++) {
         if (off[i] == level) {

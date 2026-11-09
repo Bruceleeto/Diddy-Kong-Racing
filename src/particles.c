@@ -2637,7 +2637,8 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
                 mtx_cam_push(dList, mtx, &particle->trans, 1.0f, 0.0f);
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
                 gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount,
+                           TRIN_ENABLE_TEXTURE);
                 mtx_pop(dList);
             }
         }
@@ -2665,7 +2666,8 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
                 tempvtx = &model->vertices[temp];
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
                 gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(tempvtx), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount,
+                           TRIN_ENABLE_TEXTURE);
                 if (particle->brightness != 255) {
                     gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
                 }
@@ -2676,7 +2678,8 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
                 model = particle->model;
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
                 gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount,
+                           TRIN_ENABLE_TEXTURE);
             } else if (particle->lineCreationPhase > 0) {
                 model = particle->model;
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);

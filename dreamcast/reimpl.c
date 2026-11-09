@@ -644,8 +644,7 @@ extern s32 osSendMesg(void *mq, void *msg, s32 flags);
 s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
     s32 i;
 
-#if DKR_ENJ_INPUT
-    // Every port with a pad in it, as the PIF would report (ENJ_INPUT=1).
+    // Every port with a pad in it, as the PIF would report.
     input_host_poll();
     *bitpattern = 0;
     for (i = 0; i < PC_MAXCONTROLLERS; i++) {
@@ -662,14 +661,6 @@ s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
     *bitpattern |= 1;
     status[0].type = PC_CONT_TYPE_NORMAL;
     status[0].error = 0;
-#else
-    *bitpattern = 1; // controller in port 0 only
-    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
-        status[i].type = (i == 0) ? PC_CONT_TYPE_NORMAL : 0;
-        status[i].status = 0;
-        status[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
-    }
-#endif
     return 0;
 }
 
@@ -691,7 +682,6 @@ void osContGetReadData(PCContPad *pads) {
         pads[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
     }
 
-#if DKR_ENJ_INPUT
     input_host_poll();
     for (i = 0; i < PC_MAXCONTROLLERS; i++) {
         if (input_host_read(i, &pads[i].button, &pads[i].stick_x, &pads[i].stick_y)) {
@@ -699,9 +689,6 @@ void osContGetReadData(PCContPad *pads) {
         }
     }
     pads[0].error = 0;
-#else
-    input_host_read(0, &pads[0].button, &pads[0].stick_x, &pads[0].stick_y);
-#endif
 }
 
 // EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks, kept in RAM and saved to
