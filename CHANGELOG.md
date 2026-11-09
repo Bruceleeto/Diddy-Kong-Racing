@@ -216,6 +216,15 @@ Measured on a Dreamcast with a broadband adapter, in the attract-mode demos
 - No audio loader thread: a sound that no pack lists is loaded by the game
   thread between frames, outside any lock, instead of on a `sfx-loader`
   thread.
+- AICAflow is pinned to firmware ABI 13 with AICAforge main (d7a0a56), which
+  has `afx_bank --merge --shared` and the template sizing fix. DKR's code is
+  unchanged. Its 3,582 audio files (songs, banks, effects) build byte for byte
+  as before; the arena is 832 bytes smaller for the larger firmware. A patch
+  sent before a channel's first note now holds for that note (ABI 12), so a
+  positioned effect starts at its pan and level instead of the authored ones
+  for its first tick. All demo races on hardware: 35 late frames against 30
+  with the previous pin, game and PVR time the same, the difference in two PVR
+  bursts in Hot Top.
 
 ### Fixed
 
