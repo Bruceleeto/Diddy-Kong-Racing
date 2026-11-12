@@ -342,12 +342,40 @@ static afx_asset_t music_flow_for(uint8_t sequence) {
     return jingle_flow(sequence);
 }
 
-/* DKR owns this room recipe and can tune it in normal C code. The reduced wet
- * gain and feedback retain the N64-like space without masking the lead line. */
-static int dsp_room_upload(void) {
+/* DKR owns this room recipe and can tune it in normal C code.
+ *
+ * The prefab keeps headroom at every stage: the first allpass takes MIXS0 at
+ * a quarter, the combs take the diffused signal at a half, and the combs are
+ * mixed at a quarter and an eighth. With the wet gain of 128 used until now
+ * (Faint below), the tail came out about 33 dB below the DSP's input, too
+ * quiet to hear under the dry mix. Normal takes the first allpass's input at a
+ * half (step 5 keeps its -1/2 ratio) and the combs' at unity (step 6 of each
+ * 12-step block from 24), with the maximum wet gain: 24 dB louder, the tail
+ * about 9 dB below the input, and no stage saturates even with a full-scale
+ * 20-bit input. Strong takes the input at unity, 6 dB more, and saturates
+ * only near full scale. Levels measured on a host run of MAME's AICA DSP. */
+typedef struct {
+    int16_t wet_q8, input, combs;
+} dkr_room_level_t;
+static const dkr_room_level_t sRoomLevels[DKR_REVERB_LEVELS] = {
+    [DKR_REVERB_FAINT] = { 128, 8192, 16384 },
+    [DKR_REVERB_NORMAL] = { 512, 16384, 32760 },
+    [DKR_REVERB_STRONG] = { 512, 32760, 32760 },
+};
+int gDkrReverbLevel = DKR_REVERB_NORMAL;
+static volatile uint32_t sRoomWanted = DKR_REVERB_NORMAL;
+static uint32_t sRoomProgram; /* The level the DSP holds; 0 before the first upload. */
+
+static int dsp_room_upload(uint32_t level) {
+    const dkr_room_level_t *room = &sRoomLevels[level];
     afx_dsp_program_t program;
-    int result = afx_dsp_program_room(&program, 20480, 12288, false, 128, false);
+    int result = afx_dsp_program_room(&program, 20480, 12288, false, room->wet_q8, false);
+    if (!result) result = afx_dsp_program_coefficient(&program, 5, (int16_t)(-(room->input / 2) & ~7));
+    if (!result) result = afx_dsp_program_coefficient(&program, 6, room->input);
+    for (uint8_t comb = 0; !result && comb < 4; ++comb)
+        result = afx_dsp_program_coefficient(&program, (uint8_t)(24 + comb * 12 + 6), room->combs);
     if (!result) result = afx_dsp_scene_program(&program, sizeof(program));
+    if (!result) sRoomProgram = level;
     return result;
 }
 
@@ -751,7 +779,11 @@ int dkr_afx_init(void) {
     for (uint32_t i = 0; !result && i < DKR_AFX_JINGLE_COUNT; ++i)
         result = music_flow_load(&sJingleBank, DKR_JINGLE_CONTROL_DIR,
                                  dkr_afx_jingle_sequences[i], &sJingleFlows[i]);
-    if (!result) result = dsp_room_upload();
+    if (!result) {
+        uint32_t level = __atomic_load_n(&sRoomWanted, __ATOMIC_ACQUIRE);
+        result = dsp_room_upload(level == DKR_REVERB_OFF ? DKR_REVERB_NORMAL : level);
+        __atomic_store_n(&sRoomDirty, 1, __ATOMIC_RELEASE); /* the returns follow the level */
+    }
     if (!result) {
         afx_mem_stats_t memory;
         if (!afx_mem_stats(&memory) && memory.largest_free_block < DKR_AFX_LEVEL_MAX_BYTES)
@@ -1132,11 +1164,28 @@ void dkr_afx_scene_reverb(uint8_t enabled) {
         __atomic_store_n(&sRoomDirty, 1, __ATOMIC_RELEASE);
 }
 
-static void apply_room_control(void) {
-    if (__atomic_exchange_n(&sRoomDirty, 0, __ATOMIC_ACQ_REL) &&
-        afx_dsp_scene_returns(__atomic_load_n(&sRoomReturns, __ATOMIC_ACQUIRE)) == -AFX_BUSY) {
+void dkr_afx_reverb_level(int level) {
+    if (level < DKR_REVERB_OFF || level >= DKR_REVERB_LEVELS) return;
+    if (__atomic_exchange_n(&sRoomWanted, (uint32_t)level, __ATOMIC_ACQ_REL) != (uint32_t)level)
         __atomic_store_n(&sRoomDirty, 1, __ATOMIC_RELEASE);
+}
+
+static void apply_room_control(void) {
+    uint32_t level;
+    int result = 0;
+    if (!__atomic_exchange_n(&sRoomDirty, 0, __ATOMIC_ACQ_REL)) return;
+    level = __atomic_load_n(&sRoomWanted, __ATOMIC_ACQUIRE);
+    /* Off keeps the program that is installed and only mutes its returns. */
+    if (level != DKR_REVERB_OFF && level != sRoomProgram) {
+        result = dsp_room_upload(level);
+        if (result && result != -AFX_BUSY) {
+            printf("DKR AICAFLOW: reverb level %lu not installed (%d)\n", (unsigned long)level, result);
+            return;
+        }
     }
+    if (!result) result = afx_dsp_scene_returns(level != DKR_REVERB_OFF &&
+                                                __atomic_load_n(&sRoomReturns, __ATOMIC_ACQUIRE));
+    if (result == -AFX_BUSY) __atomic_store_n(&sRoomDirty, 1, __ATOMIC_RELEASE);
 }
 
 static void apply_controls(void) {

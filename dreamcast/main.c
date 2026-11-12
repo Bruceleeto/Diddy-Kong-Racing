@@ -3484,6 +3484,18 @@ static const char *const sDebugFsaaModes[] = { "Off", "Always", "Curated" };
 extern int gFsaaMode;
 #endif
 
+#ifdef DKR_AICAFLOW
+#include "audio_aicaflow.h"
+// In the order of DKR_REVERB_OFF..DKR_REVERB_STRONG (dreamcast/audio_aicaflow.h).
+static const char *const sDebugReverbLevels[] = { "Off", "Faint", "Normal", "Strong" };
+
+static void debug_reverb_changed(enj_menu_row_t *row, void *data) {
+    (void) row;
+    (void) data;
+    dkr_afx_reverb_level(gDkrReverbLevel);
+}
+#endif
+
 static void debug_frame_rate_changed(enj_menu_row_t *row, void *data) {
     extern void frame_interp_realign(void);
 
@@ -3509,6 +3521,13 @@ static enj_menu_row_t sDebugRows[] = {
       .help = "The frame rate in the top right corner.",
       .type = ENJ_MENU_CHOICE,
       .choice = { .value = &gShowFps, .labels = sDebugOffOn, .count = 2 } },
+#ifdef DKR_AICAFLOW
+    { .name = "Reverb",
+      .help = "The room reverb on music and sounds. Faint is the old level; Strong can saturate on very loud passages.",
+      .type = ENJ_MENU_CHOICE,
+      .choice = { .value = &gDkrReverbLevel, .labels = sDebugReverbLevels, .count = DKR_REVERB_LEVELS },
+      .on_change = debug_reverb_changed },
+#endif
 };
 
 static void debug_menu_behind(void *data) {
