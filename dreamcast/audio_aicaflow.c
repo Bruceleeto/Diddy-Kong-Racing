@@ -1315,6 +1315,22 @@ static uint16_t panned_direct(uint16_t base, unsigned pan) {
     return (uint16_t)((base & ~31u) | (steps >= 0 ? steps : (0x10 | -steps)));
 }
 
+/* libultra's fxMix is an equal-power crossfade: the wet amount is
+ * eqpower[127 - fx] = sin(pi/2 * fx/127) (libultra/src/audio/env.c). This is
+ * that amount rounded to AICA's 3 dB IMXL steps (15 = 0 dB, 1 = -42 dB,
+ * 0 = off), with any nonzero fx kept at 1 or above. AICAforge's afx_n64 maps
+ * the music's CC 91 with the same curve. */
+static const uint8_t sN64FxImxl[128] = {
+     0,  2,  4,  5,  6,  7,  7,  8,  8,  9,  9,  9,  9, 10, 10, 10,
+    10, 10, 11, 11, 11, 11, 11, 11, 11, 12, 12, 12, 12, 12, 12, 12,
+    12, 12, 12, 12, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13,
+    13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14,
+    14, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+    15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15, 15,
+};
+
 static void apply_sfx_controls(dkr_sfx_slot_t *slot) {
     uint32_t dirty = slot->dirty;
     uint32_t channel;
@@ -1338,7 +1354,7 @@ static void apply_sfx_controls(dkr_sfx_slot_t *slot) {
             if (fx > 127) fx = 127;
             mask |= 1u << AFX_FIELD_DSP_SEND;
             values[count++] = (uint16_t)((setup[AFX_FIELD_DSP_SEND] & ~0xf0u) |
-                                         ((fx * 15u + 63u) / 127u) << 4);
+                                         sN64FxImxl[fx] << 4);
         }
         if (dirty & DKR_SFX_DIRTY_PAN) {
             mask |= 1u << AFX_FIELD_DIRECT;
