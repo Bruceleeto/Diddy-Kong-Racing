@@ -20,6 +20,13 @@ Gfx dDialogueBoxBegin[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dDialogueBoxBegin_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+}
+#endif
+
 Gfx dDialogueBoxDrawModes[][2] = {
     {
         gsDPSetCombineMode(G_CC_BLENDT_ENV_ALPHA_A_TxP, G_CC_BLENDT_ENV_ALPHA_A_TxP),
@@ -522,7 +529,7 @@ void render_text_string(Gfx **dList, DialogueBoxBackground *box, char *text, Ali
                     textureUly = 0;
                 }
                 gSPTextureRectangle((*dList)++, textureUlx, textureUly, textureLrx, newTempY, 0, textureS, textureT,
-                                    1 << 10, 1 << 10);
+                                        1 << 10, 1 << 10);
                 if (lastTextureIndex) {} // Fakematch
             }
             if (gCompactKerning && charSpace) {
@@ -1626,7 +1633,9 @@ s32 func_800C7744_C8344(Gfx **dList, u16 charIndex, s32 *outLeft, s32 *outTop, s
 
     index = func_800C68CC_C74CC(charIndex);
     if (index >= 0) {
+#ifndef NAT_DIRECT // the Japanese font, which this version does not reach
         gSPDisplayList((*dList)++, (*D_8012C2BC_EE5FC)[index].dList);
+#endif
         jpChar = D_8012C2C0_EE600[index];
         *outLeft = jpChar->left;
         *outTop = jpChar->top;

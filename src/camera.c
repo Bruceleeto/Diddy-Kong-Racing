@@ -1066,6 +1066,10 @@ void cam_set_sprite_anim_mode(s32 setting) {
  *
  * For regular sprites, it sets up a standard billboard that always faces the camera.
  */
+#ifdef NAT_DIRECT
+extern s32 pc_nat_sprite(const Sprite *sprite, s32 frame, s32 flags, const Mtx *billboard);
+#endif
+
 s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, Sprite *sprite, s32 flags) {
     f32 diffX;
     f32 diffY;
@@ -1201,6 +1205,15 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         flags |= RENDER_ANTI_ALIASING;
     }
 
+#ifdef NAT_DIRECT
+    // Drawn from the sprite directly (dreamcast/native.c).
+    if (!(flags & RENDER_Z_UPDATE)) {
+        gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
+    }
+    pc_nat_sprite(sprite, frameID, sprite->drawFlags |
+                  (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT | RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)),
+                  gModelMatrix[gModelMatrixStackPos]);
+#else
     // Load material and set render flags including fog, transparency, z-compare, and anti-aliasing
     material_load_simple(dList, sprite->drawFlags | (flags & (RENDER_FOG_ACTIVE | RENDER_SEMI_TRANSPARENT |
                                                               RENDER_Z_COMPARE | RENDER_ANTI_ALIASING)));
@@ -1209,6 +1222,7 @@ s32 render_sprite_billboard(Gfx **dList, Mtx **mtx, Vertex **vtx, Object *obj, S
         gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
     }
     gSPDisplayList((*dList)++, sprite->frames[frameID]);
+#endif
 
     // Pop the model matrix stack and select the appropriate matrix index for rendering
     gModelMatrixStackPos--;
@@ -1281,11 +1295,17 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
     if (gSpriteAnimMode == SPRITE_ANIM_NORMALIZED) {
         index = (((u8) index) * sprite->numberOfFrames) >> 8;
     }
+#ifndef NAT_DIRECT
     material_load_simple(dList, sprite->drawFlags | flags);
+#endif
     if (index >= sprite->numberOfFrames) {
         index = sprite->numberOfFrames - 1;
     }
+#ifdef NAT_DIRECT
+    pc_nat_sprite(sprite, index, sprite->drawFlags | flags, gModelMatrix[gModelMatrixStackPos]);
+#else
     gSPDisplayList((*dList)++, sprite->frames[index]);
+#endif
     if (--gModelMatrixStackPos == 0) {
         index = G_MTX_DKR_INDEX_0;
     } else {
@@ -1299,6 +1319,12 @@ void render_ortho_triangle_image(Gfx **dList, Mtx **mtx, Vertex **vtx, ObjectSeg
  * Generate a matrix with rotation, scaling and shearing and run it.
  * Used for wavy type effects like the shield.
  */
+#ifdef TARGET_DC
+// GCC 15 crashes in this function's register allocation (gen_reg_rtx during
+// reload, under LTO) in some builds, toggled by unrelated header changes. It
+// only draws the shield and magnet effects, so it does without -O3.
+__attribute__((optimize("O1"), noinline))
+#endif
 void mtx_shear_push(Gfx **dList, Mtx **mtx, Object *obj, Object *objBase, f32 shear) {
     UNUSED s32 pad;
     f32 cossf_x_arg2;

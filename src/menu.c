@@ -1605,6 +1605,15 @@ Gfx dCreditsFade[11] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dCreditsFade_nat(void) {
+    gDPSetCycleType(0, G_CYC_1CYCLE);
+    gDPSetTextureFilter(0, G_TF_BILERP);
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gDPSetRenderMode(0, G_RM_CLD_SURF, G_RM_CLD_SURF2);
+}
+#endif
+
 s16 gCreditsObjectIndices[12] = {
     0x0032, 0x0033, 0x0034, 0x0035, 0x0036, 0x0037, 0x0038, 0x0039, 0x003A, 0x003B, -1, 0
 };
@@ -1882,6 +1891,13 @@ Gfx dMenuHudSettings[] = {
     gsSPClearGeometryMode(G_ZBUFFER | G_FOG),
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dMenuHudSettings_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+}
+#endif
 
 Gfx dMenuHudDrawModes[][2] = {
     {
@@ -2319,7 +2335,7 @@ void func_80080580(Gfx **dList, s32 startX, s32 startY, s32 width, s32 height, s
     }
     if (dList != NULL) {
         gMenuGeometry[gWoodPanelCount].unk18[gMenuTrisFlip] = 1;
-        gSPDisplayList((*dList)++, &dMenuHudSettings);
+        gSPDisplayList((*dList)++, dMenuHudSettings);
         if (tex != NULL) {
             gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(&dMenuHudDrawModes[1]), 2);
             gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(tex->cmd), tex->numberOfCommands);
@@ -2345,7 +2361,7 @@ void func_80080BC8(Gfx **dList) {
     TextureHeader *tex;
     TextureHeader *lastTex;
 
-    gSPDisplayList((*dList)++, &dMenuHudSettings);
+    gSPDisplayList((*dList)++, dMenuHudSettings);
     var_t0 = -1;
     lastTex = NULL;
 
@@ -2402,7 +2418,7 @@ void func_80080E90(Gfx **dList, s32 startX, s32 startY, s32 width, s32 height, s
     s32 j;
     s32 index;
 
-    gSPDisplayList((*dList)++, &dMenuHudSettings);
+    gSPDisplayList((*dList)++, dMenuHudSettings);
     gDkrDmaDisplayList((*dList)++, OS_K0_TO_PHYSICAL(&dMenuHudDrawModes[2]), 2);
 
     // Must be a while loop to match.
@@ -3354,9 +3370,47 @@ void func_80083098(f32 updateRateF) {
  * Load the title textures and reset player allocation.
  * Set the current level and demo.
  */
-#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+#if defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR
 /**
- * DEMO_RACES_ONLY: the demo after the one at `index`, wrapping round, passing
+ * LEVEL_TOUR: the attract loop plays every level instead of the ROM's demos,
+ * each for the demos' 25 s with only computer racers, to measure the whole
+ * game's frame times in one run. Same layout as the ROM's table.
+ */
+#define TOUR_LEVEL(id) id, -2, 100
+static s8 sLevelTourIds[] = {
+    ASSET_LEVEL_TITLESCREENSEQUENCE, 0, 0,
+    // Dino Domain, Sherbet Island, Snowflake Mountain, Dragon Forest, Future Fun Land
+    TOUR_LEVEL(ASSET_LEVEL_ANCIENTLAKE), TOUR_LEVEL(ASSET_LEVEL_FOSSILCANYON),
+    TOUR_LEVEL(ASSET_LEVEL_JUNGLEFALLS), TOUR_LEVEL(ASSET_LEVEL_HOTTOPVOLCANO),
+    TOUR_LEVEL(ASSET_LEVEL_WHALEBAY), TOUR_LEVEL(ASSET_LEVEL_PIRATELAGOON),
+    TOUR_LEVEL(ASSET_LEVEL_CRESCENTISLAND), TOUR_LEVEL(ASSET_LEVEL_TREASURECAVES),
+    TOUR_LEVEL(ASSET_LEVEL_EVERFROSTPEAK), TOUR_LEVEL(ASSET_LEVEL_WALRUSCOVE),
+    TOUR_LEVEL(ASSET_LEVEL_SNOWBALLVALLEY), TOUR_LEVEL(ASSET_LEVEL_FROSTYVILLAGE),
+    TOUR_LEVEL(ASSET_LEVEL_BOULDERCANYON), TOUR_LEVEL(ASSET_LEVEL_GREENWOODVILLAGE),
+    TOUR_LEVEL(ASSET_LEVEL_WINDMILLPLAINS), TOUR_LEVEL(ASSET_LEVEL_HAUNTEDWOODS),
+    TOUR_LEVEL(ASSET_LEVEL_SPACEDUSTALLEY), TOUR_LEVEL(ASSET_LEVEL_DARKMOONCAVERNS),
+    TOUR_LEVEL(ASSET_LEVEL_SPACEPORTALPHA), TOUR_LEVEL(ASSET_LEVEL_STARCITY),
+    // Battle arenas
+    TOUR_LEVEL(ASSET_LEVEL_FIREMOUNTAIN), TOUR_LEVEL(ASSET_LEVEL_ICICLEPYRAMID),
+    TOUR_LEVEL(ASSET_LEVEL_DARKWATERBEACH), TOUR_LEVEL(ASSET_LEVEL_SMOKEYCASTLE),
+    // Hubs
+    TOUR_LEVEL(ASSET_LEVEL_CENTRALAREAHUB), TOUR_LEVEL(ASSET_LEVEL_DINODOMAINHUB),
+    TOUR_LEVEL(ASSET_LEVEL_SHERBETISLANDHUB), TOUR_LEVEL(ASSET_LEVEL_SNOWFLAKEMOUNTAINHUB),
+    TOUR_LEVEL(ASSET_LEVEL_DRAGONFORESTHUB), TOUR_LEVEL(ASSET_LEVEL_FUTUREFUNLANDHUB),
+    // Bosses
+    TOUR_LEVEL(ASSET_LEVEL_TRICKYTOPS1), TOUR_LEVEL(ASSET_LEVEL_BLUEY1),
+    TOUR_LEVEL(ASSET_LEVEL_BUBBLER1), TOUR_LEVEL(ASSET_LEVEL_SMOKEY1),
+    TOUR_LEVEL(ASSET_LEVEL_WIZPIG1), TOUR_LEVEL(ASSET_LEVEL_TRICKYTOPS2),
+    TOUR_LEVEL(ASSET_LEVEL_BLUEY2), TOUR_LEVEL(ASSET_LEVEL_BUBBLER2),
+    TOUR_LEVEL(ASSET_LEVEL_SMOKEY2), TOUR_LEVEL(ASSET_LEVEL_WIZPIG2),
+    -1,
+};
+#undef TOUR_LEVEL
+#endif
+
+#if (defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY) || (defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR)
+/**
+ * DEMO_RACES_ONLY or LEVEL_TOUR: the demo after the one at `index`, wrapping round, passing
  * over the title sequence, so after its first showing only the races play.
  */
 static s32 title_demo_after(s32 index) {
@@ -3383,7 +3437,7 @@ void menu_prefetch_next_title_demo_music(void) {
     s32 count;
 
     if (!sTitleScreenDemoIds) return;
-#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+#if (defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY) || (defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR)
     index = title_demo_after(gTitleDemoIndex);
     demo = &sTitleScreenDemoIds[index];
 #else
@@ -3443,6 +3497,9 @@ void menu_title_screen_init(void) {
     set_time_trial_enabled(FALSE);
     gTitleDemoIndex = 0;
     sTitleScreenDemoIds = (s8 *) get_misc_asset(ASSET_MISC_TITLE_SCREEN_DEMO_IDS);
+#if defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR
+    sTitleScreenDemoIds = sLevelTourIds;
+#endif
 #if defined(DKR_DEMO_LEVEL) && DKR_DEMO_LEVEL >= 0
     // Measurement builds (DEMO_LEVEL=n): start the attract loop at that level's
     // demo instead of waiting minutes for it to come round.
@@ -3463,6 +3520,9 @@ void menu_title_screen_init(void) {
         numberOfPlayers = 0;
         gTitleDemoTimer = 600;
     }
+#if defined(DKR_TOUR_PLAYERS) && DKR_TOUR_PLAYERS > 1
+    numberOfPlayers = DKR_TOUR_PLAYERS - 1; // measurement only: split screen, which no demo shows
+#endif
     load_level_for_menu(sTitleScreenDemoIds[gTitleDemoIndex + DEMO_LEVEL_ID], numberOfPlayers,
                         sTitleScreenDemoIds[gTitleDemoIndex + DEMO_CUTSCENE_ID]);
     menu_prefetch_next_title_demo_music();
@@ -3567,7 +3627,7 @@ s32 menu_title_screen_loop(s32 updateRate) {
     }
     if (gMenuDelay == 0 && (func_800214C4() || sp28)) {
         if (gTitleDemoTimer) {} // Fakematch
-#if defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY
+#if (defined(DKR_DEMO_RACES_ONLY) && DKR_DEMO_RACES_ONLY) || (defined(DKR_LEVEL_TOUR) && DKR_LEVEL_TOUR)
         gTitleDemoIndex = title_demo_after(gTitleDemoIndex);
         demo = &sTitleScreenDemoIds[gTitleDemoIndex];
 #else
@@ -6797,6 +6857,12 @@ void cheatmenu_checksum(void) {
     s32 i;
     u8 *tempBuffer;
 
+#ifdef TARGET_DC
+    // There is no ROM image to sum on the Dreamcast: __ROM_END is a stand-in
+    // variable (dreamcast/reimpl.c), and its address would make the loop below
+    // copy tens of megabytes.
+    calculated = TRUE;
+#endif
     if (!calculated) {
         numBytes = 0x1000;
         size = 0x5000;
@@ -6825,7 +6891,11 @@ void cheatmenu_checksum(void) {
 
     set_render_printf_background_colour(0, 0, 0, 128);
     set_render_printf_position(32, 136);
+#ifdef TARGET_DC
+    numLeft = 0;
+#else
     numLeft = (s32) &__ROM_END;
+#endif
     render_printf("ROM checksum %08X,%d\n", cksum, numLeft);
 }
 

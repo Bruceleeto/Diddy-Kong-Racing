@@ -1,0 +1,33 @@
+# The display-list walk's hot functions at fixed I-cache slots (HOTLAYOUT=1, Makefile.dc), for
+# sh4-hotlayout (tools/hotlayout.py in SHP_ROOT). The list is ranked by the walk's samples in a 300 s
+# attract run (SHP=1); derive sets offsets and slots from such a profile.
+@base 0x8c010000
+@first *_kos_startup.o(.text)
+@slack 32
+@group walk text section=1 optimise
+group	name	pattern	offset	slot	bytes	ms	contexts
+walk	cc_prog_sync	-	0x00100	0x0260	556	0.0394	-
+walk	compile_header_uncached	*(.text.unlikely.compile_header_uncached)	0x00360	0x01c0	408	0.0463	-
+walk	project	-	0x00520	0x0200	460	0.0219	-
+walk	emit_triangle	-	0x00720	0x0980	2380	0.0253	-
+walk	blast_render	-	0x010a0	0x0b00	2756	1.7510	-
+walk	blast_clip_corners	-	0x01ba0	0x0120	244	0.0829	-
+walk	gfx_blast_begin	-	0x01cc0	0x0520	1272	0.2320	-
+walk	blast_clip_tri	-	0x021e0	0x0660	1588	0.2568	-
+walk	texture_lookup	-	0x02840	0x03a0	876	0.1969	-
+walk	compile_header_for	-	0x02be0	0x0140	288	0.1303	-
+walk	project_geom	-	0x02d20	0x00e0	192	0.0658	-
+walk	combiner_eval_lit	-	0x02e00	0x01c0	392	0.3184	-
+walk	handle_vertex	-	0x02fc0	0x01a0	372	0.1069	-
+walk	gfx_draw_tris	-	0x03160	0x0960	2356	0.0791	-
+walk	combiner_classify	-	0x03ac0	0x03c0	904	0.1083	-
+walk	handle_polygon	-	0x03e80	0x08a0	2164	0.1689	-
+walk	emit_vert	-	0x04720	0x02c0	656	0.1582	-
+walk	apply_render_mode	-	0x049e0	0x01a0	384	0.0693	-
+walk	combiner_eval	-	0x04b80	0x0300	728	0.0637	-
+walk	cc_compile_cycle	-	0x04e80	0x08e0	2236	0.0541	-
+walk	handle_texrect	-	0x05760	0x03c0	928	0.0762	-
+walk	run_dl	-	0x05b20	0x08a0	2172	0.6493	-
+walk	blast_color_mux	-	0x063c0	0x0080	96	0.0468	-
+walk	pvr_poly_compile	-	0x06440	0x0260	572	0.0512	-
+walk	handle_tag	-	0x066a0	0x0ae0	2732	0.0409	-

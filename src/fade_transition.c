@@ -42,6 +42,15 @@ Gfx dTransitionFadeSettings[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dTransitionFadeSettings_nat(void) {
+    gDPSetCycleType(0, G_CYC_1CYCLE);
+    gDPSetTextureFilter(0, G_TF_BILERP);
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gDPSetRenderMode(0, G_RM_CLD_SURF, G_RM_CLD_SURF2);
+}
+#endif
+
 Vec2s gTransitionBarnHorizontalCoords[14] = {
     { { { -480, 120 } } },  { { { -320, 120 } } },  { { { -160, 120 } } }, { { { 0, 120 } } },
     { { { 160, 120 } } },   { { { 320, 120 } } },   { { { 480, 120 } } },  { { { -480, -120 } } },
@@ -153,6 +162,14 @@ Gfx dTransitionShapeSettings[] = {
     gsDPSetOtherMode(DKR_OMH_1CYC_POINT, DKR_OML_COMMON | G_RM_CLD_SURF | G_RM_CLD_SURF2),
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dTransitionShapeSettings_nat(void) {
+    gSPClearGeometryMode(0, G_FOG);
+    gDPSetCombineMode(0, G_CC_SHADE, G_CC_SHADE);
+    gDPSetOtherMode(0, DKR_OMH_1CYC_POINT, DKR_OML_COMMON | G_RM_CLD_SURF | G_RM_CLD_SURF2);
+}
+#endif
 
 /*******************************/
 
@@ -447,9 +464,7 @@ void transition_render_fullscreen(Gfx **dList, UNUSED Mtx **mtx, UNUSED Vertex *
     gDPSetCombineMode((*dList)++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
 #ifdef TARGET_DC
     // See dreamcast/cover.h.
-    if (gCurFadeRed == 0 && gCurFadeGreen == 0 && gCurFadeBlue == 0) {
-        pc_fade_announce(gCurFadeAlpha);
-    }
+    pc_fade_announce(gCurFadeRed, gCurFadeGreen, gCurFadeBlue, gCurFadeAlpha);
     gDPNoOpTag((*dList)++, PC_FADE_BEGIN_TAG);
 #endif
     gDPFillRectangle((*dList)++, 0, 0, screenSize & 0x3FF, (screenSize >> 16) & 0x3FF);

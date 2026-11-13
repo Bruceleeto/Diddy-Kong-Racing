@@ -18,10 +18,12 @@ It checks what it needs first: a KallistiOS toolchain, KOS's `pvrtex` utility
 `make setup`, `make extract`, `make build_assets` and `make -f Makefile.dc`,
 and leaves `bin/dkracing.elf` (and `bin/dkracing.cdi`).
 
-Arguments after `--cdi` go to `make -f Makefile.dc`. The build we test and
-record with runs at 60 fps with anti-aliasing:
-
-`dreamcast/build.sh --cdi FSAA=1 FRAME_FIELDS=1`
+Arguments after `--cdi` go to `make -f Makefile.dc`. By default the game runs
+at 60 fps with anti-aliasing (FSAA), left off on the few maps too heavy for it,
+and has enDjinn's debug menu: hold both triggers and press Up, X and Y. The
+menu switches the frame rate, FSAA (from the next race or scene) and the frame
+rate readout. `FRAME_FIELDS=2` locks the game to 30 fps, `FSAA=0` builds
+without anti-aliasing and `DEBUG_MENU=0` without the menu.
 
 Other options (all in `Makefile.dc`): `SHOW_FPS=0` hides the frame rate in the
 corner, `DEMO_RACES_ONLY=1` shows the title sequence once and then only the

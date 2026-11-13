@@ -15,6 +15,9 @@
 #include "camera.h"
 #include "objects.h"
 
+#include <math.h>
+#include <sh4zam/shz_sh4zam.h>
+
 #define INTERP_MAX_OBJECTS 512 // OBJECT_SLOT_COUNT in src/objects.c
 // A larger move in one step is a respawn, warp or camera cut, not motion.
 #define INTERP_MAX_MOVE 400.0f
@@ -135,25 +138,51 @@ void frame_interp_skipped(void) {
     }
 }
 
-static s32 interp_transform(ObjectTransform *now, const ObjectTransform *before, f32 alpha) {
-    f32 dx = now->x_position - before->x_position;
-    f32 dy = now->y_position - before->y_position;
-    f32 dz = now->z_position - before->z_position;
+#define INTERP_RAD_TO_ANGLE (32768.0f / SHZ_F_PI) // radians to 16-bit binary angle units
 
-    if ((dx * dx) + (dy * dy) + (dz * dz) > INTERP_MAX_MOVE * INTERP_MAX_MOVE) {
+/**
+ * The rotation part-way between two. Angles wrap, so each axis goes the short
+ * way round. When only one axis turns that is exact; when several do, stepping
+ * each angle on its own is not the rotation in between, so the two orientations
+ * are slerped and the angles taken back out in the order the transform applies
+ * them: Y, then X, then Z (xmtrx_init_transform, shz_xmtrx_init_rotation_yxz).
+ */
+static void interp_rotation(Vec3s *now, const Vec3s *before, f32 alpha) {
+    s16 dy = (s16) (now->y_rotation - before->y_rotation);
+    s16 dx = (s16) (now->x_rotation - before->x_rotation);
+    s16 dz = (s16) (now->z_rotation - before->z_rotation);
+    shz_quat_t q;
+    f32 sinX;
+
+    if ((dy != 0) + (dx != 0) + (dz != 0) < 2) {
+        now->y_rotation = before->y_rotation + (s16) (dy * alpha);
+        now->x_rotation = before->x_rotation + (s16) (dx * alpha);
+        now->z_rotation = before->z_rotation + (s16) (dz * alpha);
+        return;
+    }
+    q = shz_quat_slerp(shz_quat_from_rotation_yxz_u16(before->y_rotation, before->x_rotation, before->z_rotation),
+                       shz_quat_from_rotation_yxz_u16(now->y_rotation, now->x_rotation, now->z_rotation), alpha);
+    sinX = shz_clampf(2.0f * (q.w * q.x - q.y * q.z), -1.0f, 1.0f);
+    now->x_rotation = (s16) (s32) (asinf(sinX) * INTERP_RAD_TO_ANGLE);
+    now->y_rotation = (s16) (s32) (atan2f(2.0f * (q.x * q.z + q.w * q.y), 1.0f - 2.0f * (q.x * q.x + q.y * q.y)) *
+                             INTERP_RAD_TO_ANGLE);
+    now->z_rotation = (s16) (s32) (atan2f(2.0f * (q.x * q.y + q.w * q.z), 1.0f - 2.0f * (q.x * q.x + q.z * q.z)) *
+                             INTERP_RAD_TO_ANGLE);
+}
+
+static s32 interp_transform(ObjectTransform *now, const ObjectTransform *before, f32 alpha) {
+    shz_vec3_t from = shz_vec3_init(before->x_position, before->y_position, before->z_position);
+    shz_vec3_t to = shz_vec3_init(now->x_position, now->y_position, now->z_position);
+
+    if (shz_vec3_distance_sqr(from, to) > INTERP_MAX_MOVE * INTERP_MAX_MOVE) {
         return FALSE;
     }
-    now->x_position = before->x_position + (dx * alpha);
-    now->y_position = before->y_position + (dy * alpha);
-    now->z_position = before->z_position + (dz * alpha);
-    now->scale = before->scale + ((now->scale - before->scale) * alpha);
-    // Angles wrap, so go the short way round.
-    now->rotation.y_rotation = before->rotation.y_rotation +
-                               (s16) ((s16) (now->rotation.y_rotation - before->rotation.y_rotation) * alpha);
-    now->rotation.x_rotation = before->rotation.x_rotation +
-                               (s16) ((s16) (now->rotation.x_rotation - before->rotation.x_rotation) * alpha);
-    now->rotation.z_rotation = before->rotation.z_rotation +
-                               (s16) ((s16) (now->rotation.z_rotation - before->rotation.z_rotation) * alpha);
+    shz_vec3_t pos = shz_vec3_lerp(from, to, alpha);
+    now->x_position = pos.x;
+    now->y_position = pos.y;
+    now->z_position = pos.z;
+    now->scale = shz_lerpf(before->scale, now->scale, alpha);
+    interp_rotation(&now->rotation, &before->rotation, alpha);
     return TRUE;
 }
 
@@ -202,6 +231,11 @@ void frame_interp_draw_end(void) {
     }
     sDisplaced = FALSE;
     sStepped = FALSE;
+}
+
+/** The display rate changed: the next step starts from the state on screen. */
+void frame_interp_realign(void) {
+    sAhead = 0;
 }
 
 /** A scene change: nothing carries over. */

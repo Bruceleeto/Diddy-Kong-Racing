@@ -105,6 +105,9 @@ _Static_assert(__builtin_offsetof(ObjectModel, collisionSpheresSize) == 0x20, "O
 _Static_assert(__builtin_offsetof(ObjectModel, batches) == 0x38, "ObjectModel layout drifted from N64");
 _Static_assert(__builtin_offsetof(ObjectModel, animatedVertexIndices) == 0x4C, "ObjectModel layout drifted from N64");
 
+extern void pc_nat_model_load(ObjectModel *model, s32 modelId);
+extern void pc_nat_model_free(ObjectModel *model);
+
 static void pc_swap_object_model(ObjectModel *mdl) {
     s32 i;
 
@@ -249,6 +252,9 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
     objMdl->collisionSpheres = (s16 *) ((s32) objMdl->collisionSpheres + (u8 *) objMdl);
     objMdl->animatedVertexIndices = (s32 *) ((s32) objMdl->animatedVertexIndices + (u8 *) objMdl);
     objMdl->references = 1;
+#ifdef TARGET_DC
+    *(void **) objMdl->pad34 = NULL; // the native renderer's, filled in at the end of the load
+#endif
     objMdl->collisionFacets = NULL;
     objMdl->collisionPlanes = NULL;
     objMdl->collisionFacetCount = 0;
@@ -274,6 +280,9 @@ ModelInstance *object_model_init(s32 modelID, s32 flags) {
         if (model_init_normals(objMdl) == 0 && model_anim_init(objMdl, modelID) == 0) {
             instance = model_instance_init(objMdl, flags);
             if (instance != NULL) {
+#if defined(TARGET_DC) && DKR_NATIVE
+                pc_nat_model_load(objMdl, modelID);
+#endif
                 gModelCache[ASSETCACHE_ID(cacheIndex)] = modelID;
                 gModelCache[ASSETCACHE_PTR(cacheIndex)] = (s32) objMdl;
                 if (gModelCacheCount < MODEL_LOADED_MAX) {
@@ -440,6 +449,9 @@ void free_model_data(ObjectModel *mdl) {
     if (mdl == NULL) {
         stubbed_printf("MOD Error: Tryed to deallocate non-existent model!!\n");
     }
+#if defined(TARGET_DC) && DKR_NATIVE
+    pc_nat_model_free(mdl);
+#endif
 
     numTextures = mdl->numberOfTextures;
     if (numTextures > 0) {
