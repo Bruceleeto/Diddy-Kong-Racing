@@ -17,6 +17,7 @@ extern u64 pc_uptime_ns(void);
 #include "scene_gate.h"
 #include "scrawl.h"
 #include "swirl.h"
+#include "vmu_anim.h"
 #include "cover.h"
 
 #define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
@@ -588,6 +589,7 @@ s32 pc_retrace_wait(void) {
     }
 #endif
     sLastVbl += (u32) periods;
+    vmu_anim_update(); // dreamcast/vmu_anim.c: the next frame on every VMU screen
     return periods;
 }
 #else
@@ -651,6 +653,7 @@ s32 pc_retrace_wait(void) {
 #endif
     // Advance by whole periods so rounding doesn't accumulate into drift.
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
+    vmu_anim_update(); // dreamcast/vmu_anim.c: the next frame on every VMU screen
     return periods;
 }
 #endif

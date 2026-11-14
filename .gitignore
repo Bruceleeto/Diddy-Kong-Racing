@@ -96,3 +96,6 @@ amap
 /bonus/dkr_music_player/cdrom/
 /bonus/dkr_music_player/include/songs.h
 /captures/
+*.bak*
+backup_swirl/
+*:Zone.Identifier
