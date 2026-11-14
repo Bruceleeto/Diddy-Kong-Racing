@@ -67,25 +67,22 @@ int input_host_read(int port, unsigned short *button, signed char *stickX, signe
         return 0; // no pad plugged in - report neutral
     }
 
-    // Face buttons and start.
-    if (HELD(st, A)) buttons |= BTN_A;         // accelerate
-    if (HELD(st, B)) buttons |= BTN_B;         // brake / reverse
+    // Face buttons and start: A accelerates, B and X brake / reverse, Y zooms the camera.
+    if (HELD(st, A)) buttons |= BTN_A;
+    if (HELD(st, B)) buttons |= BTN_B;
+    if (HELD(st, X)) buttons |= BTN_B;
+    if (HELD(st, Y)) buttons |= BTN_CUP;
     if (HELD(st, START)) buttons |= BTN_START;
 
-    // Triggers: N64 Z (fire) on the left, N64 R (hop / powerslide) on the right.
+    // Triggers: N64 Z (fire / horn) on the left, N64 R (hop / powerslide) on the right.
     if (st->ltrigger > TRIG_THRESHOLD) buttons |= BTN_Z;
     if (st->rtrigger > TRIG_THRESHOLD) buttons |= BTN_R;
 
-    // The DC pad has no C-cluster; put camera on the X/Y face buttons, and let
-    // X double as the N64 L (only used in a couple of debug spots).
-    if (HELD(st, Y)) buttons |= BTN_CUP;
-    if (HELD(st, X)) buttons |= BTN_CDOWN | BTN_L;
-
-    // D-pad drives the N64 D-pad (menu navigation).
-    if (HELD(st, UP)) buttons |= BTN_UP;
-    if (HELD(st, DOWN)) buttons |= BTN_DOWN;
-    if (HELD(st, LEFT)) buttons |= BTN_LEFT;
-    if (HELD(st, RIGHT)) buttons |= BTN_RIGHT;
+    // D-pad: up zooms the camera (as Y), right is the map / TT cam, left the
+    // speedometer / race info; down does nothing.
+    if (HELD(st, UP)) buttons |= BTN_CUP;
+    if (HELD(st, RIGHT)) buttons |= BTN_CRIGHT;
+    if (HELD(st, LEFT)) buttons |= BTN_CDOWN;
 
     // Analog stick: enDjinn's joyx/joyy are -128..127. Scale to the N64's -80..80, and
     // flip Y — the DC reports up as negative, the N64 as positive.
@@ -96,17 +93,6 @@ int input_host_read(int port, unsigned short *button, signed char *stickX, signe
     if (x > STICK_MAX) x = STICK_MAX;
     if (y < -STICK_MAX) y = -STICK_MAX;
     if (y > STICK_MAX) y = STICK_MAX;
-
-    // The game only reads the stick for steering/pitch, so the D-pad also
-    // synthesizes full stick deflection on any axis the stick leaves idle.
-    if (x > -STICK_IDLE && x < STICK_IDLE) {
-        if (HELD(st, LEFT)) x = -STICK_MAX;
-        if (HELD(st, RIGHT)) x = STICK_MAX;
-    }
-    if (y > -STICK_IDLE && y < STICK_IDLE) {
-        if (HELD(st, UP)) y = STICK_MAX;
-        if (HELD(st, DOWN)) y = -STICK_MAX;
-    }
 
     *button = buttons;
     *stickX = (signed char) x;

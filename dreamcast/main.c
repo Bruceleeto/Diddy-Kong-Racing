@@ -17,6 +17,7 @@ extern u64 pc_uptime_ns(void);
 #include "scene_gate.h"
 #include "scrawl.h"
 #include "swirl.h"
+#include "vmu_anim.h"
 #include "cover.h"
 
 #define DKR_TEXTURE_PACK DKR_ASSET_MOUNT "/build/dc/textures.dtp"
@@ -42,6 +43,14 @@ static OSThread sHostThread;
 #define PC_MAX_UPDATE_RATE 6   // don't let a debugger pause become a huge skip
 // Video fields per game frame: FRAME_FIELDS, or the debug menu's Framerate.
 static s32 sFrameFields = PC_LOGIC_UPDATE_RATE;
+
+/** The magic codes menu's 60 FPS cheat (src/menu.c): 60 fps on, or back to 30. */
+void pc_set_60fps(int on) {
+    extern void frame_interp_realign(void);
+
+    sFrameFields = on ? 1 : 2;
+    frame_interp_realign();
+}
 
 // ---------------------------------------------------------------------------
 // Frame profile (GFX_PROFILE=1): where a frame's time goes and how much
@@ -588,6 +597,7 @@ s32 pc_retrace_wait(void) {
     }
 #endif
     sLastVbl += (u32) periods;
+    vmu_anim_update(); // dreamcast/vmu_anim.c: the next frame on every VMU screen
     return periods;
 }
 #else
@@ -651,6 +661,7 @@ s32 pc_retrace_wait(void) {
 #endif
     // Advance by whole periods so rounding doesn't accumulate into drift.
     sLastNs += (long long) periods * PC_RETRACE_NSEC;
+    vmu_anim_update(); // dreamcast/vmu_anim.c: the next frame on every VMU screen
     return periods;
 }
 #endif
