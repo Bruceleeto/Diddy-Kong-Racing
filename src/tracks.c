@@ -28,7 +28,13 @@
 #include "pc_swap.h"
 #include "../dreamcast/prof.h"
 #ifdef TARGET_DC
+#include "../dreamcast/cover.h"
 #include "../dreamcast/scrawl.h"
+// dreamcast/native.c; its header brings the console's own, which do not mix with these.
+extern void pc_nat_level_load(s32 modelId);
+extern void pc_nat_level_free(void);
+extern s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);
+extern void pc_nat_sky(s32 sky);
 #endif
 
 // Maximum size for a level model is 522.5 KiB
@@ -1574,6 +1580,9 @@ void trackbg_render_gradient(void) {
     headerBlue1 = gCurrentLevelHeader2->BGColourBottomB;
     rendermode_reset(&gTrackDL);
     material_set_no_tex_offset(&gTrackDL, NULL, RENDER_FOG_ACTIVE);
+    #ifdef TARGET_DC
+    gDPNoOpTag(gTrackDL++, PC_VIEW_BEGIN_TAG);
+#endif
     gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(verts), 4, 0);
     gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tris), 2, 0);
 
@@ -1671,7 +1680,13 @@ void skydome_render(void) {
 
     mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
     if (gSceneRenderSkyDome) {
+#ifdef TARGET_DC
+        pc_nat_sky(TRUE);
+#endif
         render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, gSkydomeSegment);
+#ifdef TARGET_DC
+        pc_nat_sky(FALSE);
+#endif
     }
 }
 
@@ -2060,6 +2075,19 @@ void render_level_segment(s32 segmentId, s32 nonOpaque) {
         endPos = segment->numberofOpaqueBatches;
     }
     for (i = startPos; i < endPos; i++) {
+#ifdef NAT_DIRECT
+        {
+            // As many batches from this one on as are compiled (dreamcast/native.c).
+            s32 natBatches =
+                pc_nat_level_batches(segmentId, i, pc_scrawl_batch_limit(segmentId, i, endPos), sp78);
+
+            if (natBatches) {
+                i += natBatches - 1;
+                pc_scrawl_after_batch(segmentId, i, &gTrackDL);
+                continue;
+            }
+        }
+#endif
         batchInfo = &segment->batches[i];
         textureFlags = RENDER_NONE;
         isInvisible = batchInfo->flags & RENDER_HIDDEN;
@@ -3184,6 +3212,9 @@ void generate_track(s32 modelId) {
         }
     }
     set_texture_colour_tag(COLOUR_TAG_MAGENTA);
+#if defined(TARGET_DC) && DKR_NATIVE
+    pc_nat_level_load(modelId);
+#endif
     stubbed_printf("generate_track end\n");
 }
 
@@ -3220,6 +3251,9 @@ LevelModel *get_current_level_model(void) {
 void free_track(void) {
     s32 i;
 
+#if defined(TARGET_DC) && DKR_NATIVE
+    pc_nat_level_free();
+#endif
     racerfx_free();
     if (gWaveBlockCount != 0) {
         waves_free();
@@ -3549,7 +3583,6 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 gDPSetPrimColor(gTrackDL++, 0, 0, 255, 255, 255, alpha);
             }
             while (i < shadow->meshEnd) {
-                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 // I hope we can clean this part up.
                 tri2 = triCount = gCurrShadowHeapData[i].triCount; // Fakematch
                 vtx2 = vtxCount = gCurrShadowHeapData[i].vtxCount;
@@ -3557,6 +3590,7 @@ void shadow_render(Object *obj, ShadowData *shadow) {
                 numVerts = gCurrShadowHeapData[i + 1].vtxCount - vtxCount;
                 tri = &gCurrShadowTris[triCount];
                 vtx = &gCurrShadowVerts[vtx2];
+                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
                 gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
                 i++;
@@ -3599,13 +3633,13 @@ void watereffect_render(Object *obj, WaterEffect *effect) {
             gCurrShadowTris = gShadowHeapTris[gWaterEffectIndex];
             gCurrShadowVerts = gShadowHeapVerts[gWaterEffectIndex];
             while (i < effect->meshEnd) {
-                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 triCount = gCurrShadowHeapData[i].triCount; // Fakematch
                 vtxCount = gCurrShadowHeapData[i].vtxCount; // Fakematch
                 numTris = gCurrShadowHeapData[i + 1].triCount - gCurrShadowHeapData[i].triCount;
                 numVerts = gCurrShadowHeapData[i + 1].vtxCount - gCurrShadowHeapData[i].vtxCount;
                 tri = &gCurrShadowTris[gCurrShadowHeapData[i].triCount];
                 vtx = &gCurrShadowVerts[gCurrShadowHeapData[i].vtxCount];
+                material_set_no_tex_offset(&gTrackDL, gCurrShadowHeapData[i].texture, flags);
                 gSPVertexDKR(gTrackDL++, OS_K0_TO_PHYSICAL(vtx), numVerts, 0);
                 gSPPolygon(gTrackDL++, OS_K0_TO_PHYSICAL(tri), numTris, 1);
                 i++;

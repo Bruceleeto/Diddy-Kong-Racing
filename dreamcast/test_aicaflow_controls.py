@@ -225,9 +225,11 @@ int main(void) {
 }
 '''
 defines = "\n".join(re.findall(r"^#define DKR_\w+ [0-9]+$", source, re.M))
+tables = re.search(r"^static const uint8_t sN64FxImxl\[128\] = \{.*?^\};$", source, re.M | re.S)
+assert tables, "sN64FxImxl"
 with tempfile.TemporaryDirectory(prefix="dkr-audio-check-") as directory:
     path = Path(directory)
-    (path / "check.c").write_text(prefix + defines + "\n" + globals_ + stubs +
+    (path / "check.c").write_text(prefix + defines + "\n" + tables.group(0) + "\n" + globals_ + stubs +
                                   "\n".join(function(name) for name in names) + checks)
     subprocess.run([os.environ.get("CC", "cc"), "-std=c2x", "-O2",
                     "-I" + str(root / "third_party/aicaflow/driver/sh4/include"),

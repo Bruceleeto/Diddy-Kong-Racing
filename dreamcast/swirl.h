@@ -9,7 +9,7 @@
 
 #ifndef _LANGUAGE_ASSEMBLY
 // The display-list walk found the marker: draws it.
-void pc_swirl_draw(void);
+void pc_swirl_draw(int translucentList);
 #endif
 
 #endif

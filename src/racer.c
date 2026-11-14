@@ -33,6 +33,9 @@
 #include "tracks.h"
 #include "types.h"
 #include "vehicle_misc.h"
+#ifdef TARGET_PC
+#include "pc_swap.h"
+#endif
 
 #define MAX_NUMBER_OF_GHOST_NODES 360
 
@@ -8389,6 +8392,11 @@ s32 load_tt_ghost(s32 ghostOffset, s32 size, s16 *outTime) {
     GhostHeader *ghost = mempool_alloc_safe(size, COLOUR_TAG_RED);
     if (ghost != NULL) {
         asset_load(ASSET_TTGHOSTS, (u32) ghost, ghostOffset, size);
+#ifdef TARGET_PC
+        // Big-endian like the ROM: time and nodeCount, then the nodes, all s16.
+        // (The table that points here is swapped in timetrial_load_staff_ghost.)
+        pc_swap16_buf((u8 *) ghost + 4, (u32) size - 4);
+#endif
         if (gGhostData[GHOST_STAFF] != NULL) {
             mempool_free(gGhostData[GHOST_STAFF]);
         }
@@ -8472,11 +8480,20 @@ s16 timetrial_ghost_full(void) {
 s32 timetrial_ghost_read(Object *obj) {
     f32 catmullX;
     s32 temp;
+#ifdef AVOID_UB
+    // catmull_rom_interpolation reads four points, and the loop below writes four.
+    f32 vectorX[4];
+    s32 rotDiff;
+    f32 vectorY[4];
+    Object_Racer *racer;
+    f32 vectorZ[4];
+#else
     f32 vectorX[3];
     s32 rotDiff;
     f32 vectorY[3];
     Object_Racer *racer;
     f32 vectorZ[3];
+#endif
     s32 commonUnk0s32;
     s32 ghostDataIndex;
     s32 pad_sp58;
@@ -8513,7 +8530,11 @@ s32 timetrial_ghost_read(Object *obj) {
     }
     nodeIndex = commonUnk0s32 - 1;
 
+#ifdef AVOID_UB
+    for (i = 0; i < ARRAY_COUNT(vectorY); i++) {
+#else
     for (i = 0; i <= ARRAY_COUNT(vectorY); i++) {
+#endif
         curGhostNode = &gGhostData[ghostDataIndex][nodeIndex];
         if (nodeIndex == -1) {
             vectorX[i] = ((curGhostNode + 1)->x + (curGhostNode + 1)->x) - (curGhostNode + 2)->x;

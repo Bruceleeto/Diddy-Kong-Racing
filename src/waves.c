@@ -977,6 +977,12 @@ void wave_load_material(TextureHeader *tex, s32 rtile) {
     }
 }
 
+#define WAVE_DRAW(vtx, numVerts, tri, numTris)                                                  \
+    do {                                                                                        \
+        gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), (numVerts), 0);                         \
+        gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), (numTris), TRIN_ENABLE_TEXTURE);          \
+    } while (0)
+
 /**
  * Renders waves in the current viewport.
  */
@@ -1079,15 +1085,12 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                                 tri = &gWaveTriangles[gWaveVertexFlip + viewportID]
                                                      [j * (gWaveController.subdivisions << 1)];
 
-                                gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                                gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                                WAVE_DRAW(vtx, numVerts << 1, tri, numTris);
 
                                 var_t0 += gWaveController.subdivisions + 1;
                             }
                         } else {
-                            gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(&D_8012A028[gWaveVertexFlip]), 4, 0);
-                            gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(&D_800E3090[gWaveVertexFlip << 1]), 2,
-                                       TRIN_ENABLE_TEXTURE);
+                            WAVE_DRAW(&D_8012A028[gWaveVertexFlip], 4, &D_800E3090[gWaveVertexFlip << 1], 2);
                         }
                         mtx_pop(&gWaveDL);
                         sp104 >>= 8;
@@ -1104,8 +1107,7 @@ void waves_render(Gfx **dList, Mtx **mtx, s32 viewportID) {
                     vtx = &gWaveVertices[gWaveVertexFlip + viewportID][var_t0];
                     tri = &gWaveTriangles[gWaveVertexFlip + viewportID][j * (gWaveController.subdivisions << 1)];
 
-                    gSPVertexDKR(gWaveDL++, OS_K0_TO_PHYSICAL(vtx), numVerts << 1, 0);
-                    gSPPolygon(gWaveDL++, OS_K0_TO_PHYSICAL(tri), numTris, TRIN_ENABLE_TEXTURE);
+                    WAVE_DRAW(vtx, numVerts << 1, tri, numTris);
 
                     var_t0 += gWaveController.subdivisions + 1;
                 }

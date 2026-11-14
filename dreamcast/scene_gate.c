@@ -22,6 +22,39 @@ extern void pc_asset_scene_load(int level);
 extern void pc_scene_prof_report(void);
 #endif
 
+extern void pc_fsaa_set(int on);
+
+#ifndef DKR_FSAA
+#define DKR_FSAA 0
+#endif
+// The maps drawn without FSAA in an FSAA build (FSAA_OFF_MAPS in Makefile.dc):
+// the ones whose translucent fill takes the PVR past a frame with it.
+#ifndef DKR_FSAA_OFF_MAPS
+#define DKR_FSAA_OFF_MAPS -1
+#endif
+
+// Where an FSAA build uses it, from the next scene load: 0 nowhere, 1 on every
+// map, 2 on all but FSAA_OFF_MAPS. The debug menu's FSAA row sets it.
+int gFsaaMode = DKR_FSAA ? 2 : 0;
+
+static int fsaa_for_level(int level) {
+    static const short off[] = { DKR_FSAA_OFF_MAPS, -1 };
+    int i;
+
+    if (!DKR_FSAA || gFsaaMode == 0) {
+        return 0;
+    }
+    if (gFsaaMode == 1) {
+        return 1;
+    }
+    for (i = 0; off[i] >= 0; i++) {
+        if (off[i] == level) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static volatile int sSceneReady = 1;
 static volatile int sAwaitingStep;  // loaded, but its first logic step has not run
 static volatile int sAwaitingFrame; // stepped, but its first frame is not on screen yet
@@ -51,6 +84,9 @@ void pc_scene_loading(int level) {
     // new level has the room.
     pc_textures_release_held();
     pc_model_scene_release();
+    // FSAA for this scene, before anything goes into video memory: switching
+    // restarts the PVR and clears it (dreamcast/gfx.c pc_fsaa_set).
+    pc_fsaa_set(fsaa_for_level(level));
     // The scene's pack of asset data, in one read, before the level loads.
     pc_asset_scene_load(level);
     // The scene's textures first, in one pass, before the game asks for any.

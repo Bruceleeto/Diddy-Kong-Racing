@@ -22,7 +22,7 @@
 // vertex is lit from its model-space position and normal as they are.
 //
 // It leaves a marker in the display list, after the swirl's matrix, and the
-// walk draws it there (pc_swirl_draw): each distinct vertex through the
+// frame draws it there (pc_swirl_draw): each distinct vertex through the
 // matrix once, then the strips streamed into the opaque list (translucent
 // while the logo fades). The boot screen's camera never brings it to the
 // near plane, so it isn't clipped. The game's model is only a stand-in.
@@ -155,6 +155,14 @@ static const float sGlintColour[3] = { 1.0f, 0.96f, 0.88f }; // the key light's 
 #define HALO_EDGE_GONE 0.035f
 #endif
 #define HALO_BREATH 240     // frames a breath takes
+
+// The sky's haze on the swirl's far side only: none until a point is this far
+// behind the swirl's middle, in its radius, then quickly up to SWIRL_FOG_MOST at
+// the radius, so it shows as the swirl turns an edge away and not while it
+// faces the camera. The radius is the most the swirl has spanned in depth.
+#define SWIRL_FOG_RGB 0x90B8F4 // the sky around it, from the capture
+#define SWIRL_FOG_FROM 0.3f    // of the radius behind the middle: where the haze starts
+#define SWIRL_FOG_MOST 0.6f    // how far into the sky's colour the farthest edge goes
 static const float sHaloTowards[3] = { HALO_TOWARDS };
 
 static const ObjectModel *sSwirl; // as loaded, to know it when it is drawn
@@ -163,6 +171,7 @@ static u8 sTone[SWIRL_TONE_STEPS];
 static u32 sArgb[SWIRL_MAX_POINTS];  // this frame's light, per distinct vertex
 static u8 sOpacity;
 // By opacity (opaque, translucent), then without and with the glint.
+static float sDepthRadius; // half the most the swirl has spanned in w, for its fog
 static pvr_poly_hdr_t sHeader[2][2] __attribute__((aligned(32)));
 static pvr_poly_hdr_t sHaloHeader[2] __attribute__((aligned(32))); // square on, from the side
 static pvr_vertex_t sStrip[SWIRL_MAX_STRIP] __attribute__((aligned(32)));
@@ -271,6 +280,7 @@ static void headers_init(void) {
             cxt.gen.shading = PVR_SHADE_GOURAUD;
             cxt.gen.culling = PVR_CULLING_NONE;
             cxt.gen.clip_mode = PVR_USERCLIP_DISABLE;
+            cxt.gen.fog_type = PVR_FOG_TABLE; // the sky's haze, SWIRL_FOG_*
             if (tr) {
                 cxt.depth.write = PVR_DEPTHWRITE_DISABLE;
             }
@@ -295,6 +305,7 @@ static void headers_init(void) {
                      HALO_STRENGTH * shz_sqrtf(sAlbedo[1] + (sHaloTowards[1] - sAlbedo[1]) * HALO_WHITE),
                      HALO_STRENGTH * shz_sqrtf(sAlbedo[2] + (sHaloTowards[2] - sAlbedo[2]) * HALO_WHITE));
     sDraws = 0;
+    sDepthRadius = 0.0f;
     sGlints = 0;
     sGlintArmed = 0;
 }
@@ -448,7 +459,7 @@ static void light(Object *obj, Camera *cam) {
 
 /**
  * In render_3d_model, for each model it draws: 1 if it is the swirl, lit and
- * left to the display-list walk; 0 to have the game draw the model.
+ * left to the frame's lists; 0 to have the game draw the model.
  */
 int pc_swirl_render(Object *obj, ObjectModel *model, Gfx **dl, s32 opacity) {
     Camera *cam = cam_get_active_camera();
@@ -546,7 +557,7 @@ static void halo_square(const pvr_poly_hdr_t *hdr, float corner[4][3], u32 level
         v->argb = colour;
         v->oargb = 0;
     }
-    gfx_tr_native(hdr, quad, 4);
+    gfx_native(hdr, quad, 4);
 }
 
 /**
@@ -596,7 +607,11 @@ static void halo_draw(shz_vec3_t eye) {
     halo_square(&sHaloHeader[1], corner, (u32) (level * side));
 }
 
-void pc_swirl_draw(void) {
+/**
+ * Once in each list the swirl has a part in: the halo is always blended, the body
+ * only as it fades.
+ */
+void pc_swirl_draw(int translucentList) {
     const SwirlCounts *n = counts();
     const SwirlPoint *pts = points();
     const u16 *lengths = strip_lengths();
@@ -608,11 +623,32 @@ void pc_swirl_draw(void) {
 
     shz_vec3_t eye = model_eye();
 
+    if (translucent != translucentList) {
+        if (translucentList) {
+            halo_draw(eye); // the body went out with the opaque list
+        }
+        return;
+    }
     sDraws++;
     glint_update(eye);
-    halo_draw(eye);
+    if (translucentList) {
+        halo_draw(eye);
+    }
     hdr = &sHeader[translucent][sGlintArgb != 0];
     pc_project_points(&pts->px, sizeof(SwirlPoint) / sizeof(float), n->points, sScreen);
+    {
+        float lo = sScreen[0][2], hi = lo, mid, start;
+
+        for (u32 i = 1; i < n->points; i++) {
+            lo = shz_fminf(lo, sScreen[i][2]);
+            hi = shz_fmaxf(hi, sScreen[i][2]);
+        }
+        mid = 0.5f * (lo + hi);
+        sDepthRadius = shz_fmaxf(sDepthRadius, hi - mid);
+        start = mid + SWIRL_FOG_FROM * sDepthRadius;
+        // Full fog where SWIRL_FOG_MOST is reached at the radius, continued.
+        gfx_fog_linear(SWIRL_FOG_RGB, start, start + (1.0f - SWIRL_FOG_FROM) * sDepthRadius / SWIRL_FOG_MOST + 1.0f);
+    }
     for (s = 0; s < n->strips; s++) {
         int len = lengths[s];
         int ok;
@@ -644,7 +680,7 @@ void pc_swirl_draw(void) {
             }
         }
         index += len;
-        ok = translucent ? gfx_tr_native(hdr, sStrip, len) : gfx_op_native(hdr, sStrip, len);
+        ok = gfx_native(hdr, sStrip, len);
         if (!ok) {
             return;
         }

@@ -9,4 +9,12 @@ int input_host_read(int port, unsigned short *button, signed char *stickX, signe
 // Once a frame, before the reads: lets the controller layer take its snapshot.
 void input_host_poll(void);
 
+// Rumble for the N64 channel `channel` (0-3), through a Puru Puru pack in the
+// controller read as that channel. present: whether there is one. motor: the
+// N64 Rumble Pak's on/off motor, as the game switches it. Once a frame,
+// input_rumble_flush turns the game's switching into Puru Puru effects.
+int input_rumble_present(int channel);
+void input_rumble_motor(int channel, int on);
+void input_rumble_flush(void);
+
 #endif

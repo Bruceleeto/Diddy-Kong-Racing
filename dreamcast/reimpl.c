@@ -6,6 +6,7 @@
 #include <string.h>
 #include <kos.h>
 #include <sh4zam/shz_sh4zam.h>
+#include <enDjinn/enj_vmu.h>
 
 #include "input.h"
 
@@ -616,11 +617,9 @@ float __libm_qnan_f = __builtin_nanf("");
 // SI bus — controllers, EEPROM saves, controller paks, rumble.
 // The N64 talks to all of these through PIF-RAM DMA over the Serial Interface
 // (the libultra cont*/pfs*/eeprom*/motor files, dropped from the PC build).
-// Constructive lies instead: one controller in port 0 with neutral input, an
-// erased EEPROM (game falls back to creating default saves), and no
-// controller paks / rumble paks plugged in anywhere.
-// TODO: real host input (this is where it plugs in) and EEPROM persisted to a
-// save file on disk.
+// Here the controllers come from dreamcast/input.c, the EEPROM is kept on the
+// VMU, a Puru Puru pack stands in for the Rumble Pak, and there are no
+// controller paks.
 // ---------------------------------------------------------------------------
 #define PC_CONT_TYPE_NORMAL 0x0005
 #define PC_CONT_NO_RESPONSE 0x8
@@ -645,8 +644,7 @@ extern s32 osSendMesg(void *mq, void *msg, s32 flags);
 s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
     s32 i;
 
-#if DKR_ENJ_INPUT
-    // Every port with a pad in it, as the PIF would report (ENJ_INPUT=1).
+    // Every port with a pad in it, as the PIF would report.
     input_host_poll();
     *bitpattern = 0;
     for (i = 0; i < PC_MAXCONTROLLERS; i++) {
@@ -663,18 +661,12 @@ s32 osContInit(void *mq, u8 *bitpattern, PCContStatus *status) {
     *bitpattern |= 1;
     status[0].type = PC_CONT_TYPE_NORMAL;
     status[0].error = 0;
-#else
-    *bitpattern = 1; // controller in port 0 only
-    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
-        status[i].type = (i == 0) ? PC_CONT_TYPE_NORMAL : 0;
-        status[i].status = 0;
-        status[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
-    }
-#endif
     return 0;
 }
 
 s32 osContStartReadData(void *mq) {
+    // The game calls this right after rumble_update: the frame's motor states are in.
+    input_rumble_flush();
     // Poll "completes" instantly: post the done-message the game waits for.
     osSendMesg(mq, NULL, 0 /* OS_MESG_NOBLOCK */);
     return 0;
@@ -690,7 +682,6 @@ void osContGetReadData(PCContPad *pads) {
         pads[i].error = (i == 0) ? 0 : PC_CONT_NO_RESPONSE;
     }
 
-#if DKR_ENJ_INPUT
     input_host_poll();
     for (i = 0; i < PC_MAXCONTROLLERS; i++) {
         if (input_host_read(i, &pads[i].button, &pads[i].stick_x, &pads[i].stick_y)) {
@@ -698,34 +689,74 @@ void osContGetReadData(PCContPad *pads) {
         }
     }
     pads[0].error = 0;
-#else
-    input_host_read(0, &pads[0].button, &pads[0].stick_x, &pads[0].stick_y);
-#endif
 }
 
-// EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks. Backed by RAM, so writes
-// survive the session but not a reboot. Build with -DEEPROM_PRESET_100 to seed
-// it from a 100%-completion image instead of erased 0xFF.
+// EEPROM_TYPE_4K is 512 bytes / 64 eight-byte blocks, kept in RAM and saved to
+// the first VMU as DKR_SAVE through enDjinn's VMU saves, with the game's own
+// Diddy portrait as its icon (dreamcast/build_vmu_icon.py makes it from the
+// ROM). It is read once at boot. A write only marks it changed; enDjinn's
+// low-priority saver writes it half a second after the last change, so the
+// maple transfers never hold up the game thread. Build with -DEEPROM_PRESET_100
+// to start from a 100%-completion image when no save is found.
 #define PC_EEPROM_BLOCKS 64
 #define PC_EEPROM_BYTES (PC_EEPROM_BLOCKS * 8)
+#define VMU_SAVE_DELAY_MS 500 // after the last change, so a burst of writes saves once
 
 #ifdef EEPROM_PRESET_100
 #include "eeprom_preset.h"
 #endif
+#include "vmu_icon.h"
 
-static u8 gEeprom[PC_EEPROM_BYTES];
+static u8 gEeprom[PC_EEPROM_BYTES] __attribute__((aligned(32)));
 static s32 gEepromReady = 0;
+static enj_vmu_save_t sVmuSave = {
+    .name = "DKR_SAVE",
+    .desc_short = "DiddyKongRacing",
+    .desc_long = "Diddy Kong Racing save",
+    .app_id = "DKR",
+    .icon_palette = sDkrVmuIconPal,
+    .icon_frames = sDkrVmuIconData,
+    .icon_frame_count = 1,
+    .data = gEeprom,
+    .size = PC_EEPROM_BYTES,
+};
 
 static void eeprom_init(void) {
     if (gEepromReady) {
         return;
     }
     gEepromReady = 1;
+    enj_vmu_load_e loaded = enj_vmu_save_load(&sVmuSave);
+    switch (loaded) {
+        case ENJ_VMU_LOADED:
+            printf("VMU: save read\n");
+            break;
+        case ENJ_VMU_NO_SAVE:
+            printf("VMU: no save yet; one is written when the game first saves\n");
+            break;
+        case ENJ_VMU_NO_DEVICE:
+            printf("VMU: none plugged in; the game saves when one is\n");
+            break;
+        case ENJ_VMU_UNREADABLE:
+            printf("VMU: DKR_SAVE is not a save this game can read; starting afresh\n");
+            break;
+    }
+    if (loaded != ENJ_VMU_LOADED) {
 #ifdef EEPROM_PRESET_100
-    memcpy(gEeprom, gEepromPreset, PC_EEPROM_BYTES);
+        shz_memcpy(gEeprom, gEepromPreset, PC_EEPROM_BYTES);
 #else
-    memset(gEeprom, 0xFF, PC_EEPROM_BYTES); // erased
+        shz_memset8(gEeprom, 0xFFFFFFFFFFFFFFFFull, PC_EEPROM_BYTES); // erased
 #endif
+    }
+    enj_vmu_save_start(&sVmuSave, VMU_SAVE_DELAY_MS);
+}
+
+/**
+ * The reset button: if the save has changes, enDjinn's saver writes them and
+ * then exits, instead of the maple callback doing file I/O. Returns 1 if it will.
+ */
+s32 pc_save_exit_after_flush(void) {
+    return enj_vmu_save_exit_after_flush();
 }
 
 s32 osEepromProbe(void *mq) {
@@ -736,27 +767,42 @@ s32 osEepromProbe(void *mq) {
 s32 osEepromRead(void *mq, u8 address, u8 *buffer) {
     eeprom_init();
     if (address >= PC_EEPROM_BLOCKS) {
-        memset(buffer, 0xFF, 8);
+        shz_memset8(buffer, 0xFFFFFFFFFFFFFFFFull, 8);
         return 0;
     }
-    memcpy(buffer, &gEeprom[address * 8], 8);
+    enj_vmu_save_lock();
+    shz_memcpy(buffer, &gEeprom[address * 8], 8);
+    enj_vmu_save_unlock();
     return 0;
 }
 
 s32 osEepromWrite(void *mq, u8 address, u8 *buffer) {
     eeprom_init();
-    if (address < PC_EEPROM_BLOCKS) {
-        memcpy(&gEeprom[address * 8], buffer, 8);
+    if (address < PC_EEPROM_BLOCKS && memcmp(&gEeprom[address * 8], buffer, 8) != 0) {
+        enj_vmu_save_lock();
+        shz_memcpy(&gEeprom[address * 8], buffer, 8);
+        enj_vmu_save_unlock();
+        enj_vmu_save_changed();
     }
-    return 0; // accepted, not persisted to VMU (yet)
+    return 0;
 }
+
+// A Rumble Pak answers the file system's init with PFS_ERR_ID_FATAL, which is
+// how the game tells one at boot (src/save_data.c).
+#define PC_PFS_ERR_ID_FATAL 10
 
 s32 osPfsInit(void *mq, void *pfs, s32 channel) {
-    return PC_PFS_ERR_NOPACK;
+    return input_rumble_present(channel) ? PC_PFS_ERR_ID_FATAL : PC_PFS_ERR_NOPACK;
 }
 
+// Only rumble packs are reported plugged in; there are no controller paks.
 s32 osPfsIsPlug(void *mq, u8 *pattern) {
+    s32 i;
+
     *pattern = 0;
+    for (i = 0; i < PC_MAXCONTROLLERS; i++) {
+        *pattern |= input_rumble_present(i) ? (1 << i) : 0;
+    }
     return 0;
 }
 
@@ -796,15 +842,26 @@ s32 osPfsAllocateFile(void *pfs, u16 companyCode, u32 gameCode, u8 *gameName, u8
     return PC_PFS_ERR_NOPACK;
 }
 
+// The head of libultra's OSPfs, up to the channel the motor calls need.
+typedef struct {
+    int status;
+    void *queue;
+    int channel;
+} PCPfsHead;
+
+// The Rumble Pak is a Puru Puru pack in the same controller (dreamcast/input.c).
 s32 osMotorInit(void *mq, void *pfs, s32 channel) {
-    return PC_PFS_ERR_NOPACK; // no rumble pak
+    ((PCPfsHead *) pfs)->channel = channel;
+    return input_rumble_present(channel) ? 0 : PC_PFS_ERR_NOPACK;
 }
 
 s32 osMotorStart(void *pfs) {
+    input_rumble_motor(((PCPfsHead *) pfs)->channel, 1);
     return 0;
 }
 
 s32 osMotorStop(void *pfs) {
+    input_rumble_motor(((PCPfsHead *) pfs)->channel, 0);
     return 0;
 }
 

@@ -37,6 +37,14 @@ Gfx dRspInit[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dRspInit_nat(void) {
+    gSPClearGeometryMode(0, G_SHADE | G_SHADING_SMOOTH | G_CULL_FRONT | G_CULL_BACK | G_FOG | G_LIGHTING | G_TEXTURE_GEN |
+                          G_TEXTURE_GEN_LINEAR | G_LOD);
+    gSPSetGeometryMode(0, G_SHADING_SMOOTH | G_SHADE);
+}
+#endif
+
 // Default RDP settings
 Gfx dRdpInit[] = {
     gsDPSetCycleType(G_CYC_1CYCLE),
@@ -56,6 +64,16 @@ Gfx dRdpInit[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dRdpInit_nat(void) {
+    gDPSetCycleType(0, G_CYC_1CYCLE);
+    gDPSetTextureFilter(0, G_TF_BILERP);
+    gDPSetCombineMode(0, G_CC_DECALRGB, G_CC_DECALRGB);
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gDPSetRenderMode(0, G_RM_OPA_SURF, G_RM_OPA_SURF2);
+}
+#endif
+
 Gfx dRaceFinishBackgroundSettings[] = {
     gsDPPipeSync(),
     gsDPSetTextureLOD(G_TL_TILE),
@@ -67,6 +85,15 @@ Gfx dRaceFinishBackgroundSettings[] = {
     gsDPSetOtherMode(DKR_OMH_1CYC_POINT_NOPERSP, DKR_OML_COMMON | G_RM_OPA_SURF | G_RM_OPA_SURF2),
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dRaceFinishBackgroundSettings_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+    gDPSetCombineMode(0, G_CC_DECALRGBA, G_CC_DECALRGBA);
+    gDPSetOtherMode(0, DKR_OMH_1CYC_POINT_NOPERSP, DKR_OML_COMMON | G_RM_OPA_SURF | G_RM_OPA_SURF2);
+}
+#endif
 
 Gfx dChequerBGSettings[] = {
     gsDPPipeSync(),
@@ -80,6 +107,15 @@ Gfx dChequerBGSettings[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dChequerBGSettings_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+    gDPSetCombineMode(0, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+    gDPSetOtherMode(0, DKR_OMH_1CYC_POINT_NOPERSP, DKR_OML_COMMON | G_RM_OPA_SURF | G_RM_OPA_SURF2);
+}
+#endif
+
 Gfx dTextureRectangleModes[] = {
     gsDPPipeSync(),
     gsDPSetTextureLOD(G_TL_TILE),
@@ -92,6 +128,15 @@ Gfx dTextureRectangleModes[] = {
     gsSPEndDisplayList(),
 };
 
+#ifdef NAT_DIRECT
+static void dTextureRectangleModes_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+    gDPSetCombineMode(0, G_CC_MODULATEIA_PRIM, G_CC_MODULATEIA_PRIM);
+    gDPSetOtherMode(0, DKR_OMH_1CYC_POINT_NOPERSP, DKR_OML_COMMON | G_RM_XLU_SURF | G_RM_XLU_SURF2);
+}
+#endif
+
 Gfx dScaledRectangleBaseModes[] = {
     gsDPPipeSync(),
     gsDPSetTextureLOD(G_TL_TILE),
@@ -101,6 +146,13 @@ Gfx dScaledRectangleBaseModes[] = {
     gsDPPipeSync(), // Ditto
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dScaledRectangleBaseModes_nat(void) {
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gSPClearGeometryMode(0, G_ZBUFFER | G_FOG);
+}
+#endif
 
 Gfx dTextureRectangleScaledOpa[][2] = {
     // Bilinear Filtered texture

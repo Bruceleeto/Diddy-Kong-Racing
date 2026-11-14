@@ -8,6 +8,9 @@
 #include "fade_transition.h"
 #include "macros.h"
 #include "math_util.h"
+#ifdef TARGET_DC
+#include "../dreamcast/cover.h"
+#endif
 #include "objects.h"
 #include "PRinternal/viint.h"
 #include "structs.h"
@@ -51,6 +54,15 @@ Gfx dLensFlare[] = {
     gsDPSetRenderMode(G_RM_CLD_SURF, G_RM_CLD_SURF2),
     gsSPEndDisplayList(),
 };
+
+#ifdef NAT_DIRECT
+static void dLensFlare_nat(void) {
+    gDPSetCycleType(0, G_CYC_1CYCLE);
+    gDPSetTextureFilter(0, G_TF_BILERP);
+    gDPSetAlphaCompare(0, G_AC_NONE);
+    gDPSetRenderMode(0, G_RM_CLD_SURF, G_RM_CLD_SURF2);
+}
+#endif
 
 LensFlareData gLensPresetLarge[2] = { { 1, { { { 255, 255, 192, 144 } } }, 3.0f, 0.0f }, { NULL } };
 
@@ -538,17 +550,18 @@ void snow_render(void) {
             mtx = get_projection_matrix_s16();
             gSPMatrixDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(mtx), G_MTX_DKR_INDEX_0);
             gSPSelectMatrixDKR(gCurrWeatherDisplayList++, G_MTX_DKR_INDEX_0);
-            material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
             while (i + gSnowVertOffset < gSnowVertCount) {
                 vtx = &gSnowVerts[i];
+                material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
                 gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), gSnowVertOffset, 0);
                 gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles), gSnowTriCount, 1);
                 i += gSnowVertOffset;
             }
             vtx = &gSnowVerts[i];
+            material_set_no_tex_offset(&gCurrWeatherDisplayList, gSnowGfx.texture, RENDER_Z_COMPARE);
             gSPVertexDKR(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(vtx), (gSnowVertCount - i), 0);
-            gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles), ((s32) (gSnowVertCount - i) >> 1),
-                       1);
+            gSPPolygon(gCurrWeatherDisplayList++, OS_K0_TO_PHYSICAL(gSnowTriangles),
+                       ((s32) (gSnowVertCount - i) >> 1), 1);
         }
     }
 }
@@ -738,7 +751,17 @@ void lensflare_render(Gfx **dList, Mtx **mats, Vertex **verts, Camera *camera) {
                 gDPSetPrimColor(gfxTemp++, 0, 0, lensFlareEntry->red, lensFlareEntry->green, lensFlareEntry->blue,
                                 (s32) (lensFlareEntry->alpha * magSquareSquared));
                 gDPSetCombineMode(gfxTemp++, G_CC_PRIMITIVE, G_CC_PRIMITIVE);
+#ifdef TARGET_DC
+                // The glare is a blended full-screen fill. The port draws it
+                // into the frame instead (dreamcast/cover.h), and skips the rect.
+                pc_glare_announce(lensFlareEntry->red, lensFlareEntry->green, lensFlareEntry->blue,
+                                  ((s32) (lensFlareEntry->alpha * magSquareSquared)) & 0xFF);
+                gDPNoOpTag(gfxTemp++, PC_GLARE_BEGIN_TAG);
+#endif
                 gDPFillRectangle(gfxTemp++, 0, 0, width, height);
+#ifdef TARGET_DC
+                gDPNoOpTag(gfxTemp++, PC_GLARE_END_TAG);
+#endif
                 gDPPipeSync(gfxTemp++);
                 *dList = gfxTemp;
                 rendermode_reset(dList);

@@ -133,24 +133,8 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 arg
     if (shading == NULL) {
         return;
     }
-#ifdef TARGET_DC
-    if (arg2) {
-        shz_xmtrx_load_4x4((const shz_mat4x4_t*)get_projection_matrix_f32());
-        shz_xmtrx_apply_rotation_zxy(-obj->trans.rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
-                                     -obj->trans.rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
-                                     -obj->trans.rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
-    } else {
-        shz_xmtrx_init_rotation_zxy(-obj->trans.rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
-                                    -obj->trans.rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
-                                    -obj->trans.rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
-    }
-    shz_xmtrx_apply_scale(4.0f, 4.0f, 4.0f);
-
-    shz_vec3_deref(&direction) =
-        shz_xmtrx_transform_vec3(shz_vec3_init(shading->shadowDirX,
-                                               shading->shadowDirY,
-                                               shading->shadowDirZ));
-#else
+    // As the game has it: the light through the view first (arg2), then into the
+    // object's frame. Once a frame per object, so the plain matrix code will do.
     direction.x = shading->shadowDirX << 2;
     direction.y = shading->shadowDirY << 2;
     direction.z = shading->shadowDirZ << 2;
@@ -167,7 +151,6 @@ void calc_dynamic_lighting_for_object_2(Object *obj, ObjectModel *model, s16 arg
     trans.z_position = 0.0f;
     mtxf_from_inverse_transform(&mtx, &trans);
     mtxf_transform_dir(&mtx, &direction, &direction);
-#endif
     colourBase = shading->unk0 * intensity * 255.0f;
 #ifdef TARGET_DC
     ambientFactorF = shading->ambient * colourBase;

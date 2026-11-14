@@ -15,7 +15,7 @@
 #include "tracks.h"
 #include <ultra64.h>
 #include "pc_swap.h"
-#if defined(DKR_FSAA) && DKR_FSAA && defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE
+#if defined(TARGET_DC) && defined(DKR_GFX_PROFILE) && DKR_GFX_PROFILE
 #include <stdio.h>
 #endif
 
@@ -2524,7 +2524,9 @@ UNUSED void render_active_particles(Gfx **dList, Mtx **mtx, Vertex **vtx) {
     }
 }
 
-#if defined(DKR_FSAA) && DKR_FSAA
+#ifdef TARGET_DC
+extern int pc_fsaa_on(void); // dreamcast/gfx.c: this scene renders with FSAA
+
 /**
  * With FSAA every blended pixel is filled twice over, and smoke and dust are
  * where it shows: big translucent billboards stacked in front of the camera.
@@ -2604,8 +2606,8 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
         return;
     }
     alpha = (particle->opacity >> 8) & 0xFF;
-#if defined(DKR_FSAA) && DKR_FSAA
-    if (alpha != 255 && particle->kind != PARTICLE_KIND_POINT && particle->kind != PARTICLE_KIND_LINE) {
+#ifdef TARGET_DC
+    if (alpha != 255 && particle->kind != PARTICLE_KIND_POINT && particle->kind != PARTICLE_KIND_LINE && pc_fsaa_on()) {
         alpha = fsaa_particle_alpha(particle, alpha);
         if (alpha >= 255) {
             alpha = 254; // stay in the blended path
@@ -2635,7 +2637,8 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
                 mtx_cam_push(dList, mtx, &particle->trans, 1.0f, 0.0f);
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
                 gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount,
+                           TRIN_ENABLE_TEXTURE);
                 mtx_pop(dList);
             }
         }
@@ -2663,7 +2666,8 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
                 tempvtx = &model->vertices[temp];
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
                 gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(tempvtx), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount,
+                           TRIN_ENABLE_TEXTURE);
                 if (particle->brightness != 255) {
                     gDPSetPrimColor((*dList)++, 0, 0, 255, 255, 255, 255);
                 }
@@ -2674,7 +2678,8 @@ void render_particle(Particle *particle, Gfx **dList, Mtx **mtx, Vertex **vtx, s
                 model = particle->model;
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);
                 gSPVertexDKR((*dList)++, OS_K0_TO_PHYSICAL(model->vertices), model->vertexCount, 0);
-                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount, TRIN_ENABLE_TEXTURE);
+                gSPPolygon((*dList)++, OS_K0_TO_PHYSICAL(model->triangles), model->triangleCount,
+                           TRIN_ENABLE_TEXTURE);
             } else if (particle->lineCreationPhase > 0) {
                 model = particle->model;
                 material_set(dList, model->texture, renderFlags, particle->textureFrame << 8);

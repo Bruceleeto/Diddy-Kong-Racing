@@ -35,18 +35,39 @@ PROF_SAMPLE_MAP ?= -1
 SHOW_FPS ?= 1
 # 1: the attract loop shows the title sequence once, then only the demo races, in a loop.
 DEMO_RACES_ONLY ?= 0
+# 1: the attract loop plays every race track, battle arena, hub and boss for
+# 25 s each with computer racers, after the title sequence (about 23 minutes).
+LEVEL_TOUR ?= 0
 # 1: the boot screen's swirl is the orange of the Dreamcast's own boot screen,
 # #FF5C00, instead of the European blue.
 SWIRL_ORANGE ?= 0
+# 1 builds in sh4-hotlayout's PC sampler and PMU windows (SHP_ROOT, a checkout
+# of sh4-hotlayout): build/dc/profile.shps and SHP-PMU lines at AUTO_EXIT_SECONDS.
+# Not with GFX_PROFILE=3/4 (both use TMU1) or GFX_PROFILE=1 (PRFC1).
+SHP ?= 0
+SHP_ROOT ?= ../sh4-hotlayout
+# 1 links the display-list walk's hot functions at the fixed slots of
+# dreamcast/hotlayout.tsv (sh4-hotlayout, in SHP_ROOT) instead of in .sub0.
+HOTLAYOUT ?= 0
+# Which hot set (a data-only config keeps the code in .sub0 with HOTLAYOUT_TEXT=0).
+HOTLAYOUT_CONFIG ?= dreamcast/hotlayout.tsv
+HOTLAYOUT_TEXT ?= 1
+# The hot data block's alignment (dreamcast/main.c sHotDataAnchor); 16384 keeps it at residue 0.
+HOT_DATA_ALIGN ?= 16384
 # With GFX_PROFILE: 1 adds what each list fills, by category (SCENE FILL lines).
 FILL_PROF ?= 0
 # With GFX_PROFILE, measurement only: leave part of the frame out, to see what
 # it costs the PVR (codes in dreamcast/gfx.c).
 PROF_SKIP ?= 0
 # Video fields per game frame: 2 locks to 30 fps, 1 aims for 60 and drops to 30 on a slow frame.
-FRAME_FIELDS ?= 2
+FRAME_FIELDS ?= 1
 # 1 renders twice as wide and filters down (horizontal anti-aliasing).
-FSAA ?= 0
+FSAA ?= 1
+# With FSAA=1: the maps drawn without it (comma-separated level ids), switched
+# at their scene load. Measured: Whale Bay 8, Boulder Canyon 19 and Frosty
+# Village 28 had most of the late frames with FSAA, and Walrus Cove 6 had 27
+# in its 25 s demo with FSAA and 3 without.
+FSAA_OFF_MAPS ?= 8,19,28,6
 # 1 adds controls to hold a frame and switch cutout modes; see dreamcast/main.c.
 # Measurement only: start the attract loop at this level's demo, and leave out the water.
 DEMO_LEVEL ?= -1
@@ -60,17 +81,14 @@ FSAA_PARTICLE_NEAR ?= 1
 FSAA_PARTICLE_NEAR_FADE ?= 50
 FSAA_PARTICLE_NEAR_CULL ?= 100
 DEBUG_VIEW ?= 0
+# 1 builds in enDjinn's debug menu: hold both triggers and press Up+X+Y.
+DEBUG_MENU ?= 1
+# Measurement only, with LEVEL_TOUR and DEMO_LEVEL: start that demo with this many players, for split screen.
+TOUR_PLAYERS ?= 1
 # 1 skips level batches whose bounding box is wholly outside the view (src/tracks.c).
 LEVEL_CULL ?= 1
 # 1 paces frames on the vblank interrupt instead of a sleep to a clock time.
 VBL_PACER ?= 1
-# 1 submits each frame through enDjinn's render lists (enj_state_startup,
-# enj_render_scene) instead of the port's own PVR scene calls.
-ENJ_RENDER ?= 0
-# 1 runs the game inside enDjinn's loop (enj_state_run); needs ENJ_RENDER=1.
-ENJ_LOOP ?= 0
-# 1 reads all four controller ports through enDjinn's controller layer.
-ENJ_INPUT ?= 0
 # 1 logs which parts of assets.bin a run reads (ASSET TRACE lines at auto-exit).
 ASSET_TRACE ?= 0
 # 1 loads all of assets.bin into RAM (10 MB) instead of reading it from disc.
@@ -96,6 +114,19 @@ include third_party/enDjinn/base_link.mk
 
 # bin/dkracing.elf
 TARGET := $(ENJ_BINDIR)/$(ENJ_BASENAME).elf
+ifeq ($(HOTLAYOUT),1)
+# The ordering file sh4-hotlayout makes from the hot set; check warns after
+# each link if an entry left its slot.
+HOTLAYOUT_TOOL := python3 $(SHP_ROOT)/tools/hotlayout.py
+HOTLAYOUT_LD := $(BUILD)/hotlayout.ld
+$(HOTLAYOUT_LD): $(HOTLAYOUT_CONFIG) $(SHP_ROOT)/tools/hotlayout.py
+	@mkdir -p $(dir $@)
+	$(HOTLAYOUT_TOOL) ld $< -o $@
+$(TARGET): $(HOTLAYOUT_LD)
+.PHONY: hotlayout-check
+hotlayout-check:
+	$(HOTLAYOUT_TOOL) check $(HOTLAYOUT_CONFIG) $(TARGET)
+endif
 MUSIC_SEQUENCES := 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65
 MUSIC_RAW_DIR := $(BUILD)/aicaflow/music_raw
 MUSIC_RAW_AFX := $(MUSIC_SEQUENCES:%=$(MUSIC_RAW_DIR)/sequence_%.afx)
@@ -131,7 +162,7 @@ cdi:
 	# The swirl's chime, when the build has one (SWIRL_CHIME_LEFT).
 	if [ -f $(CHIME_DIR)/chime.afb ]; then mkdir -p cdrom/build/dc/aicaflow/chime && \
 		cp $(CHIME_DIR)/chime.afb $(CHIME_DIR)/chime.afx cdrom/build/dc/aicaflow/chime/; fi
-	cp $(TEXTURE_PACK) cdrom/build/dc/
+	cp $(TEXTURE_PACK) $(NATIVE_PACK) cdrom/build/dc/
 	cp $(MODEL_SCENES) $(SONG_SCENES) cdrom/build/dc/
 	rm -rf cdrom/build/dc/texscenes cdrom/build/dc/assetscenes
 	cp -R $(BUILD)/texscenes cdrom/build/dc/
@@ -169,6 +200,21 @@ $(TEXTURE_PACK): dreamcast/build_pvr_textures.py dreamcast/textures.scenes asset
 	$(PYTHON) dreamcast/build_pvr_textures.py . $(PVRTEX) $@ --scenes $(BUILD)/texscenes \
 		--recorded dreamcast/textures.scenes $(if $(strip $(TEXTURE_PVRTEX_FLAGS)),--pvrtex-flags="$(TEXTURE_PVRTEX_FLAGS)")
 $(TARGET): $(TEXTURE_PACK)
+# The render-mode tables as src/textures_sprites.c has them, cut out of it and
+# printed by a host program, for the native mesh compiler.
+MATERIAL_TABLES := $(BUILD)/material_tables.json
+$(MATERIAL_TABLES): tools/dump_material_tables.c src/textures_sprites.c src/textures_sprites.h include/f3ddkr.h
+	@mkdir -p $(dir $@)
+	sed -n '/^Gfx dRenderSettingsVtxAlpha/,/^Gfx dBasicRenderSettingsZBOff/p' src/textures_sprites.c | sed '$$d' > $(BUILD)/material_tables.inc
+	cc -w -DMATERIAL_TABLES='"$(CURDIR)/$(BUILD)/material_tables.inc"' -D_LANGUAGE_C -DF3DDKR_GBI -DGBI_FLOAT_MTX \
+		-I. -Iinclude -Iinclude/PR -Iinclude/sys -Isrc -Ilibultra $< -o $(BUILD)/dump_material_tables
+	$(BUILD)/dump_material_tables > $@
+# Level geometry as ready PVR data; see dreamcast/build_native_meshes.py.
+NATIVE_PACK := $(BUILD)/native.pack
+$(NATIVE_PACK): dreamcast/build_native_meshes.py $(MATERIAL_TABLES) assets/assets.bin assets/assets.lut.bin
+	$(PYTHON) dreamcast/build_native_meshes.py assets/assets.bin assets/assets.lut.bin $(MATERIAL_TABLES) $@
+$(TARGET): $(NATIVE_PACK)
+$(BUILD)/dreamcast/native.o: $(BUILD)/dkr_asset_mount.h
 # The object models each scene's gate loads and holds (dreamcast/models.scenes).
 MODEL_SCENES := $(BUILD)/models.scenes
 $(MODEL_SCENES): dreamcast/models.scenes
@@ -215,6 +261,12 @@ $(CHIME_STAMP): force-chime dreamcast/swirl/make_chime.py $(AICAFLOW_AUTHOR) $(A
 	$(PYTHON) dreamcast/swirl/make_chime.py $(CHIME_DIR) $(SWIRL_CHIME_MODE) \
 		"$(SWIRL_CHIME_LEFT)" "$(SWIRL_CHIME_RIGHT)" $(AICAFLOW_AUTHOR) $(AICAFLOW_PROFILER)
 # "n't" after the title beach's Nintendo logo (dreamcast/scrawl.c embeds both).
+# The VMU save's icon: Diddy's portrait from the ROM (dreamcast/build_vmu_icon.py).
+VMU_ICON := $(BUILD)/vmu_icon.h
+$(VMU_ICON): assets/.vanilla/us.v77/textures/2d/hud/diddy_icon.png dreamcast/build_vmu_icon.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) dreamcast/build_vmu_icon.py $< $@
+$(BUILD)/dreamcast/reimpl.o: $(VMU_ICON)
 SCRAWL_GRID := $(BUILD)/scrawl_grid.h
 SCRAWL_TEXTURE := $(BUILD)/scrawl.dt
 # One run writes both; the normal map is the target, the grid comes with it.

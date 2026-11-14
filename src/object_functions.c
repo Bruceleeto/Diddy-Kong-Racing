@@ -33,6 +33,11 @@
 #include "waves.h"
 #include "weather.h"
 
+#ifdef TARGET_DC
+// dreamcast/native.c: a level batch's texture coordinates moved.
+extern void pc_nat_batch_scroll(s32 segment, s32 batch, s32 du, s32 dv);
+#endif
+
 /************ .data ************/
 
 // Unsure about the signed/unsigned with these arrays.
@@ -1774,6 +1779,9 @@ void obj_loop_animator(Object *obj, s32 updateRate) {
                 curTriangle->uv2.u += t0;
             }
         }
+#ifdef TARGET_DC
+        pc_nat_batch_scroll(animator->segmentId, animator->batchId, t0, t1);
+#endif
     }
 }
 
@@ -5609,6 +5617,9 @@ void obj_loop_texscroll(Object *obj, s32 updateRate) {
                         curTriangle->uv2.u += t0;
                     }
                 }
+#ifdef TARGET_DC
+                pc_nat_batch_scroll(i, j, t0, t1);
+#endif
             }
         }
     }

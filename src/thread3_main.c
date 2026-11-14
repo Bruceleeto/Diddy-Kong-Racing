@@ -47,7 +47,16 @@
 #include <PR/os_cont.h>
 #include <PR/os_time.h>
 #include "../dreamcast/prof.h"
+#ifdef NAT_DIRECT
+extern void pc_nat_frame_reset(void);
+#define NAT_FRAME_RESET() pc_nat_frame_reset()
+#else
+#define NAT_FRAME_RESET() ((void) 0)
+#endif
 #include "../dreamcast/scene_gate.h"
+#ifdef TARGET_DC
+extern void pc_gfx_task_hold(void); // dreamcast/main.c
+#endif
 #ifdef DKR_AICAFLOW
 #include "../dreamcast/audio_aicaflow.h"
 #endif
@@ -184,9 +193,9 @@ void thread3_main(UNUSED void *unused) {
     gSaveDataFlags = input_update(gSaveDataFlags, 0);
     sBootDelayTimer = 0;
     gGameMode = GAMEMODE_INTRO;
-#if defined(TARGET_PC) && DKR_ENJ_LOOP
-    // enDjinn runs the loop (ENJ_LOOP=1): each of its frames calls
-    // thread3_frame, then submits the display list the frame built.
+#ifdef TARGET_DC
+    // enDjinn runs the loop: each of its frames calls thread3_frame, then submits
+    // what the frame queued.
     {
         extern void pc_enj_loop_run(void (*frame)(void *));
         pc_enj_loop_run(thread3_frame);
@@ -280,6 +289,7 @@ void init_game(void) {
     gSPTaskNum = 0;
 
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gDPFullSync(gCurrDisplayList++);
     gSPEndDisplayList(gCurrDisplayList++);
 
@@ -299,12 +309,13 @@ void main_game_loop(void) {
 
     if (gScreenStatus == MESG_SKIP_BUFFER_SWAP) {
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         rsp_segment(&gCurrDisplayList, SEGMENT_MAIN, 0x00000000);
         rsp_segment(&gCurrDisplayList, SEGMENT_FRAMEBUFFER, (s32) gVideoCurrFramebuffer);
         rsp_segment(&gCurrDisplayList, SEGMENT_ZBUFFER, (s32) gVideoLastDepthBuffer);
         rsp_segment(&gCurrDisplayList, SEGMENT_FRAMEBUFFER_OFFSET, (s32) gVideoCurrFramebuffer - VI_OFFSET); // Unused
     }
-#if !(defined(TARGET_PC) && DKR_ENJ_LOOP)
+#ifndef TARGET_DC
     if (gDrawFrameTimer == 0) {
         gfxtask_run_xbus(gDisplayLists[gSPTaskNum], gCurrDisplayList, 0);
         gSPTaskNum += 1;
@@ -316,6 +327,7 @@ void main_game_loop(void) {
     }
 
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gGameCurrMatrix = gMatrixHeap[gSPTaskNum];
     gGameCurrVertexList = gVertexHeap[gSPTaskNum];
     gGameCurrTriList = gTriangleHeap[gSPTaskNum];
@@ -409,15 +421,17 @@ void main_game_loop(void) {
 #if REGION == REGION_JP
     func_800C78E0_C84E0();
 #endif
-#if defined(TARGET_PC) && DKR_ENJ_LOOP
-    // Under enDjinn's loop the frame's own display list is queued here and
-    // drawn as soon as this iteration returns, after the pacer's wait: the
-    // same place in time as at the top of the next iteration, where the plain
-    // loop draws it. Nothing changes gDrawFrameTimer in between.
+#ifdef TARGET_DC
+    // Under enDjinn's loop the frame goes out as soon as this iteration returns,
+    // after the pacer's wait: the same place in time as at the top of the next
+    // iteration, where the N64 hands it over. A frame the blackout timer drops
+    // is no scene at all: the picture on screen stays.
     if (gDrawFrameTimer == 0) {
         gfxtask_run_xbus(gDisplayLists[gSPTaskNum], gCurrDisplayList, 0);
         gSPTaskNum += 1;
         gSPTaskNum &= 1;
+    } else {
+        pc_gfx_task_hold();
     }
 #endif
 }
@@ -479,6 +493,7 @@ void unload_level_game(void) {
     hud_free();
     free_game_text_table();
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gDPFullSync(gCurrDisplayList++);
     gSPEndDisplayList(gCurrDisplayList++);
     mempool_free_timer(2);
@@ -1063,6 +1078,7 @@ void mode_menu(s32 updateRate) {
     if (menuLoopResult != -1 && menuLoopResult & MENU_RESULT_FLAGS_200) {
         unload_level_menu();
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         gDPFullSync(gCurrDisplayList++);
         gSPEndDisplayList(gCurrDisplayList++);
         gPlayableMapId = menuLoopResult & 0x7F;
@@ -1129,6 +1145,7 @@ void mode_menu(s32 updateRate) {
     if (menuLoopResult & MENU_RESULT_FLAGS_80 && menuLoopResult != -1) {
         unload_level_menu();
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         gDPFullSync(gCurrDisplayList++);
         gSPEndDisplayList(gCurrDisplayList++);
 
@@ -1150,6 +1167,7 @@ void mode_menu(s32 updateRate) {
     if (menuLoopResult > 0) {
         unload_level_menu();
         gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
         gDPFullSync(gCurrDisplayList++);
         gSPEndDisplayList(gCurrDisplayList++);
         gGameMode = GAMEMODE_INGAME;
@@ -1170,6 +1188,7 @@ void load_level_for_menu(s32 levelId, s32 numberOfPlayers, s32 cutsceneId) {
         unload_level_menu();
         if (bgload_active() == FALSE) {
             gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
             gDPFullSync(gCurrDisplayList++);
             gSPEndDisplayList(gCurrDisplayList++);
         }
@@ -1520,6 +1539,7 @@ void alloc_displaylist_heap(s32 numberOfPlayers) {
         mempool_free_timer(2);
     }
     gCurrDisplayList = gDisplayLists[gSPTaskNum];
+    NAT_FRAME_RESET();
     gGameCurrMatrix = gMatrixHeap[gSPTaskNum];
     gGameCurrTriList = gTriangleHeap[gSPTaskNum];
     gGameCurrVertexList = gVertexHeap[gSPTaskNum];

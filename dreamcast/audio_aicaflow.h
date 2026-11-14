@@ -20,6 +20,12 @@ void dkr_afx_music_lane_mute(uint8_t lane, int muted);
 void dkr_afx_music_lane_volume(uint8_t lane, uint8_t volume);
 void dkr_afx_music_lane_fade(uint8_t lane, uint8_t fade);
 void dkr_afx_scene_reverb(uint8_t enabled);
+/* The room reverb's level (the debug menu's Reverb row). Off only mutes the
+ * returns; the others take effect at the next audio update by installing the
+ * room program again, which cuts the tail that is sounding. Any thread. */
+enum { DKR_REVERB_OFF, DKR_REVERB_FAINT, DKR_REVERB_NORMAL, DKR_REVERB_STRONG, DKR_REVERB_LEVELS };
+extern int gDkrReverbLevel;
+void dkr_afx_reverb_level(int level);
 int dkr_afx_sfx_scene_prepare(uint16_t level);
 /* Called by the scene gate (dreamcast/scene_gate.c): hold back new sounds and music. */
 void dkr_afx_scene_hold(int held);
