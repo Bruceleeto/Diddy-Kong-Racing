@@ -34,9 +34,6 @@
 #include "tracks.h"
 #include "types.h"
 #include "video.h"
-#ifdef TARGET_DC
-extern void pc_set_60fps(int on); // dreamcast/main.c
-#endif
 
 /**
  * @file Contains all the code used for every menu in the game.
@@ -6685,8 +6682,7 @@ void cheatlist_render(UNUSED s32 updateRate) {
 		"ROM CHECKSUM",         // Bit 28: Letrero de depuración original)
         "FLYING CARS",          // Bit 29: Autos voladores sin ruedas (Hovercar ID 3)
 		"FLIPPED SCREEN",       // Bit 30: Pantalla 180° de cabeza)
-		"60 FPS 1 PLAYER"       // Bit 31: 60 FPS MODO INTELIGENTE Si hay 2, 3 o 4 jugadores, bloquea a 30 FPS
-	   };                        // En 1 Jugador, usa la velocidad seleccionada (60 FPS si el truco está en ON)
+	   };
    
 
     set_text_background_colour(0, 0, 0, 0);
@@ -6699,7 +6695,7 @@ void cheatlist_render(UNUSED s32 updateRate) {
     draw_text(&sMenuCurrDisplayList, SCREEN_WIDTH_HALF, 18, gMenuText[ASSET_MENU_TEXT_MAGICCODESLIST], ALIGN_MIDDLE_CENTER);
 
     // 🟢 Mete directamente los 31 trucos desbloqueados a la lista
-    for (i = 0, numOfUnlockedCheats = 0; i < 32; i++) {
+    for (i = 0, numOfUnlockedCheats = 0; i < 31; i++) {
         gUnlockedCheatIDs[numOfUnlockedCheats] = i;
         numOfUnlockedCheats++;
     }
@@ -6825,7 +6821,7 @@ s32 menu_magic_codes_list_loop(s32 updateRate) {
     }
 
     // 🟢 31 trucos desbloqueados listos para control
-     for (i = 0, numUnlockedCodes = 0; i < 32; i++) {
+     for (i = 0, numUnlockedCodes = 0; i < 31; i++) {
         gUnlockedCheatIDs[numUnlockedCodes] = i;
         numUnlockedCodes++;
     }
@@ -6840,16 +6836,21 @@ s32 menu_magic_codes_list_loop(s32 updateRate) {
         code = 1u << currentCheatID;
         gActiveMagicCodes ^= code; // Alterna entre ON y OFF
 		
-		 // 🟢 Al activar o desactivar el truco 31:
-#ifdef TARGET_DC
-        if (currentCheatID == 31) {
-            pc_set_60fps(((u32) gActiveMagicCodes & (1u << 31)) != 0);
-        }
-#endif
-
         // Exclusiones de trucos incompatibles originales
         cheatlist_exclusive(code, CHEAT_BIG_CHARACTERS, CHEAT_SMALL_CHARACTERS);
         cheatlist_exclusive(code, CHEAT_SMALL_CHARACTERS, CHEAT_BIG_CHARACTERS);
+        cheatlist_exclusive(code, CHEAT_DISABLE_BANANAS,
+                            CHEAT_NO_LIMIT_TO_BANANAS | CHEAT_BANANAS_REDUCE_SPEED | CHEAT_START_WITH_10_BANANAS);
+        cheatlist_exclusive(code, CHEAT_NO_LIMIT_TO_BANANAS | CHEAT_BANANAS_REDUCE_SPEED | CHEAT_START_WITH_10_BANANAS,
+                            CHEAT_DISABLE_BANANAS);
+        cheatlist_exclusive(code, CHEAT_DISABLE_WEAPONS,
+                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE |
+                                CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW |
+                                CHEAT_MAXIMUM_POWER_UP);
+        cheatlist_exclusive(code,
+                            CHEAT_ALL_BALLOONS_ARE_RED | CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE |
+                                CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW | CHEAT_MAXIMUM_POWER_UP,
+                            CHEAT_DISABLE_WEAPONS);
         cheatlist_exclusive(code, CHEAT_BANANAS_REDUCE_SPEED, CHEAT_START_WITH_10_BANANAS);
         cheatlist_exclusive(code, CHEAT_START_WITH_10_BANANAS, CHEAT_BANANAS_REDUCE_SPEED);
         cheatlist_exclusive(code, CHEAT_ALL_BALLOONS_ARE_RED, CHEAT_ALL_BALLOONS_ARE_GREEN | CHEAT_ALL_BALLOONS_ARE_BLUE | CHEAT_ALL_BALLOONS_ARE_YELLOW | CHEAT_ALL_BALLOONS_ARE_RAINBOW);
@@ -7144,11 +7145,6 @@ void charselect_new_player(void) {
     s32 j;
     s32 takenChar;
     s32 var_a2;
-
-    // 🟢 Si el truco MULTI ADVENTURE no está encendido, solo juega el Jugador 1:
-    if (!(gActiveMagicCodes & CHEAT_TWO_PLAYER_ADVENTURE)) {
-        return;
-    }
 
     for (i = 0; i < MAXCONTROLLERS; i++) {
         if (!gActivePlayersArray[i]) {

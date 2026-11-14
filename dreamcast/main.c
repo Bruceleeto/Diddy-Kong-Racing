@@ -44,14 +44,6 @@ static OSThread sHostThread;
 // Video fields per game frame: FRAME_FIELDS, or the debug menu's Framerate.
 static s32 sFrameFields = PC_LOGIC_UPDATE_RATE;
 
-/** The magic codes menu's 60 FPS cheat (src/menu.c): 60 fps on, or back to 30. */
-void pc_set_60fps(int on) {
-    extern void frame_interp_realign(void);
-
-    sFrameFields = on ? 1 : 2;
-    frame_interp_realign();
-}
-
 // ---------------------------------------------------------------------------
 // Frame profile (GFX_PROFILE=1): where a frame's time goes and how much
 // geometry it submits. GFX_PROFILE_SKIP=1 transforms and culls but sends no
