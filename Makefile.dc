@@ -106,7 +106,7 @@ AUTO_EXIT_SECONDS ?= 0
 EEPROM_PRESET_100 ?= 1
 # sh4zam's backend; SHZ_SW is the portable C one, built without fast math.
 SHZ_BACKEND ?= SHZ_SH4
-FAST_MATH ?= $(if $(filter SHZ_SW,$(SHZ_BACKEND)),-fno-fast-math,-ffast-math)
+FAST_MATH ?= -fno-fast-math
 
 # How the port is compiled and linked: local.cfg.mk, read by enDjinn's
 # base_link.mk.
