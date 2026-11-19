@@ -701,7 +701,7 @@ typedef struct {
 // Which screen-space winding is a front face. Screen y runs downwards, so this is
 // the opposite sign from the y-up convention. Flip if the world renders
 // inside-out (outer surfaces gone, inner ones visible).
-#define GFX_FRONT_FACE_SIGN (-1.0f)
+#define GFX_FRONT_FACE_SIGN sFrontFaceSign
 
 static DKR_HOT u32 sGfxFrameCount = 0;
 
@@ -723,6 +723,9 @@ _Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields 
 static DKR_HOT s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
 
 static DKR_HOT f32 sVpScaleX = N64_SCREEN_W / 2.0f;
+// The sign of a front face's area on screen. A viewport with one axis turned
+// (Mirrored Tracks negates the x scale, src/camera.c) turns every winding with it.
+static DKR_HOT f32 sFrontFaceSign = -1.0f;
 static DKR_HOT f32 sVpScaleY = N64_SCREEN_H / 2.0f;
 static DKR_HOT f32 sVpTransX = N64_SCREEN_W / 2.0f;
 static DKR_HOT f32 sVpTransY = N64_SCREEN_H / 2.0f;
@@ -2893,6 +2896,8 @@ static __attribute__((noinline, cold)) void set_viewport(const Vp *vp) {
     sVpScaleY = vp->vp.vscale[1] / 4.0f;
     sVpTransX = vp->vp.vtrans[0] / 4.0f;
     sVpTransY = vp->vp.vtrans[1] / 4.0f;
+    sFrontFaceSign = (sVpScaleX * sVpScaleY < 0.0f) ? 1.0f : -1.0f;
+    gfx_set_mirror(sFrontFaceSign > 0.0f);
 
     // The rectangle NDC +-1 maps onto. The scale carries a sign (y is commonly
     // negative, since screen y runs the other way from clip y), so take it off
@@ -2953,6 +2958,7 @@ void pc_nat_run_viewport(const void *viewport, NatView *view) {
     view->vpScaleY = sVpScaleY;
     view->vpTransX = sVpTransX;
     view->vpTransY = sVpTransY;
+    view->cull = -sFrontFaceSign;
 }
 
 void pc_nat_run_scissor(const f32 *f) {

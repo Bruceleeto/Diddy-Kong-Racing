@@ -182,6 +182,7 @@ static int sPendingFreeCount;
 
 static DKR_HOT int sRoute;
 static DKR_HOT int sNatNoFog; // the game has G_FOG off: native headers go without
+static DKR_HOT int sNatMirror; // the viewport is mirrored: clockwise culling becomes anticlockwise
 
 
 // PVR punch-through alpha threshold: a texel with alpha below this is discarded
@@ -1587,14 +1588,23 @@ int gfx_texture_opaque(unsigned int handle) {
     return handle != 0 && handle <= MAX_TEXTURES && sTextures[handle - 1].opaque;
 }
 
+void gfx_set_mirror(int mirrored) {
+    sNatMirror = mirrored;
+}
+
 DKR_NAT_CODE void gfx_nat_header(const void *hdr) {
     pvr_poly_hdr_t scissored;
 
     scissor_send();
-    if (sScisEnable || sNatNoFog) {
+    if (sScisEnable || sNatNoFog || sNatMirror) {
         shz_memcpy32(&scissored, hdr, sizeof(scissored));
         if (sScisEnable) {
             scissored.cmd |= PVR_USERCLIP_INSIDE << 16;
+        }
+        // The pack's one-sided mats cull clockwise (dreamcast/build_native_meshes.py);
+        // PVR_CULLING_CW and _CCW differ in the low bit of the field.
+        if (sNatMirror && (scissored.mode1 & (2u << PVR_TA_PM1_CULLING_SHIFT))) {
+            scissored.mode1 ^= 1u << PVR_TA_PM1_CULLING_SHIFT;
         }
         if (sNatNoFog) {
             scissored.mode2 = (scissored.mode2 & ~PVR_TA_PM2_FOG_MASK) | (PVR_FOG_DISABLE << PVR_TA_PM2_FOG_SHIFT);

@@ -127,6 +127,7 @@ void gfx_draw_tris(const GfxTriVert *verts, int count);
 // header in the list that is open; they go on by the store queues.
 void gfx_nat_header(const void *hdr);
 void gfx_nat_set_fog(int enable); // off: headers go without, whatever they were compiled with
+void gfx_set_mirror(int mirrored); // the viewport turns windings: culled headers cull the other way
 void gfx_nat_scale(float *x, float *y);
 // A scissor not on the tiles: a run's triangles then go through this one by one,
 // in N64 pixels with texture coordinates as written.

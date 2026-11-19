@@ -109,6 +109,8 @@ typedef struct {
 static DKR_HOT NatPlane sPlanes[5];
 static DKR_HOT const f32 *sPlanesFor; // the matrix they are of; NULL when a frame starts
 static DKR_HOT s32 sListRoute;        // the list that is open, as the pack has it
+// A list's pass: what the viewport and the scissor have come to, as far as it got.
+static NatView sView;
 
 // A position as a frame leaves it, and for an object model its colour.
 typedef struct {
@@ -1385,7 +1387,7 @@ static __attribute__((noinline, cold)) void nat_tris_layered(const NatMaterial *
         if (!(t->flags & BACKFACE_DRAW)) {
             const NatPoint *p0 = &sPoints[at[0]], *p1 = &sPoints[at[1]], *p2 = &sPoints[at[2]];
 
-            if (((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y)) >= 0.0f) {
+            if ((((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y))) * sView.cull >= 0.0f) {
                 continue;
             }
         }
@@ -1476,7 +1478,8 @@ static __attribute__((noinline, cold)) void nat_tris_layered_clip(const NatView 
             px[j] = (pc[j].x * inv * view->vpScaleX) + view->vpTransX;
             py[j] = view->vpTransY - (pc[j].y * inv * view->vpScaleY);
         }
-        if (!(t->flags & BACKFACE_DRAW) && ((px[1] - px[0]) * (py[2] - py[0])) - ((px[2] - px[0]) * (py[1] - py[0])) >= 0.0f) {
+        if (!(t->flags & BACKFACE_DRAW) &&
+            (((px[1] - px[0]) * (py[2] - py[0])) - ((px[2] - px[0]) * (py[1] - py[0]))) * sView.cull >= 0.0f) {
             continue;
         }
         for (j = 1; j + 1 < n && count + 3 <= 3 * 64; j++) {
@@ -1582,7 +1585,7 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
             if (!(t->flags & BACKFACE_DRAW)) {
                 const NatPoint *p0 = &sPoints[t->vi0], *p1 = &sPoints[t->vi1], *p2 = &sPoints[t->vi2];
 
-                if (((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y)) >= 0.0f) {
+                if ((((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y))) * sView.cull >= 0.0f) {
                     continue;
                 }
             }
@@ -1608,7 +1611,7 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
         if (!(t->flags & BACKFACE_DRAW)) {
             f32 area = ((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y));
 
-            if (area >= 0.0f) {
+            if (area * sView.cull >= 0.0f) {
                 continue;
             }
         }
@@ -1902,9 +1905,6 @@ __attribute__((noinline)) void pc_nat_sprite_run(const NatView *view, const NatR
         }
     }
 }
-
-// A list's pass: what the viewport and the scissor have come to, as far as it got.
-static NatView sView;
 
 void pc_nat_list_begin(pvr_list_t list) {
     sListRoute = list == PVR_LIST_OP_POLY ? NAT_LIST_OP : list == PVR_LIST_PT_POLY ? NAT_LIST_PT : NAT_LIST_TR;
