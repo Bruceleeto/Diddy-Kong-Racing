@@ -1111,6 +1111,11 @@ void dkr_afx_music_play(uint8_t sequence) {
     if (!dkr_afx_music_prepare(sequence)) {
         __atomic_store_n(&sFailedSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
         __atomic_store_n(&sWantedSequence, sequence, __ATOMIC_RELEASE);
+        /* The game sets a song's own tempo just before it plays it. Taken here and
+         * not when the flow starts, so a tempo raised since (the final lap) is
+         * still a raise when the song comes round again. */
+        sAuthoredTempo = __atomic_load_n(&sTempo, __ATOMIC_ACQUIRE);
+        if (!sAuthoredTempo) sAuthoredTempo = 120;
     }
     pc_audio_unlock();
 }
@@ -1465,12 +1470,9 @@ void dkr_afx_update(void) {
         wanted != __atomic_load_n(&sFailedSequence, __ATOMIC_ACQUIRE)) {
         afx_asset_t flow = music_flow_for(wanted);
         int result = flow ? AFX_OK : -AFX_BAD_FORMAT;
-        if (!result) {
-            sAuthoredTempo = __atomic_load_n(&sTempo, __ATOMIC_ACQUIRE);
-            if (!sAuthoredTempo) sAuthoredTempo = 120;
-            result = benchmark_activate(flow, &sMusic, "sequence", wanted);
-        }
-        if (result == -AFX_BUSY) goto done;
+        if (!result) result = benchmark_activate(flow, &sMusic, "sequence", wanted);
+        /* A full command queue empties by the next update, like a busy driver. */
+        if (result == -AFX_BUSY || result == -AFX_IPC_FULL) goto done;
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             /* Music is continuous; make room before retrying next update. */
             (void)sfx_preempt(UINT8_MAX);
@@ -1485,6 +1487,9 @@ void dkr_afx_update(void) {
         __atomic_fetch_or(&sControlDirty, 3u, __ATOMIC_RELEASE);
         __atomic_fetch_or(&sMuteDirty, 0xffffu, __ATOMIC_RELEASE);
         __atomic_fetch_or(&sVolumeDirty, 0xffffu, __ATOMIC_RELEASE);
+        /* Behind the activation in the same queue: an instance starts at full gain,
+         * and one update later is 33 ms of the song far too loud. */
+        apply_controls();
     }
 done:
 #if DKR_AICAFLOW_BENCHMARK
