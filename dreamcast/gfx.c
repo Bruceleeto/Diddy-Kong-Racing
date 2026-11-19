@@ -210,6 +210,8 @@ static int sWindowW = 320; // the width gfx_window_init was given, for sScaleX
 static void header_cache_clear(void);
 extern void pc_textures_vram_lost(void); // dreamcast/main.c
 extern void pc_scrawl_vram_lost(void);   // dreamcast/scrawl.c
+extern void pc_swirl_vram_lost(void);    // dreamcast/swirl.c
+static unsigned int sFogTableRgb;        // defined with the fog table, below
 
 /**
  * enDjinn restarted the PVR (pc_fsaa_set): every block of video memory is gone.
@@ -229,8 +231,10 @@ static void gfx_vram_lost(void *data) {
     sRenderW = DC_SCREEN_W * enj_video_xscale();
     sScaleX = (float) DC_RENDER_W / (float) sWindowW;
     *((volatile unsigned int *) DKR_PT_ALPHA_REF_ADDR) = PT_ALPHA_REF_VALUE;
+    sFogTableRgb = 0xFFFFFFFFu; // pvr_init set the fog registers itself
     pc_textures_vram_lost();
     pc_scrawl_vram_lost();
+    pc_swirl_vram_lost();
 }
 
 int pc_fsaa_on(void) {

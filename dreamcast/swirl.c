@@ -252,6 +252,13 @@ static inline u32 argb(float r, float g, float b) {
            (u32) (shz_clampf(g, 0.0f, 1.0f) * 255.0f) << 8 | (u32) (shz_clampf(b, 0.0f, 1.0f) * 255.0f);
 }
 
+/** The PVR was restarted: the glint and the halos are gone with its memory. */
+void pc_swirl_vram_lost(void) {
+    sGlintTexture = NULL;
+    sHaloTexture = NULL;
+    sHaloSideTexture = NULL;
+}
+
 static void headers_init(void) {
     const u32 *glow = (const u32 *) sSwirlGlow;
     const int size = glow[0];
