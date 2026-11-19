@@ -976,23 +976,34 @@ static s32 prebuilt_open(void) {
     return TRUE;
 }
 
-/** Drop prebuilt frames whose texels lay in freed memory. */
-static void prebuilt_forget(u32 lo, u32 hi) {
-    s32 i;
+/** A texture of the frame's own goes, and with it what the native renderer compiled on it. */
+static void texture_delete(u32 handle) {
+    gfx_delete_texture(handle);
+    pc_nat_texture_deleted(handle);
+}
+
+/**
+ * Drop prebuilt frames whose texels lay in freed memory. A bundle's frame keeps
+ * its handle and its video memory, so the materials on it stay good; only a
+ * deleted texture's go. Returns whether any frame went.
+ */
+static s32 prebuilt_forget(u32 lo, u32 hi) {
+    s32 i, any = FALSE;
 
     for (i = 0; i < sPrebuiltCount;) {
         if (sPrebuilt[i].timg >= lo && sPrebuilt[i].timg < hi) {
             if (sPrebuilt[i].bundle >= 0) {
                 sBundle[sPrebuilt[i].bundle].claimed = FALSE;
             } else {
-                gfx_delete_texture(sPrebuilt[i].handle);
+                texture_delete(sPrebuilt[i].handle);
             }
             sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
-            pc_nat_materials_forget();
+            any = TRUE;
         } else {
             i++;
         }
     }
+    return any;
 }
 
 static s32 prebuilt_find(u32 timg) {
@@ -1018,7 +1029,9 @@ static s32 prebuilt_register(TextureHeader *frame, u32 handle, u16 width, u16 he
     if (sPrebuiltCount >= PREBUILT_MAX) {
         return FALSE;
     }
-    prebuilt_forget(timg, timg + 1); // memory reused for a new asset
+    if (prebuilt_forget(timg, timg + 1)) { // memory reused for a new asset
+        pc_nat_tiles_forget();
+    }
     sPrebuilt[sPrebuiltCount].timg = timg;
     sPrebuilt[sPrebuiltCount].handle = handle;
     sPrebuilt[sPrebuiltCount].width = width;
@@ -1252,7 +1265,9 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         if (handle == 0) {
             break;
         }
-        prebuilt_forget(timg, timg + 1); // memory reused for a new asset
+        if (prebuilt_forget(timg, timg + 1)) { // memory reused for a new asset
+            pc_nat_tiles_forget();
+        }
         sPrebuilt[sPrebuiltCount].timg = timg;
         sPrebuilt[sPrebuiltCount].handle = handle;
         sPrebuilt[sPrebuiltCount].width = record[0];
@@ -1447,22 +1462,25 @@ void pc_song_scene_load(int level) {
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
     u32 lo = (u32) addr;
     u32 hi = lo + (u32) size;
-    s32 i;
+    s32 i, any = FALSE;
 
     for (i = 0; i < sTexCacheCount;) {
         GfxTexture *t = &sTexCache[i];
 
         if ((t->timg >= lo && t->timg < hi) || (t->tlut >= lo && t->tlut < hi)) {
             if (!t->prebuilt) {
-                gfx_delete_texture(t->handle);
+                texture_delete(t->handle);
             }
             sTexCache[i] = sTexCache[--sTexCacheCount];
             sTexStateDirty = TRUE;
+            any = TRUE;
         } else {
             i++;
         }
     }
-    prebuilt_forget(lo, hi);
+    if (prebuilt_forget(lo, hi) || any) {
+        pc_nat_tiles_forget();
+    }
 }
 
 /**
@@ -1773,7 +1791,8 @@ static __attribute__((noinline, cold)) u32 texture_lookup_slow(const u8 *tlut, u
             }
         }
         if (!sTexCache[oldest].prebuilt) {
-            gfx_delete_texture(sTexCache[oldest].handle);
+            texture_delete(sTexCache[oldest].handle);
+            pc_nat_tiles_forget();
         }
         sTexCache[oldest] = sTexCache[--sTexCacheCount];
     }
@@ -3135,6 +3154,7 @@ static void debug_view_apply(void) {
         }
     }
     sTexCacheCount = 0;
+    pc_nat_materials_forget();
     memset(sTexHint, 0, sizeof(sTexHint));
     sTexStateDirty = TRUE;
     printf("DEBUG VIEW: mode %d\n", (int) sDebugMode);

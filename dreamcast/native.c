@@ -38,6 +38,9 @@
 #define NAT_CC_SHADE 1
 #define NAT_CC_WHITE 2
 
+// NatMaterial.used: TRUE, or this for one whose texture is gone (pc_nat_texture_deleted).
+#define NAT_MATERIAL_DEAD 2
+
 struct NatMaterial {
     pvr_poly_hdr_t hdr; // no culling: these go out as triangles, culled here
     f32 uMul, vMul;
@@ -1184,6 +1187,30 @@ void pc_nat_materials_forget(void) {
 }
 
 /**
+ * A texture was deleted, and its handle may name another one next. The materials
+ * compiled on it must not be found again, but records already queued this frame
+ * still point at them, so they keep their slot and their header: dead, they match
+ * nothing. pc_nat_materials_forget takes the slots back.
+ */
+void pc_nat_texture_deleted(u32 handle) {
+    s32 i;
+
+    if (handle == 0) {
+        return;
+    }
+    for (i = 0; i < NAT_MATERIALS; i++) {
+        if (sMaterials[i].used && sMaterials[i].handle == handle) {
+            sMaterials[i].used = NAT_MATERIAL_DEAD;
+        }
+    }
+}
+
+/** Texels were freed: a sprite's tile is known by where they lay. */
+void pc_nat_tiles_forget(void) {
+    shz_memset8(sTiles, 0, sizeof(sTiles));
+}
+
+/**
  * A combiner's rule, for a material made up on the console: the same trial as
  * dreamcast/build_native_meshes.py combiner_rule, under a few colours.
  */
@@ -1320,8 +1347,8 @@ static const NatMaterial *nat_material(u32 w0, u32 w1, u32 omh, u32 oml, const N
         if (!m->used) {
             return nat_material_compile(m, w0, w1, omh, oml, tex, geometry);
         }
-        if (m->combine0 == w0 && m->combine1 == w1 && m->otherH == omh && m->otherL == oml && m->handle == handle &&
-            m->geometry == geometry) {
+        if (m->used == TRUE && m->combine0 == w0 && m->combine1 == w1 && m->otherH == omh && m->otherL == oml &&
+            m->handle == handle && m->geometry == geometry) {
             return m;
         }
     }

@@ -157,6 +157,8 @@ void pc_nat_level_load(s32 modelId);
 void pc_nat_level_free(void);
 void pc_nat_vram_lost(void);
 void pc_nat_materials_forget(void);
+void pc_nat_texture_deleted(u32 handle);
+void pc_nat_tiles_forget(void);
 // Batch `batch` of a segment on: 0 if the game has to draw it; otherwise how many
 // batches, from it, the record this adds draws.
 s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);
