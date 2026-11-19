@@ -8560,7 +8560,7 @@ void calc_env_mapping_for_object(ObjectModel *model, s16 zRot, s16 xRot, s16 yRo
 #ifdef TARGET_DC
             xmtrx_init_transform(&objTrans);
             if (sp70 != 0) {
-                shz_xmtrx_apply_scale(4.0f, 4.0f, 4.0f);
+                shz_xmtrx_scale(4.0f, 4.0f, 4.0f);
                 shz_xmtrx_set_translation(32768.0f, 32768.0f, 32768.0f);
             }
 #endif

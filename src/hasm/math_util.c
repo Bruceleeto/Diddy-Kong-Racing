@@ -442,20 +442,20 @@ void mtxs_transform_dir(MtxS *mi, Vec3s *vec) {
 
 #ifdef TARGET_DC
 void xmtrx_init_transform(ObjectTransform *trans) {
-    shz_xmtrx_init_rotation_yxz(trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR,
-                                trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
-                                trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR);
-    shz_xmtrx_apply_scale(trans->scale, trans->scale, trans->scale);
+    shz_xmtrx_init_scale(trans->scale, trans->scale, trans->scale);
+    shz_xmtrx_rotate_yxz_u16(trans->rotation.y_rotation,
+                             trans->rotation.x_rotation,
+                             trans->rotation.z_rotation);
     shz_xmtrx_set_translation(trans->x_position,
                               trans->y_position,
                               trans->z_position);
 }
 
 void xmtrx_apply_transform(ObjectTransform *trans) {
-    shz_xmtrx_apply_rotation_yxz(trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR,
-                                trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
-                                trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR);
-    shz_xmtrx_apply_scale(trans->scale, trans->scale, trans->scale);
+    shz_xmtrx_scale(trans->scale, trans->scale, trans->scale);
+    shz_xmtrx_rotate_yxz_u16(trans->rotation.y_rotation,
+                             trans->rotation.x_rotation,
+                             trans->rotation.z_rotation);
     shz_xmtrx_set_translation(trans->x_position,
                               trans->y_position,
                               trans->z_position);
@@ -537,16 +537,17 @@ void mtxf_translate_y(MtxF *input, f32 offset) {
 
 #ifdef TARGET_DC
 void xmtrx_init_inverse_transform(ObjectTransform *trans) {
-    shz_xmtrx_init_rotation_zxy(trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
-                                trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
-                                trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_init_identity();
+    shz_xmtrx_rotate_zxy_u16(trans->rotation.z_rotation,
+                             trans->rotation.x_rotation,
+                             trans->rotation.y_rotation);
     shz_xmtrx_translate(trans->x_position, trans->y_position, trans->z_position);
 }
 
 void xmtrx_apply_inverse_transform(ObjectTransform *trans) {
-    shz_xmtrx_apply_rotation_zxy(trans->rotation.z_rotation / SHZ_FSCA_RAD_FACTOR,
-                                 trans->rotation.x_rotation / SHZ_FSCA_RAD_FACTOR,
-                                 trans->rotation.y_rotation / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_rotate_zxy_u16(trans->rotation.z_rotation,
+                             trans->rotation.x_rotation,
+                             trans->rotation.y_rotation);
     shz_xmtrx_translate(trans->x_position, trans->y_position, trans->z_position);
 }
 #endif
@@ -620,7 +621,7 @@ void mtxf_from_inverse_transform(MtxF *mtx, ObjectTransform *trans) {
 void mtxf_billboard(MtxF *mtx, s32 angle, f32 scale, f32 scaleY) {
 #ifdef TARGET_DC
     shz_xmtrx_init_scale(scale, scale, scale);
-    shz_xmtrx_apply_rotation_z(angle / SHZ_FSCA_RAD_FACTOR);
+    shz_xmtrx_rotate_z_u16(angle);
     shz_xmtrx_store_4x4((shz_mat4x4_t*)*mtx);
     (*mtx)[1][1] *= scaleY;
 #else
