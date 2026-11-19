@@ -138,8 +138,6 @@ void frame_interp_skipped(void) {
     }
 }
 
-#define INTERP_RAD_TO_ANGLE (32768.0f / SHZ_F_PI) // radians to 16-bit binary angle units
-
 /**
  * The rotation part-way between two. Angles wrap, so each axis goes the short
  * way round. When only one axis turns that is exact; when several do, stepping
@@ -162,12 +160,11 @@ static void interp_rotation(Vec3s *now, const Vec3s *before, f32 alpha) {
     }
     q = shz_quat_slerp(shz_quat_from_rotation_yxz_u16(before->y_rotation, before->x_rotation, before->z_rotation),
                        shz_quat_from_rotation_yxz_u16(now->y_rotation, now->x_rotation, now->z_rotation), alpha);
-    sinX = shz_clampf(2.0f * (q.w * q.x - q.y * q.z), -1.0f, 1.0f);
-    now->x_rotation = (s16) (s32) (asinf(sinX) * INTERP_RAD_TO_ANGLE);
-    now->y_rotation = (s16) (s32) (atan2f(2.0f * (q.x * q.z + q.w * q.y), 1.0f - 2.0f * (q.x * q.x + q.y * q.y)) *
-                             INTERP_RAD_TO_ANGLE);
-    now->z_rotation = (s16) (s32) (atan2f(2.0f * (q.x * q.y + q.w * q.z), 1.0f - 2.0f * (q.x * q.x + q.z * q.z)) *
-                             INTERP_RAD_TO_ANGLE);
+
+    shz_vec3_t angles = shz_vec3_scale(shz_quat_to_angles_yxz(q), SHZ_FSCA_RAD_FACTOR);
+    now->y_rotation = (s16) (s32) angles.x;
+    now->x_rotation = (s16) (s32) angles.y;
+    now->z_rotation = (s16) (s32) angles.z;
 }
 
 static s32 interp_transform(ObjectTransform *now, const ObjectTransform *before, f32 alpha) {
