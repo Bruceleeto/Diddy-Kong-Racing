@@ -16,6 +16,16 @@
 #define DKR_AICAFLOW_MUSIC_MAX_GAIN 96.0f
 extern void pc_audio_lock(void);
 extern void pc_audio_unlock(void);
+
+/* The jingle player's volume, 0 to 256 * 127 (alCSPSetVol), as an AICAflow
+ * gain on the music's scale. */
+static void jingle_gain_set(s32 volume) {
+    s32 gain = (volume * (s32) DKR_AICAFLOW_MUSIC_MAX_GAIN + 16256) / 32512;
+    dkr_afx_jingle_gain((u8) (gain < 0 ? 0 : gain > 255 ? 255 : gain));
+}
+#define JINGLE_SET_VOL(volume) (alCSPSetVol(gJinglePlayer, (volume)), jingle_gain_set(volume))
+#else
+#define JINGLE_SET_VOL(volume) alCSPSetVol(gJinglePlayer, (volume))
 #endif
 
 /************ .data ************/
@@ -366,7 +376,7 @@ void sound_volume_change(s32 behaviour) {
             sndp_set_group_volume(2, 0);
             sndp_set_group_volume(4, 0);
             alCSPSetVol(gMusicPlayer, (s16) (gMusicBaseVolume * gMusicSliderVolume >> 2));
-            alCSPSetVol(gJinglePlayer, 0);
+            JINGLE_SET_VOL(0);
             break;
         case VOLUME_LOWER_AMBIENT: // Mute the ambient channel, making course elements stop making noise.
             sndp_set_group_volume(0, 0);
@@ -386,7 +396,7 @@ void sound_volume_change(s32 behaviour) {
             sndp_set_group_volume(2, AL_SNDP_GROUP_VOLUME_MAX);
             sndp_set_group_volume(4, AL_SNDP_GROUP_VOLUME_MAX);
             alCSPSetVol(gMusicPlayer, (s16) (gMusicBaseVolume * gMusicSliderVolume));
-            alCSPSetVol(gJinglePlayer, (s16) (sndp_get_global_volume() * sfxRelativeVolume));
+            JINGLE_SET_VOL((s16) (sndp_get_global_volume() * sfxRelativeVolume));
             break;
     }
     gAudioVolumeSetting = behaviour;
@@ -1088,7 +1098,7 @@ s32 music_volume_config(void) {
 void music_jingle_volume_set(u8 arg0) {
     MUSIC_PC_GUARD();
     sfxRelativeVolume = arg0;
-    alCSPSetVol(gJinglePlayer, (s16) (sndp_get_global_volume() * sfxRelativeVolume));
+    JINGLE_SET_VOL((s16) (sndp_get_global_volume() * sfxRelativeVolume));
 }
 
 /**
@@ -1119,7 +1129,11 @@ void music_jingle_play(u8 seqID) {
  * Official Name: amDittyPlaying
  */
 u32 music_jingle_playing(void) {
+#ifdef DKR_AICAFLOW
+    if (gCurrentJingleID && gCanPlayJingle && dkr_afx_jingle_playing()) {
+#else
     if (gCurrentJingleID && gCanPlayJingle && (gJinglePlayer->state == AL_PLAYING)) {
+#endif
         return gCurrentJingleID;
     }
     gCanPlayJingle = FALSE;
@@ -1378,6 +1392,11 @@ void music_sequence_start(u8 seqID, ALCSPlayer *seqPlayer) {
             dkr_afx_music_play(seqID);
             return;
         }
+        /* A ditty (music_jingle_play sets gCanPlayJingle) plays once; the
+         * level's ambient pieces loop. The tempo stays as authored. */
+        music_jingle_volume_set(gSeqSoundTable[seqID].volume);
+        dkr_afx_jingle_play(seqID, !gCanPlayJingle);
+        return;
 #endif
         if (seqPlayer == gMusicPlayer) {
             gMusicNextSeqID = seqID;
@@ -1395,7 +1414,7 @@ void music_sequence_start(u8 seqID, ALCSPlayer *seqPlayer) {
 void music_sequence_init(ALCSPlayer *seqp, void *sequence, u8 *seqID, ALCSeq *seq) {
     MUSIC_PC_GUARD();
 #ifdef DKR_AICAFLOW
-    if (seqp == gMusicPlayer) return;
+    return; /* Both players are AICAflow instances. */
 #endif
     s32 i;
 
@@ -1457,7 +1476,11 @@ void music_sequence_stop(ALCSPlayer *seqPlayer) {
         gCurrentSequenceID = SEQUENCE_NONE;
         gMusicNextSeqID = SEQUENCE_NONE;
     } else if (gJinglePlayer == seqPlayer && gJinglePlaying) {
+#ifdef DKR_AICAFLOW
+        dkr_afx_jingle_stop();
+#else
         alCSPStop(seqPlayer);
+#endif
         gJinglePlaying = FALSE;
         gJingleNextSeqID = SEQUENCE_NONE;
     }
