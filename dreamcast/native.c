@@ -123,6 +123,32 @@ typedef struct {
 
 static DKR_HOT NatPoint sPoints[NAT_MAX_POSITIONS] __attribute__((aligned(32)));
 
+/** Whether the view's scissor is off the PVR's tiles, and where it is. */
+static void nat_view_exact(NatView *view) {
+    view->exact = gfx_nat_exact();
+    if (view->exact) {
+        gfx_nat_scissor_pixels(view->scissor);
+    }
+}
+
+/**
+ * Whether the first count points lie within the scissor. A chunk that does
+ * cannot be overdrawn past it, so it needs no triangle-by-triangle clipping:
+ * in a split screen that is all but the chunks crossing a view's edge.
+ */
+static inline s32 nat_points_inside(const NatView *view, s32 count) {
+    const NatPoint *p = sPoints;
+    const NatPoint *end = sPoints + count;
+
+    for (; p < end; p++) {
+        if (p->x < view->scissor[0] || p->x > view->scissor[2] || p->y < view->scissor[1] ||
+            p->y > view->scissor[3]) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
 extern LevelModel *gCurrentLevelModel;
 
 
@@ -651,6 +677,7 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
             const f32 zMul = (chunk->flags & NAT_CHUNK_DECAL) ? 1.003f : 1.0f;
             const u32 offset = textured ? glare : 0;
             s32 behind = nat_transform(chunk->xyz, chunk->numPositions, sx, sy, tx, ty, zMul);
+            const s32 inside = !behind && view->exact && nat_points_inside(view, chunk->numPositions);
             const NatCorner *corners = chunk->corners;
 
             for (part = 0; part < 2; part++) {
@@ -672,7 +699,7 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
                 }
                 if (behind) {
                     nat_clip_level(chunk, corners, count, !part, scaleX, scaleY, zMul, offset, textured);
-                } else if (view->exact) {
+                } else if (view->exact && !inside) {
                     nat_write_exact(corners, count, offset, FALSE, textured, zMul, scaleX, scaleY);
                 } else if (fade) {
                     nat_write_faded(corners, count, offset, textured);
@@ -1077,7 +1104,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
         const NatCorner *corners = chunk->corners;
         NatCorner env[NAT_MAX_CORNERS];
         const Vertex *v;
-        s32 count, split, part, behind, m;
+        s32 count, split, part, behind, inside, m;
         const u32 flags = batch->flags;
         f32 zMul;
         u32 offset;
@@ -1118,6 +1145,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
         if (!fast || fade) {
             nat_colours_slow(v, count, fast, info->texture >= 0, fade);
         }
+        inside = !behind && view->exact && nat_points_inside(view, count);
         for (part = 0; part < 2; part++) {
             s32 numCorners = part ? chunk->twoSided : chunk->oneSided;
             s32 mat = chunk->mat[variant] + part;
@@ -1151,7 +1179,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
                 if (behind) {
                     nat_clip_model(view, v, count, split, c, numCorners, !part, scaleX, scaleY, zMul, offset,
                                    info->texture >= 0);
-                } else if (view->exact) {
+                } else if (view->exact && !inside) {
                     nat_write_exact(c, numCorners, offset, TRUE, info->texture >= 0, zMul, scaleX, scaleY);
                 } else {
                     nat_write_sq(c, numCorners, offset, TRUE);
@@ -1954,23 +1982,23 @@ void pc_nat_item(void *data) {
     switch (rec->kind) {
         case NAT_REC_LEVEL:
             gfx_nat_set_fog(rec->fog);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             pc_nat_level_run(&sView, rec);
             break;
         case NAT_REC_MODEL:
             gfx_nat_set_fog(rec->fog);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             pc_nat_model_run(&sView, rec);
             break;
         case NAT_REC_SPRITE:
             gfx_nat_set_fog(rec->fog);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             gfx_set_place(rec->place, rec->layer);
             pc_nat_sprite_run(&sView, rec);
             break;
         case NAT_REC_TRIS:
             gfx_nat_set_fog(TRUE);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             gfx_set_place(rec->place, rec->layer);
             pc_nat_tris_run(&sView, rec);
             break;

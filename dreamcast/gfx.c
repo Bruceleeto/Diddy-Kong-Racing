@@ -1636,6 +1636,13 @@ int gfx_nat_exact(void) {
     return scissor_needs_exact_clip();
 }
 
+void gfx_nat_scissor_pixels(float out[4]) {
+    out[0] = sScisX0 * sScaleX;
+    out[1] = sScisY0 * sScaleY;
+    out[2] = sScisX1 * sScaleX;
+    out[3] = sScisY1 * sScaleY;
+}
+
 static void nat_exact_vert(const GfxTriVert *s, int eol, float zMul, unsigned int offset) {
     pvr_vertex_t *v = (pvr_vertex_t *) pvr_dr_target(sDrState);
 

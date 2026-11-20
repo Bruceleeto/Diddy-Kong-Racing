@@ -132,6 +132,7 @@ void gfx_nat_scale(float *x, float *y);
 // A scissor not on the tiles: a run's triangles then go through this one by one,
 // in N64 pixels with texture coordinates as written.
 int gfx_nat_exact(void);
+void gfx_nat_scissor_pixels(float out[4]); // the scissor rect in output pixels
 void gfx_nat_tri_exact(const GfxTriVert *tri, float zMul, unsigned int offset);
 // The bits of a polygon header that come from a texture.
 int gfx_texture_words(unsigned int handle, unsigned int *mode2, unsigned int *mode3);

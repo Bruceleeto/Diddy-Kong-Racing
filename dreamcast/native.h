@@ -106,6 +106,7 @@ typedef struct {
     u32 prim, env;        // as the combiner keys them, RGBA
     f32 vpScaleX, vpScaleY, vpTransX, vpTransY; // the N64 viewport
     s32 exact;            // the scissor is not on the tiles
+    f32 scissor[4];       // when exact: its x0, y0, x1, y1 in output pixels
     f32 cull;             // a triangle whose screen area times this is not negative faces away: 1, or -1 in a mirrored viewport
 } NatView;
 
