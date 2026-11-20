@@ -17,14 +17,16 @@
 extern void pc_audio_lock(void);
 extern void pc_audio_unlock(void);
 
-/* The jingle player's volume, 0 to 256 * 127 (alCSPSetVol), as an AICAflow
+/* A sequence player's volume, 0 to 256 * 127 (alCSPSetVol), as an AICAflow
  * gain on the music's scale. */
-static void jingle_gain_set(s32 volume) {
+static u8 player_gain(s32 volume) {
     s32 gain = (volume * (s32) DKR_AICAFLOW_MUSIC_MAX_GAIN + 16256) / 32512;
-    dkr_afx_jingle_gain((u8) (gain < 0 ? 0 : gain > 255 ? 255 : gain));
+    return (u8) (gain < 0 ? 0 : gain > 255 ? 255 : gain);
 }
-#define JINGLE_SET_VOL(volume) (alCSPSetVol(gJinglePlayer, (volume)), jingle_gain_set(volume))
+#define MUSIC_SET_VOL(volume) (alCSPSetVol(gMusicPlayer, (volume)), dkr_afx_music_gain(player_gain(volume)))
+#define JINGLE_SET_VOL(volume) (alCSPSetVol(gJinglePlayer, (volume)), dkr_afx_jingle_gain(player_gain(volume)))
 #else
+#define MUSIC_SET_VOL(volume) alCSPSetVol(gMusicPlayer, (volume))
 #define JINGLE_SET_VOL(volume) alCSPSetVol(gJinglePlayer, (volume))
 #endif
 
@@ -375,7 +377,7 @@ void sound_volume_change(s32 behaviour) {
             sndp_set_group_volume(1, AL_SNDP_GROUP_VOLUME_MAX);
             sndp_set_group_volume(2, 0);
             sndp_set_group_volume(4, 0);
-            alCSPSetVol(gMusicPlayer, (s16) (gMusicBaseVolume * gMusicSliderVolume >> 2));
+            MUSIC_SET_VOL((s16) (gMusicBaseVolume * gMusicSliderVolume >> 2));
             JINGLE_SET_VOL(0);
             break;
         case VOLUME_LOWER_AMBIENT: // Mute the ambient channel, making course elements stop making noise.
@@ -395,7 +397,7 @@ void sound_volume_change(s32 behaviour) {
             sndp_set_group_volume(1, AL_SNDP_GROUP_VOLUME_MAX);
             sndp_set_group_volume(2, AL_SNDP_GROUP_VOLUME_MAX);
             sndp_set_group_volume(4, AL_SNDP_GROUP_VOLUME_MAX);
-            alCSPSetVol(gMusicPlayer, (s16) (gMusicBaseVolume * gMusicSliderVolume));
+            MUSIC_SET_VOL((s16) (gMusicBaseVolume * gMusicSliderVolume));
             JINGLE_SET_VOL((s16) (sndp_get_global_volume() * sfxRelativeVolume));
             break;
     }
@@ -1043,13 +1045,7 @@ void music_volume_set(u8 volume) {
 
     gMusicBaseVolume = volume;
     normalized_vol = gMusicSliderVolume * gMusicBaseVolume * sMusicFadeVolume;
-    alCSPSetVol(gMusicPlayer, (s16) ((s32) (gGlobalMusicVolume * normalized_vol) >> 8));
-#ifdef DKR_AICAFLOW
-    normalized_vol = gGlobalMusicVolume * normalized_vol * DKR_AICAFLOW_MUSIC_MAX_GAIN /
-                     (256.0f * 256.0f * 127.0f);
-    dkr_afx_music_gain((u8)((normalized_vol < 0.0f) ? 0 :
-                            (normalized_vol > 255.0f) ? 255 : normalized_vol));
-#endif
+    MUSIC_SET_VOL((s16) ((s32) (gGlobalMusicVolume * normalized_vol) >> 8));
 }
 
 /**
@@ -1064,13 +1060,7 @@ void music_volume_config_set(u32 slider_val) {
     slider_val = (slider_val <= 256) ? slider_val : 256;
     gMusicSliderVolume = slider_val;
     normalized_vol = gMusicSliderVolume * gMusicBaseVolume * sMusicFadeVolume;
-    alCSPSetVol(gMusicPlayer, (s16) ((s32) (gGlobalMusicVolume * normalized_vol) >> 8));
-#ifdef DKR_AICAFLOW
-    normalized_vol = gGlobalMusicVolume * normalized_vol * DKR_AICAFLOW_MUSIC_MAX_GAIN /
-                     (256.0f * 256.0f * 127.0f);
-    dkr_afx_music_gain((u8)((normalized_vol < 0.0f) ? 0 :
-                            (normalized_vol > 255.0f) ? 255 : normalized_vol));
-#endif
+    MUSIC_SET_VOL((s16) ((s32) (gGlobalMusicVolume * normalized_vol) >> 8));
 }
 
 /**

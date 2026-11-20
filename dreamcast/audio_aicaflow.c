@@ -161,6 +161,17 @@ static void benchmark_late(const char *what, unsigned id, const afx_instance_sta
 #define benchmark_update(started) ((void)0)
 #endif
 
+/* Activates an instance and folds AICAflow's results into the two that pass:
+ * a full command queue empties by the next update, like a busy driver lock,
+ * and a full instance or channel-map table frees up as sounds end, like the
+ * channels themselves. Callers retry BUSY and make room on NO_CHANNELS. */
+static int activate(afx_asset_t flow, afx_instance_t *instance, const char *what, unsigned id) {
+    int result = benchmark_activate(flow, instance, what, id);
+    if (result == -AFX_IPC_FULL) return -AFX_BUSY;
+    if (result == -AFX_NO_FLOW_SLOTS) return -AFX_NO_CHANNELS;
+    return result;
+}
+
 alignas(32) static const unsigned char firmware[] = {
 #embed "../third_party/aicaflow/firmware/aicaflow.drv"
 };
@@ -706,7 +717,7 @@ static void chime_update(void) {
     int result;
     if (!__atomic_load_n(&sChimeWanted, __ATOMIC_ACQUIRE) || __atomic_load_n(&sSceneHeld, __ATOMIC_ACQUIRE))
         return;
-    result = sChimeFlow && !sChime ? afx_instance_activate(sChimeFlow, &sChime) : -AFX_BAD_COMMAND;
+    result = sChimeFlow && !sChime ? activate(sChimeFlow, &sChime, "chime", 0) : -AFX_BAD_COMMAND;
     if (result == -AFX_BUSY) return; /* the next update tries again */
     __atomic_store_n(&sChimeWanted, 0, __ATOMIC_RELEASE);
     if (result) sChime = 0;
@@ -759,8 +770,8 @@ static void jingle_update(void) {
         jingle_busy_update();
         return;
     }
-    result = benchmark_activate(flow, &sJingle, "jingle", sJingleNext);
-    if (result == -AFX_BUSY || result == -AFX_IPC_FULL) return;
+    result = activate(flow, &sJingle, "jingle", sJingleNext);
+    if (result == -AFX_BUSY) return;
     if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
         (void)sfx_preempt(UINT8_MAX);
         return;
@@ -1109,7 +1120,7 @@ static int sfx_play(uint16_t id, void *owner, uint8_t priority) {
         dkr_sfx_slot_t *slot = &sSfxSlots[i];
         int result;
         if (slot->instance) continue;
-        result = benchmark_activate(bank->sounds[sound_index].flow, &slot->instance, "sound", id);
+        result = activate(bank->sounds[sound_index].flow, &slot->instance, "sound", id);
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             return sfx_preempt(priority);
         }
@@ -1459,11 +1470,25 @@ static uint16_t scaled_pitch(uint16_t base, float scale) {
     return (uint16_t)(((octave & 15) << 11) | fraction);
 }
 
+/* libultra pans with an equal-power pair, left = cos(pi/2 * pan/127) and
+ * right = sin(pi/2 * pan/127). AICA's DIPAN attenuates one side in 3 dB steps,
+ * so this is the level difference between the sides, 20*log10(tan), rounded to
+ * those steps, at most 15: pan 80 is one step, not four as a straight line
+ * from the centre gave. */
+static const int8_t sN64PanSteps[128] = {
+    -15, -13, -11, -10,  -9,  -8,  -8,  -7,  -7,  -6,  -6,  -6,  -6,  -5,  -5,  -5,
+     -5,  -4,  -4,  -4,  -4,  -4,  -4,  -4,  -3,  -3,  -3,  -3,  -3,  -3,  -3,  -3,
+     -3,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -1,  -1,  -1,  -1,
+     -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,   0,   0,   0,   0,   0,   0,   0,
+      0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1,   1,   1,   1,   1,   1,
+      1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   3,
+      3,   3,   3,   3,   3,   3,   3,   3,   4,   4,   4,   4,   4,   4,   4,   5,
+      5,   5,   5,   6,   6,   6,   6,   7,   7,   8,   8,   9,  10,  11,  13,  15
+};
+
 static uint16_t panned_direct(uint16_t base, unsigned pan) {
     int steps = base & 0x10 ? -(base & 15) : base & 15;
-    int delta = ((int)pan - 64) * 15;
-    delta = delta >= 0 ? (delta + 31) / 63 : (delta - 31) / 63;
-    steps += delta;
+    steps += sN64PanSteps[pan & 127];
     if (steps < -15) steps = -15;
     if (steps > 15) steps = 15;
     return (uint16_t)((base & ~31u) | (steps >= 0 ? steps : (0x10 | -steps)));
@@ -1571,9 +1596,8 @@ void dkr_afx_update(void) {
         wanted != __atomic_load_n(&sFailedSequence, __ATOMIC_ACQUIRE)) {
         afx_asset_t flow = music_flow_for(wanted);
         int result = flow ? AFX_OK : -AFX_BAD_FORMAT;
-        if (!result) result = benchmark_activate(flow, &sMusic, "sequence", wanted);
-        /* A full command queue empties by the next update, like a busy driver. */
-        if (result == -AFX_BUSY || result == -AFX_IPC_FULL) goto done;
+        if (!result) result = activate(flow, &sMusic, "sequence", wanted);
+        if (result == -AFX_BUSY) goto done;
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             /* Music is continuous; make room before retrying next update. */
             (void)sfx_preempt(UINT8_MAX);
