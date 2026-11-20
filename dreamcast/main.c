@@ -1091,11 +1091,47 @@ void pc_textures_vram_lost(void) {
     sTexStateDirty = TRUE;
 }
 
+// Reads a file front to back through one 32 KB buffer: a scene's bundle is
+// hundreds of small entries, and each fs_read is a round trip to the host.
+#define BUNDLE_READ_CHUNK 32768u
+typedef struct {
+    file_t file;
+    u8 *buf;
+    u32 have, at;
+} BundleReader;
+
+static int bundle_read(BundleReader *r, void *dst, u32 bytes) {
+    u8 *out = (u8 *) dst;
+
+    while (bytes > 0) {
+        u32 count;
+
+        if (r->at == r->have) {
+            ssize_t got = fs_read(r->file, r->buf, BUNDLE_READ_CHUNK);
+
+            if (got <= 0) {
+                return FALSE;
+            }
+            r->have = (u32) got;
+            r->at = 0;
+        }
+        count = r->have - r->at < bytes ? r->have - r->at : bytes;
+        if (out != NULL) {
+            shz_memcpy(out, r->buf + r->at, count);
+            out += count;
+        }
+        r->at += count;
+        bytes -= count;
+    }
+    return TRUE;
+}
+
 void pc_texture_scene_load(int level) {
     char path[96];
     u32 header[4];
     u32 pos;
-    file_t file;
+    u64 started = timer_us_gettime64();
+    BundleReader reader;
     s32 i, n;
 
     for (i = 0; i < sBundleCount; i++) {
@@ -1109,41 +1145,36 @@ void pc_texture_scene_load(int level) {
     sBundleCount = 0;
     sSceneLevel = level;
     snprintf(path, sizeof(path), DKR_ASSET_MOUNT "/build/dc/texscenes/%ld.dtb", (long) level);
-    file = fs_open(path, O_RDONLY);
-    if (file == FILEHND_INVALID) {
+    reader.file = fs_open(path, O_RDONLY);
+    if (reader.file == FILEHND_INVALID) {
         return;
     }
-    if (fs_read(file, header, sizeof(header)) != sizeof(header) || header[0] != 0x42535444u /* DTSB */ ||
+    reader.buf = memalign(32, BUNDLE_READ_CHUNK);
+    reader.have = reader.at = 0;
+    if (reader.buf == NULL || !bundle_read(&reader, header, sizeof(header)) || header[0] != 0x42535444u /* DTSB */ ||
         header[1] != 1) {
-        fs_close(file);
-        return;
+        goto done;
     }
     pos = sizeof(header);
     for (n = 0; n < (s32) header[2] && sBundleCount < BUNDLE_MAX; n++) {
         u32 entry[2];
+        u32 skip;
         u16 *record;
         u32 *table;
         u8 *block;
 
         // Each entry header sits 8 bytes before a 32-byte boundary, so its
         // record starts aligned for enDjinn's loader.
-        while ((pos + 8) % 32) {
-            u8 pad[32];
-            u32 skip = (32 - ((pos + 8) % 32)) % 32;
-            if (fs_read(file, pad, skip) != (ssize_t) skip) {
-                goto done;
-            }
-            pos += skip;
-        }
-        if (fs_read(file, entry, sizeof(entry)) != sizeof(entry)) {
+        skip = (32 - ((pos + 8) % 32)) % 32;
+        if (!bundle_read(&reader, NULL, skip) || !bundle_read(&reader, entry, sizeof(entry))) {
             break;
         }
-        pos += sizeof(entry);
+        pos += skip + sizeof(entry);
         block = memalign(32, entry[1]);
         if (block == NULL) {
             break;
         }
-        if (fs_read(file, block, entry[1]) != (ssize_t) entry[1]) {
+        if (!bundle_read(&reader, block, entry[1])) {
             free(block);
             break;
         }
@@ -1177,7 +1208,10 @@ void pc_texture_scene_load(int level) {
         free(block);
     }
 done:
-    fs_close(file);
+    free(reader.buf);
+    fs_close(reader.file);
+    printf("gfx: scene %ld bundle, %ld textures, read in %lu ms\n", (long) level, (long) sBundleCount,
+           (unsigned long) ((timer_us_gettime64() - started) / 1000u));
 }
 
 // Time and reads spent loading prebuilt textures since the last scene report.
