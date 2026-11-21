@@ -19,6 +19,12 @@ void dkr_afx_music_tempo(uint16_t bpm);
 void dkr_afx_music_lane_mute(uint8_t lane, int muted);
 void dkr_afx_music_lane_volume(uint8_t lane, uint8_t volume);
 void dkr_afx_music_lane_fade(uint8_t lane, uint8_t fade);
+/* The jingle player. A jingle starts once the one playing has ended; one that
+ * loops starts again from the top when it ends. Any thread. */
+void dkr_afx_jingle_play(uint8_t sequence, int loops);
+void dkr_afx_jingle_stop(void);
+int dkr_afx_jingle_playing(void);
+void dkr_afx_jingle_gain(uint8_t gain);
 void dkr_afx_scene_reverb(uint8_t enabled);
 /* The room reverb's level (the debug menu's Reverb row). Off only mutes the
  * returns; the others take effect at the next audio update by installing the

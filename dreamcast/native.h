@@ -106,6 +106,8 @@ typedef struct {
     u32 prim, env;        // as the combiner keys them, RGBA
     f32 vpScaleX, vpScaleY, vpTransX, vpTransY; // the N64 viewport
     s32 exact;            // the scissor is not on the tiles
+    f32 scissor[4];       // when exact: its x0, y0, x1, y1 in output pixels
+    f32 cull;             // a triangle whose screen area times this is not negative faces away: 1, or -1 in a mirrored viewport
 } NatView;
 
 // One compiled corner: what the PVR gets for it, all but the position.
@@ -156,6 +158,8 @@ void pc_nat_level_load(s32 modelId);
 void pc_nat_level_free(void);
 void pc_nat_vram_lost(void);
 void pc_nat_materials_forget(void);
+void pc_nat_texture_deleted(u32 handle);
+void pc_nat_tiles_forget(void);
 // Batch `batch` of a segment on: 0 if the game has to draw it; otherwise how many
 // batches, from it, the record this adds draws.
 s32 pc_nat_level_batches(s32 segment, s32 batch, s32 end, s32 waterHidden);

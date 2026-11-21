@@ -701,7 +701,7 @@ typedef struct {
 // Which screen-space winding is a front face. Screen y runs downwards, so this is
 // the opposite sign from the y-up convention. Flip if the world renders
 // inside-out (outer surfaces gone, inner ones visible).
-#define GFX_FRONT_FACE_SIGN (-1.0f)
+#define GFX_FRONT_FACE_SIGN sFrontFaceSign
 
 static DKR_HOT u32 sGfxFrameCount = 0;
 
@@ -723,6 +723,9 @@ _Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields 
 static DKR_HOT s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
 
 static DKR_HOT f32 sVpScaleX = N64_SCREEN_W / 2.0f;
+// The sign of a front face's area on screen. A viewport with one axis turned
+// (Mirrored Tracks negates the x scale, src/camera.c) turns every winding with it.
+static DKR_HOT f32 sFrontFaceSign = -1.0f;
 static DKR_HOT f32 sVpScaleY = N64_SCREEN_H / 2.0f;
 static DKR_HOT f32 sVpTransX = N64_SCREEN_W / 2.0f;
 static DKR_HOT f32 sVpTransY = N64_SCREEN_H / 2.0f;
@@ -973,34 +976,57 @@ static s32 prebuilt_open(void) {
     return TRUE;
 }
 
-/** Drop prebuilt frames whose texels lay in freed memory. */
-static void prebuilt_forget(u32 lo, u32 hi) {
-    s32 i;
+/** A texture of the frame's own goes, and with it what the native renderer compiled on it. */
+static void texture_delete(u32 handle) {
+    gfx_delete_texture(handle);
+    pc_nat_texture_deleted(handle);
+}
 
-    for (i = 0; i < sPrebuiltCount;) {
-        if (sPrebuilt[i].timg >= lo && sPrebuilt[i].timg < hi) {
-            if (sPrebuilt[i].bundle >= 0) {
-                sBundle[sPrebuilt[i].bundle].claimed = FALSE;
-            } else {
-                gfx_delete_texture(sPrebuilt[i].handle);
-            }
-            sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
-            pc_nat_materials_forget();
+/** The first entry whose frame is at or above timg; the table is kept in timg order. */
+static s32 prebuilt_lower(u32 timg) {
+    s32 lo = 0, hi = sPrebuiltCount;
+
+    while (lo < hi) {
+        s32 mid = (lo + hi) >> 1;
+
+        if (sPrebuilt[mid].timg < timg) {
+            lo = mid + 1;
         } else {
-            i++;
+            hi = mid;
         }
     }
+    return lo;
+}
+
+/**
+ * Drop prebuilt frames whose texels lay in [lo, hi), memory freed or reused.
+ * A bundle's frame keeps its handle and its video memory, so the materials on
+ * it stay good; only a deleted texture's go. Returns whether any frame went.
+ */
+static s32 prebuilt_forget(u32 lo, u32 hi) {
+    s32 first = prebuilt_lower(lo);
+    s32 end = prebuilt_lower(hi);
+    s32 i;
+
+    if (first == end) {
+        return FALSE;
+    }
+    for (i = first; i < end; i++) {
+        if (sPrebuilt[i].bundle >= 0) {
+            sBundle[sPrebuilt[i].bundle].claimed = FALSE;
+        } else {
+            texture_delete(sPrebuilt[i].handle);
+        }
+    }
+    memmove(&sPrebuilt[first], &sPrebuilt[end], (sPrebuiltCount - end) * sizeof(sPrebuilt[0]));
+    sPrebuiltCount -= end - first;
+    return TRUE;
 }
 
 static s32 prebuilt_find(u32 timg) {
-    s32 i;
+    s32 i = prebuilt_lower(timg);
 
-    for (i = 0; i < sPrebuiltCount; i++) {
-        if (sPrebuilt[i].timg == timg) {
-            return i;
-        }
-    }
-    return -1;
+    return i < sPrebuiltCount && sPrebuilt[i].timg == timg ? i : -1;
 }
 
 /**
@@ -1011,16 +1037,21 @@ static s32 prebuilt_find(u32 timg) {
 /** Registers frame `i` of a texture whose header is at `frame`; returns FALSE if the table is full. */
 static s32 prebuilt_register(TextureHeader *frame, u32 handle, u16 width, u16 height, s16 bundle) {
     u32 timg = (u32) (frame + 1);
+    s32 at;
 
     if (sPrebuiltCount >= PREBUILT_MAX) {
         return FALSE;
     }
-    prebuilt_forget(timg, timg + 1); // memory reused for a new asset
-    sPrebuilt[sPrebuiltCount].timg = timg;
-    sPrebuilt[sPrebuiltCount].handle = handle;
-    sPrebuilt[sPrebuiltCount].width = width;
-    sPrebuilt[sPrebuiltCount].height = height;
-    sPrebuilt[sPrebuiltCount].bundle = bundle;
+    if (prebuilt_forget(timg, timg + 1)) { // memory reused for a new asset
+        pc_nat_tiles_forget();
+    }
+    at = prebuilt_lower(timg);
+    memmove(&sPrebuilt[at + 1], &sPrebuilt[at], (sPrebuiltCount - at) * sizeof(sPrebuilt[0]));
+    sPrebuilt[at].timg = timg;
+    sPrebuilt[at].handle = handle;
+    sPrebuilt[at].width = width;
+    sPrebuilt[at].height = height;
+    sPrebuilt[at].bundle = bundle;
     sPrebuiltCount++;
     return TRUE;
 }
@@ -1075,11 +1106,47 @@ void pc_textures_vram_lost(void) {
     sTexStateDirty = TRUE;
 }
 
+// Reads a file front to back through one 32 KB buffer: a scene's bundle is
+// hundreds of small entries, and each fs_read is a round trip to the host.
+#define BUNDLE_READ_CHUNK 32768u
+typedef struct {
+    file_t file;
+    u8 *buf;
+    u32 have, at;
+} BundleReader;
+
+static int bundle_read(BundleReader *r, void *dst, u32 bytes) {
+    u8 *out = (u8 *) dst;
+
+    while (bytes > 0) {
+        u32 count;
+
+        if (r->at == r->have) {
+            ssize_t got = fs_read(r->file, r->buf, BUNDLE_READ_CHUNK);
+
+            if (got <= 0) {
+                return FALSE;
+            }
+            r->have = (u32) got;
+            r->at = 0;
+        }
+        count = r->have - r->at < bytes ? r->have - r->at : bytes;
+        if (out != NULL) {
+            shz_memcpy(out, r->buf + r->at, count);
+            out += count;
+        }
+        r->at += count;
+        bytes -= count;
+    }
+    return TRUE;
+}
+
 void pc_texture_scene_load(int level) {
     char path[96];
     u32 header[4];
     u32 pos;
-    file_t file;
+    u64 started = timer_us_gettime64();
+    BundleReader reader;
     s32 i, n;
 
     for (i = 0; i < sBundleCount; i++) {
@@ -1093,41 +1160,36 @@ void pc_texture_scene_load(int level) {
     sBundleCount = 0;
     sSceneLevel = level;
     snprintf(path, sizeof(path), DKR_ASSET_MOUNT "/build/dc/texscenes/%ld.dtb", (long) level);
-    file = fs_open(path, O_RDONLY);
-    if (file == FILEHND_INVALID) {
+    reader.file = fs_open(path, O_RDONLY);
+    if (reader.file == FILEHND_INVALID) {
         return;
     }
-    if (fs_read(file, header, sizeof(header)) != sizeof(header) || header[0] != 0x42535444u /* DTSB */ ||
+    reader.buf = memalign(32, BUNDLE_READ_CHUNK);
+    reader.have = reader.at = 0;
+    if (reader.buf == NULL || !bundle_read(&reader, header, sizeof(header)) || header[0] != 0x42535444u /* DTSB */ ||
         header[1] != 1) {
-        fs_close(file);
-        return;
+        goto done;
     }
     pos = sizeof(header);
     for (n = 0; n < (s32) header[2] && sBundleCount < BUNDLE_MAX; n++) {
         u32 entry[2];
+        u32 skip;
         u16 *record;
         u32 *table;
         u8 *block;
 
         // Each entry header sits 8 bytes before a 32-byte boundary, so its
         // record starts aligned for enDjinn's loader.
-        while ((pos + 8) % 32) {
-            u8 pad[32];
-            u32 skip = (32 - ((pos + 8) % 32)) % 32;
-            if (fs_read(file, pad, skip) != (ssize_t) skip) {
-                goto done;
-            }
-            pos += skip;
-        }
-        if (fs_read(file, entry, sizeof(entry)) != sizeof(entry)) {
+        skip = (32 - ((pos + 8) % 32)) % 32;
+        if (!bundle_read(&reader, NULL, skip) || !bundle_read(&reader, entry, sizeof(entry))) {
             break;
         }
-        pos += sizeof(entry);
+        pos += skip + sizeof(entry);
         block = memalign(32, entry[1]);
         if (block == NULL) {
             break;
         }
-        if (fs_read(file, block, entry[1]) != (ssize_t) entry[1]) {
+        if (!bundle_read(&reader, block, entry[1])) {
             free(block);
             break;
         }
@@ -1161,7 +1223,10 @@ void pc_texture_scene_load(int level) {
         free(block);
     }
 done:
-    fs_close(file);
+    free(reader.buf);
+    fs_close(reader.file);
+    printf("gfx: scene %ld bundle, %ld textures, read in %lu ms\n", (long) level, (long) sBundleCount,
+           (unsigned long) ((timer_us_gettime64() - started) / 1000u));
 }
 
 // Time and reads spent loading prebuilt textures since the last scene report.
@@ -1232,7 +1297,6 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         return; // not the asset the pack was built from
     }
     for (i = 0; i < frames && sPrebuiltCount < PREBUILT_MAX; i++) {
-        u32 timg = (u32) (frame + 1);
         u32 at = table[2 * i] - start;
         enj_texture_info_t info;
         u32 handle = 0;
@@ -1249,13 +1313,7 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         if (handle == 0) {
             break;
         }
-        prebuilt_forget(timg, timg + 1); // memory reused for a new asset
-        sPrebuilt[sPrebuiltCount].timg = timg;
-        sPrebuilt[sPrebuiltCount].handle = handle;
-        sPrebuilt[sPrebuiltCount].width = record[0];
-        sPrebuilt[sPrebuiltCount].height = record[1];
-        sPrebuilt[sPrebuiltCount].bundle = -1;
-        sPrebuiltCount++;
+        prebuilt_register(frame, handle, record[0], record[1], -1);
         sTexLoadCount++;
         frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
     }
@@ -1444,22 +1502,25 @@ void pc_song_scene_load(int level) {
 void pc_gfx_invalidate_range(const void *addr, s32 size) {
     u32 lo = (u32) addr;
     u32 hi = lo + (u32) size;
-    s32 i;
+    s32 i, any = FALSE;
 
     for (i = 0; i < sTexCacheCount;) {
         GfxTexture *t = &sTexCache[i];
 
         if ((t->timg >= lo && t->timg < hi) || (t->tlut >= lo && t->tlut < hi)) {
             if (!t->prebuilt) {
-                gfx_delete_texture(t->handle);
+                texture_delete(t->handle);
             }
             sTexCache[i] = sTexCache[--sTexCacheCount];
             sTexStateDirty = TRUE;
+            any = TRUE;
         } else {
             i++;
         }
     }
-    prebuilt_forget(lo, hi);
+    if (prebuilt_forget(lo, hi) || any) {
+        pc_nat_tiles_forget();
+    }
 }
 
 /**
@@ -1770,7 +1831,8 @@ static __attribute__((noinline, cold)) u32 texture_lookup_slow(const u8 *tlut, u
             }
         }
         if (!sTexCache[oldest].prebuilt) {
-            gfx_delete_texture(sTexCache[oldest].handle);
+            texture_delete(sTexCache[oldest].handle);
+            pc_nat_tiles_forget();
         }
         sTexCache[oldest] = sTexCache[--sTexCacheCount];
     }
@@ -2893,6 +2955,8 @@ static __attribute__((noinline, cold)) void set_viewport(const Vp *vp) {
     sVpScaleY = vp->vp.vscale[1] / 4.0f;
     sVpTransX = vp->vp.vtrans[0] / 4.0f;
     sVpTransY = vp->vp.vtrans[1] / 4.0f;
+    sFrontFaceSign = (sVpScaleX * sVpScaleY < 0.0f) ? 1.0f : -1.0f;
+    gfx_set_mirror(sFrontFaceSign > 0.0f);
 
     // The rectangle NDC +-1 maps onto. The scale carries a sign (y is commonly
     // negative, since screen y runs the other way from clip y), so take it off
@@ -2953,6 +3017,7 @@ void pc_nat_run_viewport(const void *viewport, NatView *view) {
     view->vpScaleY = sVpScaleY;
     view->vpTransX = sVpTransX;
     view->vpTransY = sVpTransY;
+    view->cull = -sFrontFaceSign;
 }
 
 void pc_nat_run_scissor(const f32 *f) {
@@ -3129,6 +3194,7 @@ static void debug_view_apply(void) {
         }
     }
     sTexCacheCount = 0;
+    pc_nat_materials_forget();
     memset(sTexHint, 0, sizeof(sTexHint));
     sTexStateDirty = TRUE;
     printf("DEBUG VIEW: mode %d\n", (int) sDebugMode);

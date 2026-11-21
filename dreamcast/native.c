@@ -38,6 +38,9 @@
 #define NAT_CC_SHADE 1
 #define NAT_CC_WHITE 2
 
+// NatMaterial.used: TRUE, or this for one whose texture is gone (pc_nat_texture_deleted).
+#define NAT_MATERIAL_DEAD 2
+
 struct NatMaterial {
     pvr_poly_hdr_t hdr; // no culling: these go out as triangles, culled here
     f32 uMul, vMul;
@@ -109,6 +112,8 @@ typedef struct {
 static DKR_HOT NatPlane sPlanes[5];
 static DKR_HOT const f32 *sPlanesFor; // the matrix they are of; NULL when a frame starts
 static DKR_HOT s32 sListRoute;        // the list that is open, as the pack has it
+// A list's pass: what the viewport and the scissor have come to, as far as it got.
+static NatView sView;
 
 // A position as a frame leaves it, and for an object model its colour.
 typedef struct {
@@ -117,6 +122,32 @@ typedef struct {
 } NatPoint;
 
 static DKR_HOT NatPoint sPoints[NAT_MAX_POSITIONS] __attribute__((aligned(32)));
+
+/** Whether the view's scissor is off the PVR's tiles, and where it is. */
+static void nat_view_exact(NatView *view) {
+    view->exact = gfx_nat_exact();
+    if (view->exact) {
+        gfx_nat_scissor_pixels(view->scissor);
+    }
+}
+
+/**
+ * Whether the first count points lie within the scissor. A chunk that does
+ * cannot be overdrawn past it, so it needs no triangle-by-triangle clipping:
+ * in a split screen that is all but the chunks crossing a view's edge.
+ */
+static inline s32 nat_points_inside(const NatView *view, s32 count) {
+    const NatPoint *p = sPoints;
+    const NatPoint *end = sPoints + count;
+
+    for (; p < end; p++) {
+        if (p->x < view->scissor[0] || p->x > view->scissor[2] || p->y < view->scissor[1] ||
+            p->y > view->scissor[3]) {
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
 
 extern LevelModel *gCurrentLevelModel;
 
@@ -646,6 +677,7 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
             const f32 zMul = (chunk->flags & NAT_CHUNK_DECAL) ? 1.003f : 1.0f;
             const u32 offset = textured ? glare : 0;
             s32 behind = nat_transform(chunk->xyz, chunk->numPositions, sx, sy, tx, ty, zMul);
+            const s32 inside = !behind && view->exact && nat_points_inside(view, chunk->numPositions);
             const NatCorner *corners = chunk->corners;
 
             for (part = 0; part < 2; part++) {
@@ -667,7 +699,7 @@ DKR_NAT_CODE void pc_nat_level_run(const NatView *view, const NatRec *rec_) {
                 }
                 if (behind) {
                     nat_clip_level(chunk, corners, count, !part, scaleX, scaleY, zMul, offset, textured);
-                } else if (view->exact) {
+                } else if (view->exact && !inside) {
                     nat_write_exact(corners, count, offset, FALSE, textured, zMul, scaleX, scaleY);
                 } else if (fade) {
                     nat_write_faded(corners, count, offset, textured);
@@ -1072,7 +1104,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
         const NatCorner *corners = chunk->corners;
         NatCorner env[NAT_MAX_CORNERS];
         const Vertex *v;
-        s32 count, split, part, behind, m;
+        s32 count, split, part, behind, inside, m;
         const u32 flags = batch->flags;
         f32 zMul;
         u32 offset;
@@ -1113,6 +1145,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
         if (!fast || fade) {
             nat_colours_slow(v, count, fast, info->texture >= 0, fade);
         }
+        inside = !behind && view->exact && nat_points_inside(view, count);
         for (part = 0; part < 2; part++) {
             s32 numCorners = part ? chunk->twoSided : chunk->oneSided;
             s32 mat = chunk->mat[variant] + part;
@@ -1146,7 +1179,7 @@ DKR_NAT_CODE void pc_nat_model_run(const NatView *view, const NatRec *rec_) {
                 if (behind) {
                     nat_clip_model(view, v, count, split, c, numCorners, !part, scaleX, scaleY, zMul, offset,
                                    info->texture >= 0);
-                } else if (view->exact) {
+                } else if (view->exact && !inside) {
                     nat_write_exact(c, numCorners, offset, TRUE, info->texture >= 0, zMul, scaleX, scaleY);
                 } else {
                     nat_write_sq(c, numCorners, offset, TRUE);
@@ -1178,6 +1211,30 @@ void pc_nat_materials_forget(void) {
     for (i = 0; i < NAT_MATERIALS; i++) {
         sMaterials[i].used = FALSE;
     }
+    shz_memset8(sTiles, 0, sizeof(sTiles));
+}
+
+/**
+ * A texture was deleted, and its handle may name another one next. The materials
+ * compiled on it must not be found again, but records already queued this frame
+ * still point at them, so they keep their slot and their header: dead, they match
+ * nothing. pc_nat_materials_forget takes the slots back.
+ */
+void pc_nat_texture_deleted(u32 handle) {
+    s32 i;
+
+    if (handle == 0) {
+        return;
+    }
+    for (i = 0; i < NAT_MATERIALS; i++) {
+        if (sMaterials[i].used && sMaterials[i].handle == handle) {
+            sMaterials[i].used = NAT_MATERIAL_DEAD;
+        }
+    }
+}
+
+/** Texels were freed: a sprite's tile is known by where they lay. */
+void pc_nat_tiles_forget(void) {
     shz_memset8(sTiles, 0, sizeof(sTiles));
 }
 
@@ -1318,8 +1375,8 @@ static const NatMaterial *nat_material(u32 w0, u32 w1, u32 omh, u32 oml, const N
         if (!m->used) {
             return nat_material_compile(m, w0, w1, omh, oml, tex, geometry);
         }
-        if (m->combine0 == w0 && m->combine1 == w1 && m->otherH == omh && m->otherL == oml && m->handle == handle &&
-            m->geometry == geometry) {
+        if (m->used == TRUE && m->combine0 == w0 && m->combine1 == w1 && m->otherH == omh && m->otherL == oml &&
+            m->handle == handle && m->geometry == geometry) {
             return m;
         }
     }
@@ -1385,7 +1442,7 @@ static __attribute__((noinline, cold)) void nat_tris_layered(const NatMaterial *
         if (!(t->flags & BACKFACE_DRAW)) {
             const NatPoint *p0 = &sPoints[at[0]], *p1 = &sPoints[at[1]], *p2 = &sPoints[at[2]];
 
-            if (((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y)) >= 0.0f) {
+            if ((((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y))) * sView.cull >= 0.0f) {
                 continue;
             }
         }
@@ -1476,7 +1533,8 @@ static __attribute__((noinline, cold)) void nat_tris_layered_clip(const NatView 
             px[j] = (pc[j].x * inv * view->vpScaleX) + view->vpTransX;
             py[j] = view->vpTransY - (pc[j].y * inv * view->vpScaleY);
         }
-        if (!(t->flags & BACKFACE_DRAW) && ((px[1] - px[0]) * (py[2] - py[0])) - ((px[2] - px[0]) * (py[1] - py[0])) >= 0.0f) {
+        if (!(t->flags & BACKFACE_DRAW) &&
+            (((px[1] - px[0]) * (py[2] - py[0])) - ((px[2] - px[0]) * (py[1] - py[0]))) * sView.cull >= 0.0f) {
             continue;
         }
         for (j = 1; j + 1 < n && count + 3 <= 3 * 64; j++) {
@@ -1582,7 +1640,7 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
             if (!(t->flags & BACKFACE_DRAW)) {
                 const NatPoint *p0 = &sPoints[t->vi0], *p1 = &sPoints[t->vi1], *p2 = &sPoints[t->vi2];
 
-                if (((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y)) >= 0.0f) {
+                if ((((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y))) * sView.cull >= 0.0f) {
                     continue;
                 }
             }
@@ -1608,7 +1666,7 @@ __attribute__((noinline)) void pc_nat_tris_run(const NatView *view, const NatRec
         if (!(t->flags & BACKFACE_DRAW)) {
             f32 area = ((p1->x - p0->x) * (p2->y - p0->y)) - ((p2->x - p0->x) * (p1->y - p0->y));
 
-            if (area >= 0.0f) {
+            if (area * sView.cull >= 0.0f) {
                 continue;
             }
         }
@@ -1903,9 +1961,6 @@ __attribute__((noinline)) void pc_nat_sprite_run(const NatView *view, const NatR
     }
 }
 
-// A list's pass: what the viewport and the scissor have come to, as far as it got.
-static NatView sView;
-
 void pc_nat_list_begin(pvr_list_t list) {
     sListRoute = list == PVR_LIST_OP_POLY ? NAT_LIST_OP : list == PVR_LIST_PT_POLY ? NAT_LIST_PT : NAT_LIST_TR;
     pc_nat_run_viewport(NULL, &sView);
@@ -1927,23 +1982,23 @@ void pc_nat_item(void *data) {
     switch (rec->kind) {
         case NAT_REC_LEVEL:
             gfx_nat_set_fog(rec->fog);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             pc_nat_level_run(&sView, rec);
             break;
         case NAT_REC_MODEL:
             gfx_nat_set_fog(rec->fog);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             pc_nat_model_run(&sView, rec);
             break;
         case NAT_REC_SPRITE:
             gfx_nat_set_fog(rec->fog);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             gfx_set_place(rec->place, rec->layer);
             pc_nat_sprite_run(&sView, rec);
             break;
         case NAT_REC_TRIS:
             gfx_nat_set_fog(TRUE);
-            sView.exact = gfx_nat_exact();
+            nat_view_exact(&sView);
             gfx_set_place(rec->place, rec->layer);
             pc_nat_tris_run(&sView, rec);
             break;
