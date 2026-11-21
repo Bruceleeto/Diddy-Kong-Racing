@@ -982,39 +982,51 @@ static void texture_delete(u32 handle) {
     pc_nat_texture_deleted(handle);
 }
 
-/**
- * Drop prebuilt frames whose texels lay in freed memory. A bundle's frame keeps
- * its handle and its video memory, so the materials on it stay good; only a
- * deleted texture's go. Returns whether any frame went.
- */
-static s32 prebuilt_forget(u32 lo, u32 hi) {
-    s32 i, any = FALSE;
+/** The first entry whose frame is at or above timg; the table is kept in timg order. */
+static s32 prebuilt_lower(u32 timg) {
+    s32 lo = 0, hi = sPrebuiltCount;
 
-    for (i = 0; i < sPrebuiltCount;) {
-        if (sPrebuilt[i].timg >= lo && sPrebuilt[i].timg < hi) {
-            if (sPrebuilt[i].bundle >= 0) {
-                sBundle[sPrebuilt[i].bundle].claimed = FALSE;
-            } else {
-                texture_delete(sPrebuilt[i].handle);
-            }
-            sPrebuilt[i] = sPrebuilt[--sPrebuiltCount];
-            any = TRUE;
+    while (lo < hi) {
+        s32 mid = (lo + hi) >> 1;
+
+        if (sPrebuilt[mid].timg < timg) {
+            lo = mid + 1;
         } else {
-            i++;
+            hi = mid;
         }
     }
-    return any;
+    return lo;
+}
+
+/**
+ * Drop prebuilt frames whose texels lay in [lo, hi), memory freed or reused.
+ * A bundle's frame keeps its handle and its video memory, so the materials on
+ * it stay good; only a deleted texture's go. Returns whether any frame went.
+ */
+static s32 prebuilt_forget(u32 lo, u32 hi) {
+    s32 first = prebuilt_lower(lo);
+    s32 end = prebuilt_lower(hi);
+    s32 i;
+
+    if (first == end) {
+        return FALSE;
+    }
+    for (i = first; i < end; i++) {
+        if (sPrebuilt[i].bundle >= 0) {
+            sBundle[sPrebuilt[i].bundle].claimed = FALSE;
+        } else {
+            texture_delete(sPrebuilt[i].handle);
+        }
+    }
+    memmove(&sPrebuilt[first], &sPrebuilt[end], (sPrebuiltCount - end) * sizeof(sPrebuilt[0]));
+    sPrebuiltCount -= end - first;
+    return TRUE;
 }
 
 static s32 prebuilt_find(u32 timg) {
-    s32 i;
+    s32 i = prebuilt_lower(timg);
 
-    for (i = 0; i < sPrebuiltCount; i++) {
-        if (sPrebuilt[i].timg == timg) {
-            return i;
-        }
-    }
-    return -1;
+    return i < sPrebuiltCount && sPrebuilt[i].timg == timg ? i : -1;
 }
 
 /**
@@ -1025,6 +1037,7 @@ static s32 prebuilt_find(u32 timg) {
 /** Registers frame `i` of a texture whose header is at `frame`; returns FALSE if the table is full. */
 static s32 prebuilt_register(TextureHeader *frame, u32 handle, u16 width, u16 height, s16 bundle) {
     u32 timg = (u32) (frame + 1);
+    s32 at;
 
     if (sPrebuiltCount >= PREBUILT_MAX) {
         return FALSE;
@@ -1032,11 +1045,13 @@ static s32 prebuilt_register(TextureHeader *frame, u32 handle, u16 width, u16 he
     if (prebuilt_forget(timg, timg + 1)) { // memory reused for a new asset
         pc_nat_tiles_forget();
     }
-    sPrebuilt[sPrebuiltCount].timg = timg;
-    sPrebuilt[sPrebuiltCount].handle = handle;
-    sPrebuilt[sPrebuiltCount].width = width;
-    sPrebuilt[sPrebuiltCount].height = height;
-    sPrebuilt[sPrebuiltCount].bundle = bundle;
+    at = prebuilt_lower(timg);
+    memmove(&sPrebuilt[at + 1], &sPrebuilt[at], (sPrebuiltCount - at) * sizeof(sPrebuilt[0]));
+    sPrebuilt[at].timg = timg;
+    sPrebuilt[at].handle = handle;
+    sPrebuilt[at].width = width;
+    sPrebuilt[at].height = height;
+    sPrebuilt[at].bundle = bundle;
     sPrebuiltCount++;
     return TRUE;
 }
@@ -1282,7 +1297,6 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         return; // not the asset the pack was built from
     }
     for (i = 0; i < frames && sPrebuiltCount < PREBUILT_MAX; i++) {
-        u32 timg = (u32) (frame + 1);
         u32 at = table[2 * i] - start;
         enj_texture_info_t info;
         u32 handle = 0;
@@ -1299,15 +1313,7 @@ void pc_texture_loaded(void *first, s32 id, s32 frames) {
         if (handle == 0) {
             break;
         }
-        if (prebuilt_forget(timg, timg + 1)) { // memory reused for a new asset
-            pc_nat_tiles_forget();
-        }
-        sPrebuilt[sPrebuiltCount].timg = timg;
-        sPrebuilt[sPrebuiltCount].handle = handle;
-        sPrebuilt[sPrebuiltCount].width = record[0];
-        sPrebuilt[sPrebuiltCount].height = record[1];
-        sPrebuilt[sPrebuiltCount].bundle = -1;
-        sPrebuiltCount++;
+        prebuilt_register(frame, handle, record[0], record[1], -1);
         sTexLoadCount++;
         frame = (TextureHeader *) ((u8 *) frame + frame->textureSize);
     }
