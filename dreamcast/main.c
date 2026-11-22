@@ -189,14 +189,6 @@ static void prof_skip_next_frame(void) {
 #endif
 static const float (*sLevelCullMatrix)[4];
 
-// Vertices that ran the combiner per vertex (not passthrough or constant), by
-// combiner, for the scene's report.
-#define PROF_SLOW_CC 16
-static struct {
-    u32 w0, w1, cyc, prim, env, verts;
-} sSlowCc[PROF_SLOW_CC];
-
-static __attribute__((noinline)) void prof_slow_cc(u32 verts);
 static DKR_HOT u32 sCcClassified, sCcProbed; // combiner_classify calls, and those that ran the probes
 
 // What the display-list walk spends on racers (PC_PROF_CAT_RACERS), by
@@ -284,15 +276,6 @@ void pc_scene_prof_report(void) {
         printf("\nSCENE CC classify %lu/frame, probed %lu/frame", (unsigned long) (sCcClassified / n),
                (unsigned long) (sCcProbed / n));
         sCcClassified = sCcProbed = 0;
-        for (c = 0; c < PROF_SLOW_CC; c++) {
-            if (sSlowCc[c].verts != 0) {
-                printf("\nSCENE SLOWCC %lu verts/frame cc=%08lx/%08lx cyc=%lu prim=%08lx env=%08lx",
-                       (unsigned long) (sSlowCc[c].verts / n), (unsigned long) sSlowCc[c].w0,
-                       (unsigned long) sSlowCc[c].w1, (unsigned long) (sSlowCc[c].cyc >> G_MDSFT_CYCLETYPE),
-                       (unsigned long) sSlowCc[c].prim, (unsigned long) sSlowCc[c].env);
-            }
-            sSlowCc[c].verts = 0;
-        }
         printf(" | view matrix changed under the level in %lu frames, %lu false culls, %lu of %lu level vertex loads "
                "not drawn with the cull matrix\n", (unsigned long) sScene.cullMatrixChanged,
                (unsigned long) sScene.falseCulls, (unsigned long) sScene.levelVtxOtherMatrix,
@@ -720,8 +703,6 @@ static DKR_HOT s32 sBillboard = FALSE;
 _Static_assert(sizeof(GfxTriVert) == 32, "GfxTriVert must be exactly one SH4 cache line");
 _Static_assert(__builtin_offsetof(GfxVertex, clip) == 32, "GfxVertex hot fields must fit one cache line");
 
-static DKR_HOT s32 sVertexBase = 0; // where G_VTX_APPEND vertices land
-
 static DKR_HOT f32 sVpScaleX = N64_SCREEN_W / 2.0f;
 // The sign of a front face's area on screen. A viewport with one axis turned
 // (Mirrored Tracks negates the x scale, src/camera.c) turns every winding with it.
@@ -773,9 +754,6 @@ static DKR_HOT u16 sTileHeight = 0;
 static DKR_HOT u16 sTileUls = 0;   //               the tile's origin within the image
 static DKR_HOT u16 sTileUlt = 0;
 static DKR_HOT u32 sTlutAddr = 0;  // G_LOADTLUT — palette for the CI formats
-
-#define GFX_GEOMETRY_MODE_INIT (G_SHADE | G_SHADING_SMOOTH | G_ZBUFFER)
-static DKR_HOT u32 sGeometryMode = GFX_GEOMETRY_MODE_INIT;
 
 static DKR_HOT u32 sOtherModeH = 0;      // G_SETOTHERMODE_H / G_RDPSETOTHERMODE
 static DKR_HOT u32 sOtherModeL = 0;      // G_SETOTHERMODE_L / G_RDPSETOTHERMODE
@@ -901,8 +879,6 @@ static void tex_hint_store(u32 slot, s32 index) {
 static u32 sTexDecodeBuf[GFX_MAX_TEX_TEXELS];
 static u8 sTexSwizzleBuf[GFX_MAX_TEX_TEXELS * 4]; // worst case: 32bpp
 
-
-static DKR_HOT s32 sTexStateDirty;
 
 // ---------------------------------------------------------------------------
 // Prebuilt textures
@@ -1103,7 +1079,6 @@ void pc_textures_vram_lost(void) {
     memset(sTexHint, 0, sizeof(sTexHint));
     sPrebuiltCount = 0;
     sBundleCount = 0;
-    sTexStateDirty = TRUE;
 }
 
 // Reads a file front to back through one 32 KB buffer: a scene's bundle is
@@ -1512,7 +1487,6 @@ void pc_gfx_invalidate_range(const void *addr, s32 size) {
                 texture_delete(t->handle);
             }
             sTexCache[i] = sTexCache[--sTexCacheCount];
-            sTexStateDirty = TRUE;
             any = TRUE;
         } else {
             i++;
@@ -1915,12 +1889,6 @@ static __attribute__((noinline, cold)) u32 texture_lookup_slow(const u8 *tlut, u
     }
 }
 
-// What texture_lookup() last returned, valid until the display list touches the
-// tile or loads an image. Consecutive batches mostly share a texture, and the
-// lookup is not free. A new frame starts dirty so that each texture's first use
-// in a frame goes through the lookup, which is what stamps it as recently used.
-static DKR_HOT s32 sTexStateDirty = TRUE;
-
 /**
  * Perspective divide plus the viewport map — the last thing the RSP does before
  * handing a vertex to the RDP. Only ever called on clipped vertices, so w is
@@ -1940,10 +1908,10 @@ static DKR_HOT u8 sCcConst[4]; // otherwise, the constant it always produces
 static DKR_HOT s32 sCcFast;
 
 /**
- * The geometric half: perspective divide, viewport map and fog. Depends only on
- * RSP state (matrices, viewport, fog registers, geometry mode), all of which is
- * settled by the time the vertex is loaded — so this is what gets hoisted to
- * G_VTX time and cached in the GfxVertex.
+ * The geometric half: perspective divide and viewport map. Depends only on
+ * RSP state (matrices, viewport), all of which is settled by the time the
+ * vertex is loaded — so this is what gets hoisted to G_VTX time and cached in
+ * the GfxVertex.
  *
  * w is guaranteed >= GFX_NEAR_W by every caller, which is what makes the fsrra
  * reciprocal safe (it is defined for positive inputs only).
@@ -1961,23 +1929,8 @@ static void project_geom(const GfxVertex *v, f32 *sx, f32 *sy, f32 *sz, f32 *sw,
     // clip guarantees this is >= GFX_NEAR_W, so it is safe to multiply back by.
     *sw = v->clip[3];
 
-    // Fog: the RSP's own formula, ndc_z * mul + ofs, clamped to a byte. The
-    // geometry mode gates it — material_set() sets and clears G_FOG per material,
-    // and clears it whenever a material wants vertex alpha instead, because the
-    // RSP keeps the fog factor in the shade-alpha slot.
-    if (sGeometryMode & G_FOG) {
-        f32 fog = (ndcZ * (f32) sFogMul) + (f32) sFogOfs;
-
-        if (fog < 0.0f) {
-            fog = 0.0f;
-        }
-        if (fog > 255.0f) {
-            fog = 255.0f;
-        }
-        *sfog = fog * (1.0f / 255.0f);
-    } else {
-        *sfog = 0.0f;
-    }
+    // Nothing on this path sets G_FOG any more: fog is the PVR's table fog.
+    *sfog = 0.0f;
 }
 
 /** Cache the projection into the vertex, or mark it as behind the near plane. */
@@ -2006,12 +1959,6 @@ static DKR_HOT_CODE void apply_texture_filter(void) {
 
     gfx_set_texture_filter(filt == G_TF_POINT);
 }
-
-/**
- * G_TRIN — DKR's polygon command. w1 points at an array of Triangles (vertex
- * indices plus UVs); shade each one from its vertex colours.
- */
-static s32 polygon_blast(const Triangle *tris, s32 count, s32 texEnabled);
 
 // ---------------------------------------------------------------------------
 // The blast path — native rendering for simple G_VTX + G_TRIN batches.
@@ -3196,7 +3143,6 @@ static void debug_view_apply(void) {
     sTexCacheCount = 0;
     pc_nat_materials_forget();
     memset(sTexHint, 0, sizeof(sTexHint));
-    sTexStateDirty = TRUE;
     printf("DEBUG VIEW: mode %d\n", (int) sDebugMode);
 }
 
@@ -3342,7 +3288,6 @@ void pc_frame_begin(void) {
 void pc_frame_list_begin(pvr_list_t list) {
     sCurMatrix = 0;
     sBillboard = FALSE;
-    sVertexBase = 0;
     sTriVertCount = 0;
     sTimgAddr = 0;
     sTexAddr = 0;
@@ -3350,11 +3295,9 @@ void pc_frame_list_begin(pvr_list_t list) {
     sTlutAddr = 0;
     sTileWidth = 0;
     sTileHeight = 0;
-    sTexStateDirty = TRUE;
     sTileUls = 0;
     sTileUlt = 0;
     sOtherModeL = 0;
-    sGeometryMode = GFX_GEOMETRY_MODE_INIT;
     sFadeSkipRect = FALSE;
     sGlareSkipRect = FALSE;
     sGlareOn = sGlareFrame;
