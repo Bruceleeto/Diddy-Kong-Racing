@@ -6,6 +6,7 @@
 #include <aicaflow/dsp.h>
 #include <aicaflow/bank.h>
 #include <aicaflow/codec.h>
+#include <aicaflow/pan.h>
 #include "sfx_manifest.h"
 #include "music_manifest.h"
 #include <fcntl.h>
@@ -1470,28 +1471,10 @@ static uint16_t scaled_pitch(uint16_t base, float scale) {
     return (uint16_t)(((octave & 15) << 11) | fraction);
 }
 
-/* libultra pans with an equal-power pair, left = cos(pi/2 * pan/127) and
- * right = sin(pi/2 * pan/127). AICA's DIPAN attenuates one side in 3 dB steps,
- * so this is the level difference between the sides, 20*log10(tan), rounded to
- * those steps, at most 15: pan 80 is one step, not four as a straight line
- * from the centre gave. */
-static const int8_t sN64PanSteps[128] = {
-    -15, -13, -11, -10,  -9,  -8,  -8,  -7,  -7,  -6,  -6,  -6,  -6,  -5,  -5,  -5,
-     -5,  -4,  -4,  -4,  -4,  -4,  -4,  -4,  -3,  -3,  -3,  -3,  -3,  -3,  -3,  -3,
-     -3,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -2,  -1,  -1,  -1,  -1,
-     -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,   0,   0,   0,   0,   0,   0,   0,
-      0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1,   1,   1,   1,   1,   1,
-      1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   2,   3,
-      3,   3,   3,   3,   3,   3,   3,   3,   4,   4,   4,   4,   4,   4,   4,   5,
-      5,   5,   5,   6,   6,   6,   6,   7,   7,   8,   8,   9,  10,  11,  13,  15
-};
-
+/* libultra pans with an equal-power pair over 0..127; afx_pan_steps rounds
+ * its level difference to DIPAN's 3 dB steps. */
 static uint16_t panned_direct(uint16_t base, unsigned pan) {
-    int steps = base & 0x10 ? -(base & 15) : base & 15;
-    steps += sN64PanSteps[pan & 127];
-    if (steps < -15) steps = -15;
-    if (steps > 15) steps = 15;
-    return (uint16_t)((base & ~31u) | (steps >= 0 ? steps : (0x10 | -steps)));
+    return afx_dipan_add(base, afx_pan_steps(pan & 127, 127));
 }
 
 /* libultra's fxMix is an equal-power crossfade: the wet amount is
