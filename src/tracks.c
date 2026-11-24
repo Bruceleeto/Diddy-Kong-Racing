@@ -415,10 +415,19 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
             }
 
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
+#ifdef TARGET_DC
+            gDPNoOpTag(gTrackDL++, PC_VIEW_SKY_TAG);
+#endif
             if (gCurrentLevelHeader2->skyDome == -1) {
                 trackbg_render_flashy();
             } else if (gSkydomeSegment != NULL) {
+#ifdef TARGET_DC
+                pc_nat_sky(TRUE);
+#endif
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, gSkydomeSegment);
+#ifdef TARGET_DC
+                pc_nat_sky(FALSE);
+#endif
             }
         } else {
             // CORRECCIÓN RADICAL MULTIJUGADOR:
@@ -492,10 +501,19 @@ void render_scene(Gfx **dList, Mtx **mtx, Vertex **vtx, Triangle **tris, s32 upd
             mtx_world_origin(&gTrackDL, &gTrackMtxPtr);
 
             // 🟢 3. Renderizar las nubes 3D idénticas a los jugadores 1, 2 y 3
+#ifdef TARGET_DC
+            gDPNoOpTag(gTrackDL++, PC_VIEW_SKY_TAG);
+#endif
             if (gCurrentLevelHeader2->skyDome == -1) {
                 trackbg_render_flashy();
             } else if (gSkydomeSegment != NULL) {
+#ifdef TARGET_DC
+                pc_nat_sky(TRUE);
+#endif
                 render_object(&gTrackDL, &gTrackMtxPtr, &gTrackVtxPtr, gSkydomeSegment);
+#ifdef TARGET_DC
+                pc_nat_sky(FALSE);
+#endif
             } else {
                 mtx_perspective(&gTrackDL, &gTrackMtxPtr);
                 trackbg_render_gradient();

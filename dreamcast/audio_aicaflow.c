@@ -6,6 +6,7 @@
 #include <aicaflow/dsp.h>
 #include <aicaflow/bank.h>
 #include <aicaflow/codec.h>
+#include <aicaflow/pan.h>
 #include "sfx_manifest.h"
 #include "music_manifest.h"
 #include <fcntl.h>
@@ -161,6 +162,17 @@ static void benchmark_late(const char *what, unsigned id, const afx_instance_sta
 #define benchmark_update(started) ((void)0)
 #endif
 
+/* Activates an instance and folds AICAflow's results into the two that pass:
+ * a full command queue empties by the next update, like a busy driver lock,
+ * and a full instance or channel-map table frees up as sounds end, like the
+ * channels themselves. Callers retry BUSY and make room on NO_CHANNELS. */
+static int activate(afx_asset_t flow, afx_instance_t *instance, const char *what, unsigned id) {
+    int result = benchmark_activate(flow, instance, what, id);
+    if (result == -AFX_IPC_FULL) return -AFX_BUSY;
+    if (result == -AFX_NO_FLOW_SLOTS) return -AFX_NO_CHANNELS;
+    return result;
+}
+
 alignas(32) static const unsigned char firmware[] = {
 #embed "../third_party/aicaflow/firmware/aicaflow.drv"
 };
@@ -228,6 +240,7 @@ extern void sndp_aicaflow_retry_pending(void);
 extern int sndp_aicaflow_bank_pending(uint16_t id);
 extern int sndp_aicaflow_voice_available(void *owner);
 static void apply_sfx_controls(dkr_sfx_slot_t *slot);
+static int sfx_preempt(uint8_t priority);
 static void update_sfx(void);
 static int music_flow_load(const afx_bank_t *bank, const char *directory, uint8_t sequence,
                            afx_asset_t *out_flow);
@@ -306,6 +319,16 @@ static afx_bank_t sChimeBank;
 static afx_asset_t sChimeFlow;
 static afx_instance_t sChime;
 static volatile uint8_t sChimeWanted;
+/* The jingle player's instance and what the game asked of it (jingle_update). */
+static afx_instance_t sJingle;
+static uint8_t sJingleCurrent, sJingleNext, sJingleLoops, sJingleNextLoops;
+static uint8_t sJingleGain = 96, sJingleGainDirty, sJingleStop, sJingleMissing;
+/* Whether a jingle plays or waits: the game asks every frame, so without the lock. */
+static volatile uint8_t sJingleBusy;
+static void jingle_busy_update(void) {
+    __atomic_store_n(&sJingleBusy, sJingle != 0 || sJingleNext != DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
+}
+static void jingle_ended(void);
 
 #if DKR_AICAFLOW_BENCHMARK
 /* Follows one raw sound from trigger to completion: AICAFLOW_TRACE_SOUND=<id>. */
@@ -425,6 +448,7 @@ static void take_ended(void) {
             if (sSfxSlots[i].instance == instance) sfx_ended(&sSfxSlots[i], status);
         if (sMusic && sMusic == instance) music_ended(status);
         if (sChime && sChime == instance) sChime = 0;
+        if (sJingle && sJingle == instance) jingle_ended();
     }
     __atomic_store_n(&sEndedTail, tail, __ATOMIC_RELEASE);
 }
@@ -694,7 +718,7 @@ static void chime_update(void) {
     int result;
     if (!__atomic_load_n(&sChimeWanted, __ATOMIC_ACQUIRE) || __atomic_load_n(&sSceneHeld, __ATOMIC_ACQUIRE))
         return;
-    result = sChimeFlow && !sChime ? afx_instance_activate(sChimeFlow, &sChime) : -AFX_BAD_COMMAND;
+    result = sChimeFlow && !sChime ? activate(sChimeFlow, &sChime, "chime", 0) : -AFX_BAD_COMMAND;
     if (result == -AFX_BUSY) return; /* the next update tries again */
     __atomic_store_n(&sChimeWanted, 0, __ATOMIC_RELEASE);
     if (result) sChime = 0;
@@ -702,6 +726,94 @@ static void chime_update(void) {
 
 void dkr_afx_chime_play(void) {
     __atomic_store_n(&sChimeWanted, 1, __ATOMIC_RELEASE);
+}
+
+/* The jingle player (libultra's second sequence player): ditties such as the
+ * silver coins, the key and the locked doors, and the level's ambient pieces.
+ * It plays beside the song, from the resident jingle flows. As on the N64, a
+ * jingle asked for while another plays starts once that one has ended, and a
+ * stop also drops the one waiting. All but dkr_afx_jingle_playing() hold
+ * the audio lock. */
+
+static void jingle_ended(void) {
+    sJingle = 0;
+    /* An ambient piece loops for ever on the N64; songs cannot loop yet, so
+     * it starts again from the top. */
+    if (sJingleLoops && sJingleNext == DKR_SEQUENCE_NONE && !sJingleStop) {
+        sJingleNext = sJingleCurrent;
+        sJingleNextLoops = 1;
+    }
+    sJingleCurrent = DKR_SEQUENCE_NONE;
+    jingle_busy_update();
+}
+
+/* The audio thread: stops and starts what the game asked for. */
+static void jingle_update(void) {
+    afx_asset_t flow;
+    int result;
+    if (sJingleStop) {
+        if (sJingle && afx_instance_stop(sJingle) == -AFX_BUSY) return;
+        sJingleStop = 0;
+        sJingleLoops = 0; /* the stopped one ends without starting again */
+    }
+    if (sJingle) {
+        if (sJingleGainDirty && !afx_instance_gain(sJingle, sJingleGain)) sJingleGainDirty = 0;
+        return;
+    }
+    if (sJingleNext == DKR_SEQUENCE_NONE || __atomic_load_n(&sSceneHeld, __ATOMIC_ACQUIRE)) return;
+    flow = jingle_flow(sJingleNext);
+    if (!flow) {
+        /* Only the build's jingle bank is resident (MUSIC_JINGLES). */
+        if (sJingleMissing != sJingleNext)
+            printf("DKR AICAFLOW: jingle %u is not resident\n", sJingleNext);
+        sJingleMissing = sJingleNext;
+        sJingleNext = DKR_SEQUENCE_NONE;
+        jingle_busy_update();
+        return;
+    }
+    result = activate(flow, &sJingle, "jingle", sJingleNext);
+    if (result == -AFX_BUSY) return;
+    if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
+        (void)sfx_preempt(UINT8_MAX);
+        return;
+    }
+    if (result) {
+        printf("DKR AICAFLOW: jingle %u activation failed (%d)\n", sJingleNext, result);
+        sJingle = 0;
+    } else {
+        sJingleCurrent = sJingleNext;
+        sJingleLoops = sJingleNextLoops;
+        /* Behind the activation in the same queue, before the first note. */
+        sJingleGainDirty = afx_instance_gain(sJingle, sJingleGain) != 0;
+    }
+    sJingleNext = DKR_SEQUENCE_NONE;
+    jingle_busy_update();
+}
+
+void dkr_afx_jingle_play(uint8_t sequence, int loops) {
+    pc_audio_lock();
+    sJingleNext = sequence;
+    sJingleNextLoops = loops != 0;
+    jingle_busy_update();
+    pc_audio_unlock();
+}
+
+void dkr_afx_jingle_stop(void) {
+    pc_audio_lock();
+    sJingleNext = DKR_SEQUENCE_NONE;
+    if (sJingle) sJingleStop = 1;
+    jingle_busy_update();
+    pc_audio_unlock();
+}
+
+int dkr_afx_jingle_playing(void) {
+    return __atomic_load_n(&sJingleBusy, __ATOMIC_ACQUIRE);
+}
+
+void dkr_afx_jingle_gain(uint8_t gain) {
+    pc_audio_lock();
+    if (sJingleGain != gain) sJingleGain = gain, sJingleGainDirty = 1;
+    pc_audio_unlock();
 }
 
 /* Loads everything the level's audio plan lists and returns only when it is
@@ -1009,7 +1121,7 @@ static int sfx_play(uint16_t id, void *owner, uint8_t priority) {
         dkr_sfx_slot_t *slot = &sSfxSlots[i];
         int result;
         if (slot->instance) continue;
-        result = benchmark_activate(bank->sounds[sound_index].flow, &slot->instance, "sound", id);
+        result = activate(bank->sounds[sound_index].flow, &slot->instance, "sound", id);
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             return sfx_preempt(priority);
         }
@@ -1111,6 +1223,11 @@ void dkr_afx_music_play(uint8_t sequence) {
     if (!dkr_afx_music_prepare(sequence)) {
         __atomic_store_n(&sFailedSequence, DKR_SEQUENCE_NONE, __ATOMIC_RELEASE);
         __atomic_store_n(&sWantedSequence, sequence, __ATOMIC_RELEASE);
+        /* The game sets a song's own tempo just before it plays it. Taken here and
+         * not when the flow starts, so a tempo raised since (the final lap) is
+         * still a raise when the song comes round again. */
+        sAuthoredTempo = __atomic_load_n(&sTempo, __ATOMIC_ACQUIRE);
+        if (!sAuthoredTempo) sAuthoredTempo = 120;
     }
     pc_audio_unlock();
 }
@@ -1354,14 +1471,10 @@ static uint16_t scaled_pitch(uint16_t base, float scale) {
     return (uint16_t)(((octave & 15) << 11) | fraction);
 }
 
+/* libultra pans with an equal-power pair over 0..127; afx_pan_steps rounds
+ * its level difference to DIPAN's 3 dB steps. */
 static uint16_t panned_direct(uint16_t base, unsigned pan) {
-    int steps = base & 0x10 ? -(base & 15) : base & 15;
-    int delta = ((int)pan - 64) * 15;
-    delta = delta >= 0 ? (delta + 31) / 63 : (delta - 31) / 63;
-    steps += delta;
-    if (steps < -15) steps = -15;
-    if (steps > 15) steps = 15;
-    return (uint16_t)((base & ~31u) | (steps >= 0 ? steps : (0x10 | -steps)));
+    return afx_dipan_add(base, afx_pan_steps(pan & 127, 127));
 }
 
 /* libultra's fxMix is an equal-power crossfade: the wet amount is
@@ -1443,6 +1556,7 @@ void dkr_afx_update(void) {
     update_sfx();
     sndp_aicaflow_retry_pending();
     chime_update();
+    jingle_update();
     wanted = __atomic_load_n(&sWantedSequence, __ATOMIC_ACQUIRE);
 
     if (sMusic) {
@@ -1465,11 +1579,7 @@ void dkr_afx_update(void) {
         wanted != __atomic_load_n(&sFailedSequence, __ATOMIC_ACQUIRE)) {
         afx_asset_t flow = music_flow_for(wanted);
         int result = flow ? AFX_OK : -AFX_BAD_FORMAT;
-        if (!result) {
-            sAuthoredTempo = __atomic_load_n(&sTempo, __ATOMIC_ACQUIRE);
-            if (!sAuthoredTempo) sAuthoredTempo = 120;
-            result = benchmark_activate(flow, &sMusic, "sequence", wanted);
-        }
+        if (!result) result = activate(flow, &sMusic, "sequence", wanted);
         if (result == -AFX_BUSY) goto done;
         if (result == -AFX_NO_EXEC_BUDGET || result == -AFX_NO_CHANNELS) {
             /* Music is continuous; make room before retrying next update. */
@@ -1485,6 +1595,9 @@ void dkr_afx_update(void) {
         __atomic_fetch_or(&sControlDirty, 3u, __ATOMIC_RELEASE);
         __atomic_fetch_or(&sMuteDirty, 0xffffu, __ATOMIC_RELEASE);
         __atomic_fetch_or(&sVolumeDirty, 0xffffu, __ATOMIC_RELEASE);
+        /* Behind the activation in the same queue: an instance starts at full gain,
+         * and one update later is 33 ms of the song far too loud. */
+        apply_controls();
     }
 done:
 #if DKR_AICAFLOW_BENCHMARK

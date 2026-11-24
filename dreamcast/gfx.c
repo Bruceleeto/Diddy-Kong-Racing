@@ -182,6 +182,7 @@ static int sPendingFreeCount;
 
 static DKR_HOT int sRoute;
 static DKR_HOT int sNatNoFog; // the game has G_FOG off: native headers go without
+static DKR_HOT int sNatMirror; // the viewport is mirrored: clockwise culling becomes anticlockwise
 
 
 // PVR punch-through alpha threshold: a texel with alpha below this is discarded
@@ -209,6 +210,8 @@ static int sWindowW = 320; // the width gfx_window_init was given, for sScaleX
 static void header_cache_clear(void);
 extern void pc_textures_vram_lost(void); // dreamcast/main.c
 extern void pc_scrawl_vram_lost(void);   // dreamcast/scrawl.c
+extern void pc_swirl_vram_lost(void);    // dreamcast/swirl.c
+static unsigned int sFogTableRgb;        // defined with the fog table, below
 
 /**
  * enDjinn restarted the PVR (pc_fsaa_set): every block of video memory is gone.
@@ -228,8 +231,10 @@ static void gfx_vram_lost(void *data) {
     sRenderW = DC_SCREEN_W * enj_video_xscale();
     sScaleX = (float) DC_RENDER_W / (float) sWindowW;
     *((volatile unsigned int *) DKR_PT_ALPHA_REF_ADDR) = PT_ALPHA_REF_VALUE;
+    sFogTableRgb = 0xFFFFFFFFu; // pvr_init set the fog registers itself
     pc_textures_vram_lost();
     pc_scrawl_vram_lost();
+    pc_swirl_vram_lost();
 }
 
 int pc_fsaa_on(void) {
@@ -1587,14 +1592,23 @@ int gfx_texture_opaque(unsigned int handle) {
     return handle != 0 && handle <= MAX_TEXTURES && sTextures[handle - 1].opaque;
 }
 
+void gfx_set_mirror(int mirrored) {
+    sNatMirror = mirrored;
+}
+
 DKR_NAT_CODE void gfx_nat_header(const void *hdr) {
     pvr_poly_hdr_t scissored;
 
     scissor_send();
-    if (sScisEnable || sNatNoFog) {
+    if (sScisEnable || sNatNoFog || sNatMirror) {
         shz_memcpy32(&scissored, hdr, sizeof(scissored));
         if (sScisEnable) {
             scissored.cmd |= PVR_USERCLIP_INSIDE << 16;
+        }
+        // The pack's one-sided mats cull clockwise (dreamcast/build_native_meshes.py);
+        // PVR_CULLING_CW and _CCW differ in the low bit of the field.
+        if (sNatMirror && (scissored.mode1 & (2u << PVR_TA_PM1_CULLING_SHIFT))) {
+            scissored.mode1 ^= 1u << PVR_TA_PM1_CULLING_SHIFT;
         }
         if (sNatNoFog) {
             scissored.mode2 = (scissored.mode2 & ~PVR_TA_PM2_FOG_MASK) | (PVR_FOG_DISABLE << PVR_TA_PM2_FOG_SHIFT);
@@ -1620,6 +1634,13 @@ void gfx_nat_set_fog(int enable) {
 
 int gfx_nat_exact(void) {
     return scissor_needs_exact_clip();
+}
+
+void gfx_nat_scissor_pixels(float out[4]) {
+    out[0] = sScisX0 * sScaleX;
+    out[1] = sScisY0 * sScaleY;
+    out[2] = sScisX1 * sScaleX;
+    out[3] = sScisY1 * sScaleY;
 }
 
 static void nat_exact_vert(const GfxTriVert *s, int eol, float zMul, unsigned int offset) {

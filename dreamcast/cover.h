@@ -32,4 +32,9 @@ void pc_glare_announce(int r, int g, int b, int alpha);
 // follows is a backdrop again, though the view before it has drawn depth.
 #define PC_VIEW_BEGIN_TAG 0xD0CA7F0Au
 
+// Before a view's sky (src/tracks.c render_scene): the depth seen so far is the
+// views' before it, so the sky is a backdrop and not 2D over this view's scene.
+// Unlike PC_VIEW_BEGIN_TAG it announces no gradient polygon.
+#define PC_VIEW_SKY_TAG 0xD0CA7F0Bu
+
 #endif

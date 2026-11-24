@@ -335,6 +335,10 @@ void nat_tag(u32 tag) {
         sViewBackdrop = TRUE;
         return;
     }
+    if (tag == PC_VIEW_SKY_TAG) {
+        sSeenDepth = FALSE;
+        return;
+    }
     rec = pc_nat_record(NAT_REC_TAG);
     if (rec == NULL) {
         return;
